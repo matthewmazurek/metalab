@@ -103,6 +103,7 @@ def _process_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
                 code_hash=operation.code_hash,
                 executor_id="process",
             ),
+            params_resolved=payload.params_resolved,
             tags=record.tags,
             artifacts=capture_data["artifacts"],
         )
@@ -128,6 +129,7 @@ def _process_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
                 code_hash=operation.code_hash,
                 executor_id="process",
             ),
+            params_resolved=payload.params_resolved,
             artifacts=capture_data["artifacts"],
         )
 

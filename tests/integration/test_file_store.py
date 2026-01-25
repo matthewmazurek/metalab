@@ -131,6 +131,7 @@ class TestArtifacts:
             kind="json",
             format="json",
             uri=str(test_file),
+            metadata={"_run_id": "test_run"},  # Required for proper artifact association
         )
 
         store.put_artifact(test_file, descriptor)

@@ -95,6 +95,7 @@ class RunRecord:
         error: Error information (if failed)
 
     Optional fields:
+        params_resolved: The resolved parameter values for this run
         tags: Labels for filtering/grouping
         warnings: Structured warnings from the run
         notes: Freeform notes
@@ -116,6 +117,7 @@ class RunRecord:
     error: dict[str, Any] | None = None
 
     # Optional fields
+    params_resolved: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     warnings: list[dict[str, Any]] = field(default_factory=list)
     notes: str | None = None
@@ -134,6 +136,7 @@ class RunRecord:
         finished_at: datetime | None = None,
         metrics: dict[str, Any] | None = None,
         provenance: Provenance | None = None,
+        params_resolved: dict[str, Any] | None = None,
         tags: list[str] | None = None,
         artifacts: list[ArtifactDescriptor] | None = None,
         notes: str | None = None,
@@ -156,6 +159,7 @@ class RunRecord:
             duration_ms=duration,
             metrics=metrics or {},
             provenance=provenance or Provenance(),
+            params_resolved=params_resolved or {},
             tags=tags or [],
             artifacts=artifacts or [],
             notes=notes,
@@ -177,6 +181,7 @@ class RunRecord:
         error_traceback: str | None = None,
         metrics: dict[str, Any] | None = None,
         provenance: Provenance | None = None,
+        params_resolved: dict[str, Any] | None = None,
         tags: list[str] | None = None,
         artifacts: list[ArtifactDescriptor] | None = None,
     ) -> RunRecord:
@@ -203,6 +208,7 @@ class RunRecord:
                 "message": error_message,
                 "traceback": error_traceback,
             },
+            params_resolved=params_resolved or {},
             tags=tags or [],
             artifacts=artifacts or [],
         )
@@ -220,6 +226,7 @@ class RunRecord:
         finished_at: datetime | None = None,
         metrics: dict[str, Any] | None = None,
         provenance: Provenance | None = None,
+        params_resolved: dict[str, Any] | None = None,
         tags: list[str] | None = None,
     ) -> RunRecord:
         """Factory method to create a cancelled RunRecord."""
@@ -240,5 +247,6 @@ class RunRecord:
             duration_ms=duration,
             metrics=metrics or {},
             provenance=provenance or Provenance(),
+            params_resolved=params_resolved or {},
             tags=tags or [],
         )

@@ -5,19 +5,19 @@ Run the optimization benchmark experiment.
 Usage:
     # Light test (quick verification)
     uv run python examples/optbench/run.py --intensity light
-    
+
     # Medium stress test
     uv run python examples/optbench/run.py --intensity medium --workers 8
-    
+
     # Heavy stress test (warning: many runs)
     uv run python examples/optbench/run.py --intensity heavy --workers 16
-    
+
     # Extreme stress test (finding breaking points)
     uv run python examples/optbench/run.py --intensity extreme --workers 32
-    
+
     # Targeted investigation
     uv run python examples/optbench/run.py --targeted adam rosenbrock
-    
+
     # Random hyperparameter search
     uv run python examples/optbench/run.py --random --n-trials 200
 
@@ -43,6 +43,7 @@ from examples.optbench.experiment import (
 # Check for rich availability
 try:
     from rich.console import Console
+
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -114,7 +115,8 @@ def main() -> None:
         help="Count runs without executing",
     )
     parser.add_argument(
-        "-y", "--yes",
+        "-y",
+        "--yes",
         action="store_true",
         help="Skip confirmation prompt for large experiments",
     )
@@ -123,27 +125,32 @@ def main() -> None:
 
     # Setup console for output
     console = Console() if HAS_RICH and not args.no_rich else None
-    
+
     def print_msg(msg: str, style: str = "") -> None:
         if console:
             console.print(msg)
         else:
             # Strip rich markup for plain output
             import re
-            plain = re.sub(r'\[/?[^\]]+\]', '', msg)
+
+            plain = re.sub(r"\[/?[^\]]+\]", "", msg)
             print(plain)
 
     # Build experiment
     if args.targeted:
         algorithm, problem = args.targeted
-        print_msg(f"Building targeted experiment: [cyan]{algorithm}[/cyan] on [cyan]{problem}[/cyan]")
+        print_msg(
+            f"Building targeted experiment: [cyan]{algorithm}[/cyan] on [cyan]{problem}[/cyan]"
+        )
         exp = build_targeted_experiment(
             algorithm=algorithm,
             problem=problem,
             replicates=args.replicates or 10,
         )
     elif args.random:
-        print_msg(f"Building random search experiment with [cyan]{args.n_trials}[/cyan] trials")
+        print_msg(
+            f"Building random search experiment with [cyan]{args.n_trials}[/cyan] trials"
+        )
         exp = build_random_search_experiment(
             n_trials=args.n_trials,
             replicates=args.replicates or 3,
@@ -217,7 +224,9 @@ def main() -> None:
     # Save results table
     df = result.table(as_dataframe=True)
     if not df.empty:
-        csv_path = f"{args.store}/results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_path = (
+            f"{args.store}/results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
         df.to_csv(csv_path, index=False)
         print_msg(f"\n[dim]Results saved to: {csv_path}[/dim]")
 

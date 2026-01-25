@@ -131,6 +131,7 @@ class TestDumpRunRecord:
             duration_ms=60000,
             metrics={"accuracy": 0.95, "loss": 0.05},
             provenance=Provenance(code_hash="abc123"),
+            params_resolved={"learning_rate": 0.01, "batch_size": 32},
             tags=["test", "example"],
         )
 
@@ -140,6 +141,7 @@ class TestDumpRunRecord:
         assert restored.run_id == record.run_id
         assert restored.status == record.status
         assert restored.metrics == record.metrics
+        assert restored.params_resolved == record.params_resolved
         assert restored.tags == record.tags
 
     def test_dump_includes_schema_version(self):

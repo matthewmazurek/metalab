@@ -125,6 +125,7 @@ class ThreadExecutor:
                     code_hash=operation.code_hash,
                     executor_id="thread",
                 ),
+                params_resolved=payload.params_resolved,
                 tags=record.tags,
                 artifacts=capture_data["artifacts"],
             )
@@ -151,6 +152,7 @@ class ThreadExecutor:
                     code_hash=operation.code_hash if operation else None,
                     executor_id="thread",
                 ),
+                params_resolved=payload.params_resolved,
                 artifacts=capture_data["artifacts"],
             )
 
