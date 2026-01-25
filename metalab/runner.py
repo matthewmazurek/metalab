@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
+    from metalab.capture.output import OutputCapture
     from metalab.progress import Progress
 
 from metalab._ids import (
@@ -214,6 +215,7 @@ def run(
     max_workers: int = 4,
     resume: bool = True,
     progress: bool | Progress = False,
+    capture_output: "bool | OutputCapture | None" = None,
     on_event: Callable[[Event], None] | None = None,
 ) -> Results:
     """
@@ -231,6 +233,10 @@ def run(
             - False: No progress display (default)
             - True: Auto-detect best progress display
             - Progress(...): Custom progress configuration
+        capture_output: Output capture configuration. Can be:
+            - None/False: No output capture (default)
+            - True: Auto-detect based on progress setting
+            - OutputCapture(...): Custom capture configuration
         on_event: Optional event callback (in addition to progress tracker).
 
     Returns:
@@ -249,6 +255,20 @@ def run(
             ),
         )
 
+        # Capture and suppress output (clean progress bar)
+        result = metalab.run(
+            exp,
+            progress=True,
+            capture_output=metalab.OutputCapture.suppress(),
+        )
+
+        # Capture output and route through console
+        result = metalab.run(
+            exp,
+            progress=True,
+            capture_output=True,  # Auto-detects: console mode with progress
+        )
+
         # Access individual runs
         run = result[0]
         print(run.metrics)
@@ -257,6 +277,7 @@ def run(
         # Export results
         result.to_csv("./output/results.csv")
     """
+    from metalab.capture.output import OutputCapture, normalize_output_capture
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
 
@@ -265,21 +286,6 @@ def run(
         store = f"./runs/{experiment.name}"
     if isinstance(store, str):
         store = FileStore(store)
-
-    # Resolve executor
-    if isinstance(executor, str):
-        if executor == "threads":
-            executor = ThreadExecutor(
-                max_workers=max_workers,
-                operation=experiment.operation,
-                context_builder=experiment.context_builder or DefaultContextBuilder(),
-            )
-        elif executor == "processes":
-            from metalab.executor.process import ProcessExecutor
-
-            executor = ProcessExecutor(max_workers=max_workers)
-        else:
-            raise ValueError(f"Unknown executor type: {executor}")
 
     # Resolve progress configuration
     progress_tracker = None
@@ -302,6 +308,32 @@ def run(
             display_metrics=progress.display_metrics,
         )
         emit_progress = True
+
+    # Normalize output capture configuration
+    output_capture_config = normalize_output_capture(
+        capture_output,
+        has_progress=emit_progress,
+    )
+
+    # Get console from progress tracker for output routing
+    console = progress_tracker.get_console() if progress_tracker else None
+
+    # Resolve executor
+    if isinstance(executor, str):
+        if executor == "threads":
+            executor = ThreadExecutor(
+                max_workers=max_workers,
+                operation=experiment.operation,
+                context_builder=experiment.context_builder or DefaultContextBuilder(),
+                output_capture=output_capture_config,
+                console=console,
+            )
+        elif executor == "processes":
+            from metalab.executor.process import ProcessExecutor
+
+            executor = ProcessExecutor(max_workers=max_workers)
+        else:
+            raise ValueError(f"Unknown executor type: {executor}")
 
     # Combine event handlers
     def combined_event_handler(event: Event) -> None:

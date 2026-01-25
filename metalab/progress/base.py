@@ -201,6 +201,15 @@ class ProgressTracker(Protocol):
     def __exit__(self, *args: Any) -> None:
         """Exit the context (cleanup display)."""
         ...
+    
+    def get_console(self) -> Any | None:
+        """
+        Get the rich Console instance if available.
+        
+        Used by OutputCapture to route output through the progress display.
+        Returns None if the tracker doesn't use rich.
+        """
+        ...
 
 
 class SimpleProgressTracker:
@@ -328,3 +337,7 @@ class SimpleProgressTracker:
         print(f"  Success: {self.completed}")
         print(f"  Failed: {self.failed}")
         print(f"  Skipped: {self.skipped}")
+
+    def get_console(self) -> Any | None:
+        """Simple tracker doesn't use rich, returns None."""
+        return None

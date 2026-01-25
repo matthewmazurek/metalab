@@ -83,6 +83,7 @@ class RichProgressTracker:
         self.start_time = time.time()
 
         self.console = console or Console()
+        self._owns_console = console is None  # Track if we created the console
         
         # Main progress bar
         self.progress = Progress(
@@ -262,3 +263,7 @@ class RichProgressTracker:
             title="Execution Complete",
             border_style="green",
         ))
+
+    def get_console(self) -> Console:
+        """Get the rich Console instance for output routing."""
+        return self.console

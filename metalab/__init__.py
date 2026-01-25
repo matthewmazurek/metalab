@@ -35,6 +35,7 @@ __version__ = "0.1.0"
 
 # Capture / Runtime
 from metalab.capture import Capture
+from metalab.capture.output import OutputCapture
 
 # Context
 from metalab.context import (
@@ -123,6 +124,7 @@ __all__ = [
     "seeds",
     # Capture / Runtime
     "Capture",
+    "OutputCapture",
     "Runtime",
     "CancellationToken",
     "CancelledError",
