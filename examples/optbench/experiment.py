@@ -157,12 +157,11 @@ def resolve_params(context_meta: dict[str, Any], raw_params: dict[str, Any]) -> 
 
 @metalab.operation(name="optbench_run")
 def run_optimization(
-    context: Any,
     params: dict[str, Any],
     seeds: metalab.SeedBundle,
     capture: metalab.Capture,
-    runtime: metalab.Runtime | None = None,
-) -> metalab.RunRecord:
+    runtime: metalab.Runtime,
+) -> None:
     """
     Run a single optimization benchmark.
     
@@ -171,6 +170,9 @@ def run_optimization(
     - Captures metrics at configurable step intervals
     - Saves artifacts (convergence curve, final solution)
     - Handles failures gracefully
+    
+    Note: Only the parameters you need are required in the signature.
+    metalab uses signature inspection to inject only what's requested.
     """
     # Extract params
     algorithm_name = params["algorithm"]
@@ -355,13 +357,12 @@ def run_optimization(
     report_text = "\n".join(report_lines)
     
     # Write report to temp file and capture
-    if runtime:
-        report_path = runtime.scratch_dir / "report.txt"
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(report_text)
-        capture.file("report", report_path, kind="text")
-    
-    return metalab.RunRecord.success()
+    report_path = runtime.scratch_dir / "report.txt"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report_text)
+    capture.file("report", report_path, kind="text")
+
+    # No return needed - success is implicit
 
 
 # =============================================================================

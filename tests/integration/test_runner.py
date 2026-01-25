@@ -26,10 +26,10 @@ def simple_operation(
     seeds: metalab.SeedBundle,
     runtime: metalab.Runtime,
     capture: metalab.Capture,
-) -> metalab.RunRecord:
+) -> None:
     """Simple operation that captures a metric."""
     capture.metric("result", params["x"] * 2)
-    return metalab.RunRecord.success()
+    # No return needed - success is implicit
 
 
 @metalab.operation(name="failing_op", version="1.0")

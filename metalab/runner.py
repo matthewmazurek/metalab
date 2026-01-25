@@ -14,6 +14,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Callable
 
+if TYPE_CHECKING:
+    from metalab.progress import Progress
+
 from metalab._ids import (
     compute_run_id,
     fingerprint_context,
@@ -24,7 +27,7 @@ from metalab.context import DefaultContextBuilder
 from metalab.events import Event, EventEmitter, EventKind
 from metalab.executor.payload import RunPayload
 from metalab.executor.thread import ThreadExecutor
-from metalab.result import ResultHandle
+from metalab.result import Results
 from metalab.store.file import FileStore
 from metalab.types import Status
 
@@ -72,7 +75,7 @@ class Runner:
         self._progress = progress
         self._emitter = EventEmitter(on_event)
 
-    def run(self, experiment: Experiment) -> ResultHandle:
+    def run(self, experiment: Experiment) -> Results:
         """
         Run an experiment.
 
@@ -80,7 +83,7 @@ class Runner:
             experiment: The experiment to run.
 
         Returns:
-            ResultHandle for accessing results.
+            Results for accessing runs and artifacts.
         """
         # Get context fingerprint
         ctx_fp = fingerprint_context(experiment.context)
@@ -93,10 +96,16 @@ class Runner:
         for param_case in experiment.params:
             # Resolve params if resolver is provided
             if experiment.param_resolver is not None:
-                resolved_params = experiment.param_resolver.resolve(
-                    {},  # context_meta - could be enhanced
-                    param_case.params,
-                )
+                resolver = experiment.param_resolver
+                # Support both protocol (with .resolve method) and plain callable
+                if hasattr(resolver, "resolve"):
+                    resolved_params = resolver.resolve(
+                        {},  # context_meta - could be enhanced
+                        param_case.params,
+                    )
+                else:
+                    # Plain callable: (context_meta, params_raw) -> params_resolved
+                    resolved_params = resolver({}, param_case.params)
             else:
                 resolved_params = param_case.params
 
@@ -195,7 +204,7 @@ class Runner:
                     if existing:
                         records.append(existing)
 
-        return ResultHandle(store=self._store, records=records)
+        return Results(store=self._store, records=records)
 
 
 def run(
@@ -204,9 +213,9 @@ def run(
     executor: str | Executor = "threads",
     max_workers: int = 4,
     resume: bool = True,
-    progress: bool = False,
+    progress: bool | Progress = False,
     on_event: Callable[[Event], None] | None = None,
-) -> ResultHandle:
+) -> Results:
     """
     Run an experiment.
 
@@ -218,22 +227,39 @@ def run(
         executor: Executor type or instance (default: "threads").
         max_workers: Number of workers for built-in executors.
         resume: Skip existing successful runs (default: True).
-        progress: Emit progress events (default: False).
-        on_event: Optional event callback.
+        progress: Progress display configuration. Can be:
+            - False: No progress display (default)
+            - True: Auto-detect best progress display
+            - Progress(...): Custom progress configuration
+        on_event: Optional event callback (in addition to progress tracker).
 
     Returns:
-        ResultHandle for accessing results.
+        Results for accessing runs and artifacts.
 
     Example:
+        # Simple progress
+        result = metalab.run(exp, progress=True)
+
+        # Custom progress display
         result = metalab.run(
-            experiment,
-            executor="threads",
-            max_workers=8,
-            resume=True,
-            progress=True,
+            exp,
+            progress=metalab.Progress(
+                title="Gene Perturbation",
+                display_metrics=["gene", "perturbation_value:>8.0f"],
+            ),
         )
-        print(result.table())
+
+        # Access individual runs
+        run = result[0]
+        print(run.metrics)
+        artifact = run.artifact("summary")
+
+        # Export results
+        result.to_csv("./output/results.csv")
     """
+    from metalab.progress import Progress as ProgressConfig
+    from metalab.progress import create_progress_tracker
+
     # Resolve store - default to ./runs/{experiment.name} for clean organization
     if store is None:
         store = f"./runs/{experiment.name}"
@@ -255,16 +281,85 @@ def run(
         else:
             raise ValueError(f"Unknown executor type: {executor}")
 
+    # Resolve progress configuration
+    progress_tracker = None
+    emit_progress = False
+
+    if progress is True:
+        # Auto-detect best progress tracker
+        progress_tracker = create_progress_tracker(
+            total=0,  # Will be updated when we know total
+            title=experiment.name,
+            style="auto",
+        )
+        emit_progress = True
+    elif isinstance(progress, ProgressConfig):
+        # Use provided configuration
+        progress_tracker = create_progress_tracker(
+            total=0,
+            title=progress.title or experiment.name,
+            style=progress.style,
+            display_metrics=progress.display_metrics,
+        )
+        emit_progress = True
+
+    # Combine event handlers
+    def combined_event_handler(event: Event) -> None:
+        if progress_tracker is not None:
+            progress_tracker(event)
+        if on_event is not None:
+            on_event(event)
+
+    effective_on_event = combined_event_handler if (progress_tracker or on_event) else None
+
     # Create runner and run
     runner = Runner(
         store=store,
         executor=executor,
         resume=resume,
-        progress=progress,
-        on_event=on_event,
+        progress=emit_progress,
+        on_event=effective_on_event,
     )
 
     try:
-        return runner.run(experiment)
+        if progress_tracker is not None:
+            with progress_tracker:
+                return runner.run(experiment)
+        else:
+            return runner.run(experiment)
     finally:
         executor.shutdown()
+
+
+def load_results(
+    path: str,
+    experiment_id: str | None = None,
+) -> Results:
+    """
+    Load results from a store path.
+
+    Use this to load results from a previous experiment run.
+
+    Args:
+        path: Path to the store directory (e.g., "./runs/my_experiment").
+        experiment_id: Optional filter by experiment ID.
+
+    Returns:
+        Results containing the loaded runs.
+
+    Example:
+        # Load all results from a store
+        results = metalab.load_results("./runs/gene_perturbation")
+
+        # Access runs
+        for run in results:
+            print(run.metrics)
+
+        # Load artifact from a specific run
+        artifact = results[0].artifact("summary")
+
+        # Filter and export
+        results.successful.to_csv("./successful_runs.csv")
+    """
+    store = FileStore(path)
+    return Results.from_store(store, experiment_id=experiment_id)

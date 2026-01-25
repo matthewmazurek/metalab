@@ -31,7 +31,11 @@ class OperationWrapper:
     - Metadata (name, version)
     - Consistent interface
     - Code hash for provenance
+    - Automatic signature inspection (only inject requested parameters)
     """
+
+    # Valid parameter names that can be injected
+    INJECTABLE_PARAMS = {"context", "params", "seeds", "runtime", "capture"}
 
     def __init__(
         self,
@@ -51,6 +55,18 @@ class OperationWrapper:
         self._name = name
         self._version = version or "0.0.0"
         self._code_hash: str | None = None
+
+        # Inspect signature to determine which parameters to inject
+        sig = inspect.signature(func)
+        self._param_names = set(sig.parameters.keys())
+
+        # Validate that all requested parameters are valid
+        invalid = self._param_names - self.INJECTABLE_PARAMS
+        if invalid:
+            raise ValueError(
+                f"Operation '{name}' has invalid parameter(s): {invalid}. "
+                f"Valid parameters are: {self.INJECTABLE_PARAMS}"
+            )
 
         # Preserve function metadata
         functools.update_wrapper(self, func)
@@ -92,6 +108,13 @@ class OperationWrapper:
         """
         Execute the operation.
 
+        Only injects parameters that the function signature requests.
+        This allows operations to declare only the parameters they need:
+
+            @metalab.operation(name="my_op")
+            def my_op(params, seeds, capture):  # Only request what you need
+                ...
+
         Args:
             context: The frozen context.
             params: The resolved parameters.
@@ -102,13 +125,17 @@ class OperationWrapper:
         Returns:
             A RunRecord describing the run outcome.
         """
-        return self._func(
-            context=context,
-            params=params,
-            seeds=seeds,
-            runtime=runtime,
-            capture=capture,
-        )
+        # Build kwargs with only the parameters the function requests
+        available = {
+            "context": context,
+            "params": params,
+            "seeds": seeds,
+            "runtime": runtime,
+            "capture": capture,
+        }
+        kwargs = {k: v for k, v in available.items() if k in self._param_names}
+
+        return self._func(**kwargs)
 
     def __call__(
         self,
@@ -143,8 +170,14 @@ def operation(
     """
     Decorator to mark a function as a metalab operation.
 
-    The decorated function should have the signature:
-        def my_op(context, params, seeds, runtime, capture) -> RunRecord
+    The decorated function can request any subset of these parameters:
+        - context: The frozen context (shared read-only data)
+        - params: The resolved parameters for this run
+        - seeds: The seed bundle for reproducible randomness
+        - runtime: Runtime context (scratch dir, resource hints)
+        - capture: Interface for recording metrics and artifacts
+
+    Only include the parameters your operation needs—unused ones can be omitted.
 
     Args:
         name: The operation name (used in experiment_id).
@@ -154,13 +187,19 @@ def operation(
         A decorator that wraps the function in an OperationWrapper.
 
     Example:
+        # Minimal signature - only what you need
         @metalab.operation(name="pi_mc", version="1.0")
-        def estimate_pi(context, params, seeds, runtime, capture):
+        def estimate_pi(params, seeds, capture):
             n = params["n_samples"]
             rng = seeds.numpy()
-            # ... computation ...
+            x, y = rng.random(n), rng.random(n)
+            pi_est = 4.0 * (x**2 + y**2 <= 1).mean()
             capture.metric("pi_estimate", pi_est)
-            return RunRecord.success()
+
+        # Full signature also works
+        @metalab.operation(name="full_op")
+        def full_operation(context, params, seeds, runtime, capture):
+            ...
     """
 
     def decorator(func: F) -> OperationWrapper:
