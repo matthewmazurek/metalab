@@ -1,0 +1,73 @@
+"""
+Experiment: Container for experiment configuration.
+
+An Experiment bundles together:
+- Operation to run
+- Context specification
+- Parameter source
+- Seed plan
+- Optional resolver and builder
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from metalab.context.builder import ContextBuilder
+    from metalab.context.spec import ContextSpec
+    from metalab.operation import OperationWrapper
+    from metalab.params.resolver import ParamResolver
+    from metalab.params.source import ParamSource
+    from metalab.seeds.plan import SeedPlan
+
+
+@dataclass
+class Experiment:
+    """
+    Container for experiment configuration.
+
+    An Experiment defines what to run and how:
+    - name/version: Identifies the experiment
+    - operation: The computation to perform
+    - context: Shared data/configuration
+    - params: Parameter sweep definition
+    - seeds: Seed plan for replication
+
+    Example:
+        exp = Experiment(
+            name="pi_mc",
+            version="0.1",
+            context=EmptyContextSpec(),
+            operation=pi_monte_carlo,
+            params=grid(n_samples=[1000, 10000]),
+            seeds=seeds(base=42, replicates=3),
+            tags=["example", "monte_carlo"],
+        )
+    """
+
+    name: str
+    version: str
+    context: ContextSpec
+    operation: OperationWrapper
+    params: ParamSource
+    seeds: SeedPlan
+    tags: list[str] = field(default_factory=list)
+    context_builder: ContextBuilder | None = None
+    param_resolver: ParamResolver | None = None
+
+    @property
+    def experiment_id(self) -> str:
+        """
+        The experiment identifier.
+
+        Format: "{name}:{version}"
+        """
+        return f"{self.name}:{self.version}"
+
+    def __repr__(self) -> str:
+        return (
+            f"Experiment(name={self.name!r}, version={self.version!r}, "
+            f"params={self.params!r}, seeds={self.seeds!r})"
+        )

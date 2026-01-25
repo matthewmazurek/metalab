@@ -1,0 +1,146 @@
+"""
+Store protocol: Backend-agnostic persistence interface.
+
+The Store abstraction covers:
+- Run records (append/query)
+- Artifacts (write/read)
+- Logs (optional)
+
+Backend implementations can be:
+- Filesystem (FileStore)
+- S3/GCS object store
+- MLflow/W&B adapter
+- Database + blob store
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Protocol
+
+from metalab.types import ArtifactDescriptor, RunRecord
+
+
+class Store(Protocol):
+    """
+    Protocol for storage backends.
+
+    A Store persists RunRecords and artifacts. Implementations must
+    provide atomic writes and handle concurrent access safely.
+    """
+
+    # Run record operations
+
+    def put_run_record(self, record: RunRecord) -> None:
+        """
+        Persist a run record.
+
+        Args:
+            record: The RunRecord to store.
+        """
+        ...
+
+    def get_run_record(self, run_id: str) -> RunRecord | None:
+        """
+        Retrieve a run record by ID.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            The RunRecord, or None if not found.
+        """
+        ...
+
+    def list_run_records(self, experiment_id: str | None = None) -> list[RunRecord]:
+        """
+        List run records, optionally filtered by experiment.
+
+        Args:
+            experiment_id: Optional filter by experiment ID.
+
+        Returns:
+            List of matching RunRecords.
+        """
+        ...
+
+    def run_exists(self, run_id: str) -> bool:
+        """
+        Check if a run record exists.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            True if the run exists.
+        """
+        ...
+
+    # Artifact operations
+
+    def put_artifact(
+        self,
+        data: bytes | Path,
+        descriptor: ArtifactDescriptor,
+    ) -> ArtifactDescriptor:
+        """
+        Store an artifact.
+
+        Args:
+            data: The artifact data (bytes or path to file).
+            descriptor: Metadata about the artifact.
+
+        Returns:
+            Updated descriptor with final URI.
+        """
+        ...
+
+    def get_artifact(self, uri: str) -> bytes:
+        """
+        Retrieve artifact data.
+
+        Args:
+            uri: The artifact URI.
+
+        Returns:
+            The artifact data as bytes.
+        """
+        ...
+
+    def list_artifacts(self, run_id: str) -> list[ArtifactDescriptor]:
+        """
+        List artifacts for a run.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            List of artifact descriptors.
+        """
+        ...
+
+    # Optional log operations
+
+    def put_log(self, run_id: str, name: str, content: str) -> None:
+        """
+        Store a log file for a run.
+
+        Args:
+            run_id: The run identifier.
+            name: The log name (e.g., "stdout", "stderr").
+            content: The log content.
+        """
+        ...
+
+    def get_log(self, run_id: str, name: str) -> str | None:
+        """
+        Retrieve a log file.
+
+        Args:
+            run_id: The run identifier.
+            name: The log name.
+
+        Returns:
+            The log content, or None if not found.
+        """
+        ...
