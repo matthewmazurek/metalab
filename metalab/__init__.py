@@ -81,6 +81,7 @@ from metalab.params import (
 
 # Progress (optional rich support)
 from metalab.progress import (
+    MetricDisplay,
     ProgressTracker,
     SimpleProgressTracker,
     create_progress_tracker,
@@ -166,6 +167,7 @@ __all__ = [
     "ProcessExecutor",
     "RunPayload",
     # Progress
+    "MetricDisplay",
     "ProgressTracker",
     "SimpleProgressTracker",
     "create_progress_tracker",

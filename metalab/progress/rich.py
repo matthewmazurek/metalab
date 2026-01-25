@@ -26,6 +26,8 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
+from metalab.progress.base import MetricDisplay, normalize_display_metrics
+
 if TYPE_CHECKING:
     from metalab.events import Event
 
@@ -53,7 +55,7 @@ class RichProgressTracker:
         title: str = "Experiment",
         show_recent: int = 5,
         console: Console | None = None,
-        display_metrics: list[str] | None = None,
+        display_metrics: list[str | MetricDisplay] | None = None,
     ) -> None:
         """
         Initialize the rich progress tracker.
@@ -63,13 +65,15 @@ class RichProgressTracker:
             title: Title for the progress display.
             show_recent: Number of recent events to show.
             console: Rich console instance (created if None).
-            display_metrics: List of metric names to display in recent activity.
-                If None, only duration is shown. Metrics are displayed in order.
+            display_metrics: Metrics to display in recent activity. Accepts:
+                - Strings: "metric_name" or "metric_name:format_spec"
+                - MetricDisplay instances for full control
+                If None, only duration is shown.
         """
         self.total = total
         self.title = title
         self.show_recent = show_recent
-        self.display_metrics = display_metrics or []
+        self._display_metrics = normalize_display_metrics(display_metrics)
         
         self.completed = 0
         self.failed = 0
@@ -169,19 +173,11 @@ class RichProgressTracker:
         parts = [f"{duration_ms}ms"]
         
         # Add configured metrics if available
-        for metric_name in self.display_metrics:
-            if metric_name in metrics:
-                value = metrics[metric_name]
-                if isinstance(value, float):
-                    # Use scientific notation for very small/large values
-                    if abs(value) < 0.001 or abs(value) > 10000:
-                        parts.append(f"{metric_name}={value:.2e}")
-                    else:
-                        parts.append(f"{metric_name}={value:.4g}")
-                elif isinstance(value, bool):
-                    parts.append(f"{metric_name}={'✓' if value else '✗'}")
-                else:
-                    parts.append(f"{metric_name}={value}")
+        for metric in self._display_metrics:
+            if metric.name in metrics:
+                value = metrics[metric.name]
+                formatted = metric.format_value(value)
+                parts.append(f"{metric.label}={formatted}")
         
         return " | ".join(parts)
 

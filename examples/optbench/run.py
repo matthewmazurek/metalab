@@ -194,12 +194,15 @@ def main() -> None:
     print_msg(f"Resume: {not args.no_resume}")
 
     # Create progress tracker using metalab API
+    # Demonstrates custom metric formatting:
+    # - "best_f:.2f" uses format spec for 2 decimal places
+    # - "converged" uses default bool formatting (✓/✗)
     progress_style = "simple" if args.no_rich else "auto"
     tracker = metalab.create_progress_tracker(
         total=n_runs,
         title=f"{exp.name} ({args.intensity})" if not args.targeted else f"{exp.name}",
         style=progress_style,
-        display_metrics=["best_f", "converged"],
+        display_metrics=["best_f:.2f", "converged"],
     )
 
     # Run experiment with progress tracker

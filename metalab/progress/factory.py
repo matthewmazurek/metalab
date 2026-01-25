@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from metalab.progress.base import ProgressTracker, SimpleProgressTracker
+from metalab.progress.base import MetricDisplay, ProgressTracker, SimpleProgressTracker
 
 if TYPE_CHECKING:
     pass
@@ -16,7 +16,7 @@ def create_progress_tracker(
     total: int = 0,
     title: str = "Experiment",
     style: Literal["auto", "rich", "simple"] = "auto",
-    display_metrics: list[str] | None = None,
+    display_metrics: list[str | MetricDisplay] | None = None,
     **kwargs,
 ) -> ProgressTracker:
     """
@@ -32,9 +32,10 @@ def create_progress_tracker(
             - "auto": Use rich if available, otherwise simple
             - "rich": Use rich (raises ImportError if not available)
             - "simple": Use simple text output
-        display_metrics: List of metric names to display in recent activity.
-            For example, ["best_f", "converged"] will show these metrics
-            alongside the run duration. If None, only duration is shown.
+        display_metrics: Metrics to display in recent activity. Accepts:
+            - Strings: "metric_name" or "metric_name:format_spec"
+            - MetricDisplay instances for full control over formatting
+            If None, only duration is shown.
         **kwargs: Additional arguments passed to the tracker.
     
     Returns:
@@ -50,16 +51,32 @@ def create_progress_tracker(
         # Force simple output
         tracker = create_progress_tracker(total=100, style="simple")
         
-        # Display specific metrics in progress
+        # Display specific metrics with default formatting
         tracker = create_progress_tracker(
             total=100,
-            title="Optimization",
             display_metrics=["best_f", "converged"],
         )
         
-        # Use with metalab.run
-        with create_progress_tracker(total=n_runs) as tracker:
-            result = metalab.run(exp, on_event=tracker, progress=False)
+        # Display metrics with custom format specs
+        tracker = create_progress_tracker(
+            total=100,
+            display_metrics=[
+                "best_f:.2f",      # 2 decimal places
+                "loss:>8.2e",      # Right-align, 8 chars, scientific notation
+                "converged",       # Default bool formatting (✓/✗)
+            ],
+        )
+        
+        # Full control with MetricDisplay
+        from metalab.progress import MetricDisplay
+        
+        tracker = create_progress_tracker(
+            total=100,
+            display_metrics=[
+                MetricDisplay("best_f", format=".2f", label="best"),
+                MetricDisplay("converged", formatter=lambda v: "yes" if v else "no"),
+            ],
+        )
     """
     if style == "simple":
         return SimpleProgressTracker(

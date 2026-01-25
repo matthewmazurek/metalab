@@ -6,7 +6,7 @@ Falls back to simple text output if rich is not installed.
 
 Example:
     import metalab
-    from metalab.progress import create_progress_tracker
+    from metalab.progress import create_progress_tracker, MetricDisplay
 
     exp = build_experiment()
     
@@ -16,9 +16,23 @@ Example:
     # Option 2: Create tracker manually for more control
     with create_progress_tracker(total=100, title="My Experiment") as tracker:
         result = metalab.run(exp, on_event=tracker, progress=False)
+    
+    # Option 3: Custom metric formatting
+    tracker = create_progress_tracker(
+        total=100,
+        display_metrics=[
+            "best_f:.2f",                       # Format spec in string
+            MetricDisplay("loss", format=".4e", label="L"),
+        ],
+    )
 """
 
-from metalab.progress.base import ProgressTracker, SimpleProgressTracker
+from metalab.progress.base import (
+    MetricDisplay,
+    ProgressTracker,
+    SimpleProgressTracker,
+    normalize_display_metrics,
+)
 from metalab.progress.factory import create_progress_tracker
 
 # Conditionally export RichProgressTracker
@@ -30,9 +44,11 @@ except ImportError:
     HAS_RICH = False
 
 __all__ = [
+    "MetricDisplay",
     "ProgressTracker",
     "SimpleProgressTracker",
     "RichProgressTracker",
     "create_progress_tracker",
+    "normalize_display_metrics",
     "HAS_RICH",
 ]
