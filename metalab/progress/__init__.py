@@ -9,26 +9,27 @@ Example:
     from metalab.progress import create_progress_tracker, MetricDisplay
 
     exp = build_experiment()
-    
-    # Option 1: Use with metalab.run() directly
-    result = metalab.run(exp, progress="rich")  # or progress="simple" or progress=True
-    
-    # Option 2: Create tracker manually for more control
+
+    # Option 1: Simple boolean (auto-detects rich)
+    result = metalab.run(exp, progress=True)
+
+    # Option 2: Progress config object for customization
+    result = metalab.run(
+        exp,
+        progress=metalab.Progress(
+            title="My Experiment",
+            display_metrics=["best_f:.2f", "converged"],
+        ),
+    )
+
+    # Option 3: Create tracker manually for full control
     with create_progress_tracker(total=100, title="My Experiment") as tracker:
         result = metalab.run(exp, on_event=tracker, progress=False)
-    
-    # Option 3: Custom metric formatting
-    tracker = create_progress_tracker(
-        total=100,
-        display_metrics=[
-            "best_f:.2f",                       # Format spec in string
-            MetricDisplay("loss", format=".4e", label="L"),
-        ],
-    )
 """
 
 from metalab.progress.base import (
     MetricDisplay,
+    Progress,
     ProgressTracker,
     SimpleProgressTracker,
     normalize_display_metrics,
@@ -45,6 +46,7 @@ except ImportError:
 
 __all__ = [
     "MetricDisplay",
+    "Progress",
     "ProgressTracker",
     "SimpleProgressTracker",
     "RichProgressTracker",

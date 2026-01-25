@@ -9,10 +9,44 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from metalab.events import Event
+
+
+@dataclass
+class Progress:
+    """
+    Configuration for progress display during experiment execution.
+
+    Pass this to `metalab.run()` for customized progress tracking without
+    needing to manually create and wire up a progress tracker.
+
+    Attributes:
+        title: Title for the progress display (defaults to experiment name).
+        style: Progress style: "auto" (detect rich), "rich", or "simple".
+        display_metrics: Metrics to show in progress output. Accepts:
+            - Strings: "metric_name" or "metric_name:format_spec"
+            - MetricDisplay instances for full control
+
+    Example:
+        # Simple progress
+        result = metalab.run(exp, progress=True)
+
+        # Customized progress
+        result = metalab.run(
+            exp,
+            progress=metalab.Progress(
+                title="Gene Perturbation",
+                display_metrics=["gene", "perturbation_value:>8.0f"],
+            ),
+        )
+    """
+
+    title: str | None = None
+    style: Literal["auto", "rich", "simple"] = "auto"
+    display_metrics: list[str | "MetricDisplay"] | None = None
 
 
 @dataclass

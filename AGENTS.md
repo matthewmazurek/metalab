@@ -19,7 +19,7 @@ Backends (execution + storage) are pluggable. Domain logic stays in user Operati
 - Core orchestration must remain backend-agnostic.
 
 ## Dev environment (uv)
-- Python: 3.13
+- Python: 3.11+
 - Install: `uv sync`
 - Test: `uv run pytest`
 

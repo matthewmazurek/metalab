@@ -8,11 +8,12 @@ This module provides the two-tier context model:
 
 from metalab.context.builder import ContextBuilder, DefaultContextBuilder
 from metalab.context.provider import ContextProvider, DefaultContextProvider
-from metalab.context.spec import ContextSpec, FrozenContext
+from metalab.context.spec import ContextSpec, FrozenContext, context_spec
 
 __all__ = [
     "ContextSpec",
     "FrozenContext",
+    "context_spec",
     "ContextBuilder",
     "DefaultContextBuilder",
     "ContextProvider",

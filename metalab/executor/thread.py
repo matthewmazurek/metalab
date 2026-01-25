@@ -103,6 +103,10 @@ class ThreadExecutor:
                 capture=capture,
             )
 
+            # Handle None return as success (no return needed from operations)
+            if record is None:
+                record = RunRecord.success()
+
             # Finalize capture (even on success)
             capture_data = capture.finalize()
 

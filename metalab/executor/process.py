@@ -82,6 +82,10 @@ def _process_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
             capture=capture,
         )
 
+        # Handle None return as success (no return needed from operations)
+        if record is None:
+            record = RunRecord.success()
+
         # Finalize capture
         capture_data = capture.finalize()
 

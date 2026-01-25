@@ -39,8 +39,8 @@ class Capture:
 
             # Capture a file you generated
             capture.file("plot", "/tmp/plot.png", kind="image")
-
-            return RunRecord.success()
+            
+            # No return needed - success is implicit
     """
 
     def __init__(
@@ -227,6 +227,70 @@ class Capture:
         self._artifacts.append(descriptor)
 
         return descriptor
+
+    def figure(
+        self,
+        name: str,
+        fig: Any,
+        *,
+        format: str = "png",
+        dpi: int = 150,
+        bbox_inches: str = "tight",
+        metadata: dict[str, Any] | None = None,
+        close: bool = True,
+    ) -> ArtifactDescriptor:
+        """
+        Capture a matplotlib figure as an image artifact.
+
+        This is a convenience method that handles saving the figure to a
+        temporary file and capturing it, eliminating boilerplate.
+
+        Args:
+            name: The artifact name.
+            fig: A matplotlib Figure object.
+            format: Image format (default: "png"). Options: png, pdf, svg, jpg.
+            dpi: Resolution in dots per inch (default: 150).
+            bbox_inches: Bounding box (default: "tight").
+            metadata: Additional metadata to attach.
+            close: Whether to close the figure after saving (default: True).
+
+        Returns:
+            The ArtifactDescriptor for the saved artifact.
+
+        Example:
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots()
+            ax.plot([1, 2, 3], [1, 4, 9])
+            ax.set_title("My Plot")
+
+            capture.figure("my_plot", fig)  # Saves and closes figure
+        """
+        # Ensure artifact directory exists
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate path for the figure
+        fig_path = self._artifact_dir / f"{name}.{format}"
+
+        # Save the figure
+        fig.savefig(fig_path, dpi=dpi, bbox_inches=bbox_inches, format=format)
+
+        # Optionally close the figure
+        if close:
+            try:
+                import matplotlib.pyplot as plt
+
+                plt.close(fig)
+            except ImportError:
+                pass  # matplotlib not available, skip closing
+
+        # Capture as file
+        return self.file(
+            name=name,
+            path=fig_path,
+            kind="image",
+            metadata=metadata,
+        )
 
     def log(self, text_or_event: str | dict[str, Any]) -> None:
         """

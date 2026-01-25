@@ -37,18 +37,19 @@ class EmptyContextSpec:
 
 @metalab.operation(name="pi_mc")
 def pi_monte_carlo(
-    context: Any,  # intentionally unused in this example
     params: dict[str, Any],
     seeds: metalab.SeedBundle,
     capture: metalab.Capture,
-    runtime: metalab.Runtime | None = None,
-) -> metalab.RunRecord:
+) -> None:
     """
     Estimate π by sampling points uniformly in [0,1]^2.
 
     Params:
       - n_samples: int
       - store_points: bool (optional)
+    
+    Note: Only the parameters you need are required in the signature.
+    metalab uses signature inspection to inject only what's requested.
     """
     n = int(params["n_samples"])
     store_points = bool(params.get("store_points", False))
@@ -83,8 +84,7 @@ def pi_monte_carlo(
             metadata={"n_samples": n},
         )
 
-    # Return a small RunRecord (framework can also populate many fields automatically).
-    return metalab.RunRecord.success()
+    # No return needed - success is implicit
 
 
 def build_experiment() -> metalab.Experiment:

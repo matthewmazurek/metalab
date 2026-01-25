@@ -15,9 +15,8 @@ Example:
         n = params["n_samples"]
         rng = seeds.numpy()
         x, y = rng.random(n), rng.random(n)
-        pi_est = 4.0 * (x*x + y*y <= 1).mean()
+        pi_est = 4.0 * (x**2 + y**2 <= 1).mean()
         capture.metric("pi_estimate", pi_est)
-        return metalab.RunRecord.success()
 
     exp = metalab.Experiment(
         name="pi_mc",
@@ -28,7 +27,7 @@ Example:
         seeds=metalab.seeds(base=42, replicates=3),
     )
 
-    result = metalab.run(exp, store="./runs")
+    result = metalab.run(exp)  # stores in ./runs/pi_mc by default
     print(result.table())
 """
 
@@ -45,6 +44,7 @@ from metalab.context import (
     DefaultContextBuilder,
     DefaultContextProvider,
     FrozenContext,
+    context_spec,
 )
 
 # Events
@@ -82,6 +82,7 @@ from metalab.params import (
 # Progress (optional rich support)
 from metalab.progress import (
     MetricDisplay,
+    Progress,
     ProgressTracker,
     SimpleProgressTracker,
     create_progress_tracker,
@@ -89,10 +90,10 @@ from metalab.progress import (
 from metalab.progress.display import display_results
 
 # Result
-from metalab.result import ResultHandle
+from metalab.result import Results, ResultHandle, Run
 
 # High-level run facade
-from metalab.runner import run
+from metalab.runner import load_results, run
 from metalab.runtime import CancellationToken, CancelledError, Runtime
 
 # Seeds
@@ -148,6 +149,7 @@ __all__ = [
     # Context
     "ContextSpec",
     "FrozenContext",
+    "context_spec",
     "ContextBuilder",
     "ContextProvider",
     "DefaultContextBuilder",
@@ -155,9 +157,12 @@ __all__ = [
     # Experiment
     "Experiment",
     # Result
-    "ResultHandle",
+    "Results",
+    "ResultHandle",  # Backward compatibility alias
+    "Run",
     # Run
     "run",
+    "load_results",
     # Store
     "Store",
     "FileStore",
@@ -168,6 +173,7 @@ __all__ = [
     "RunPayload",
     # Progress
     "MetricDisplay",
+    "Progress",
     "ProgressTracker",
     "SimpleProgressTracker",
     "create_progress_tracker",
