@@ -23,16 +23,16 @@ def main() -> None:
 
     # Run with a very small surface area.
     # Under the hood this should construct:
-    # - FileStore at ./runs
+    # - FileStore at ./runs/pi_mc (derived from experiment name)
     # - ThreadExecutor(max_workers=8)
     # - Runner(resume=True, progress=True)
     result = metalab.run(
         exp,
-        store="./runs",
         executor="threads",
         max_workers=8,
         resume=True,
         progress=True,
+        # store=... (defaults to ./runs/{experiment.name})
         # on_event=... (optional)
     )
 

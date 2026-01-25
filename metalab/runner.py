@@ -200,7 +200,7 @@ class Runner:
 
 def run(
     experiment: Experiment,
-    store: str | Store = "./runs",
+    store: str | Store | None = None,
     executor: str | Executor = "threads",
     max_workers: int = 4,
     resume: bool = True,
@@ -214,7 +214,7 @@ def run(
 
     Args:
         experiment: The experiment to run.
-        store: Store path or instance (default: "./runs").
+        store: Store path or instance. If None, defaults to "./runs/{experiment.name}".
         executor: Executor type or instance (default: "threads").
         max_workers: Number of workers for built-in executors.
         resume: Skip existing successful runs (default: True).
@@ -227,7 +227,6 @@ def run(
     Example:
         result = metalab.run(
             experiment,
-            store="./runs",
             executor="threads",
             max_workers=8,
             resume=True,
@@ -235,7 +234,9 @@ def run(
         )
         print(result.table())
     """
-    # Resolve store
+    # Resolve store - default to ./runs/{experiment.name} for clean organization
+    if store is None:
+        store = f"./runs/{experiment.name}"
     if isinstance(store, str):
         store = FileStore(store)
 
