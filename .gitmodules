@@ -1,0 +1,3 @@
+[submodule "metalab-atlas"]
+	path = metalab-atlas
+	url = ./metalab-atlas

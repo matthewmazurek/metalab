@@ -13,4 +13,4 @@ wheels/
 runs/
 
 # Nested projects (separate git repos)
-metalab-atlas/
+# metalab-atlas/

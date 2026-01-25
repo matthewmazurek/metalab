@@ -202,7 +202,7 @@ def main() -> None:
         total=n_runs,
         title=f"{exp.name} ({args.intensity})" if not args.targeted else f"{exp.name}",
         style=progress_style,
-        display_metrics=["best_f:.2f", "converged"],
+        display_metrics=["best_f:>10.2e", "converged"],
     )
 
     # Run experiment with progress tracker
