@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Purpose
-metalab is a general experiment runner: (FrozenContext, Params, SeedBundle) -> RunRecord + Artifacts.
+metalab is a general experiment runner: (ContextSpec, Params, SeedBundle) -> RunRecord + Artifacts.
 Backends (execution + storage) are pluggable. Domain logic stays in user Operations.
 
 ## Non-goals
@@ -10,7 +10,8 @@ Backends (execution + storage) are pluggable. Domain logic stays in user Operati
 - No hard dependency on distributed frameworks
 
 ## Core invariants (do not break)
-- Context is treated as read-only; operations must not mutate it.
+- ContextSpec is a lightweight, serializable manifest (paths, config, checksums).
+- Operations receive the context spec directly and load data themselves.
 - Params inputs are immutable; resolve/derive into new objects.
 - All randomness must be controlled via SeedBundle.
 - run_id is stable and derived from experiment + context + params + seed fingerprints.
@@ -31,8 +32,7 @@ Backends (execution + storage) are pluggable. Domain logic stays in user Operati
 ## Contracts
 - Operation.run(context, params, seeds, runtime, capture) -> RunRecord
 - ParamSource.iter() -> ParamCase(params, case_id, tags?)
-- ContextBuilder.build(ContextSpec) -> FrozenContext
-- Executor.submit(payload) -> Future; Executor.gather(futures) -> [RunRecord]
+- Executor.submit(payload) -> RunHandle
 - Store.put_run_record(record); Store.put_artifact(...) -> ArtifactDescriptor
 - Capture.metric(s)/artifact/file/log
 

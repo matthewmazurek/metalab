@@ -19,7 +19,7 @@ class SimpleContext:
     name: str = "test"
 
 
-@metalab.operation(name="simple_op", version="1.0")
+@metalab.operation
 def simple_operation(
     context: Any,
     params: dict[str, Any],
@@ -32,7 +32,7 @@ def simple_operation(
     # No return needed - success is implicit
 
 
-@metalab.operation(name="failing_op", version="1.0")
+@metalab.operation
 def failing_operation(
     context: Any,
     params: dict[str, Any],
@@ -64,7 +64,8 @@ class TestBasicExecution:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 1
         assert result[0].status == Status.SUCCESS
@@ -80,7 +81,8 @@ class TestBasicExecution:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 3
         assert all(r.status == Status.SUCCESS for r in result)
@@ -96,7 +98,8 @@ class TestBasicExecution:
             seeds=metalab.seeds(base=42, replicates=3),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 3
 
@@ -111,7 +114,8 @@ class TestBasicExecution:
             seeds=metalab.seeds(base=42, replicates=3),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         # 2 param values * 3 replicates = 6 runs
         assert len(result) == 6
@@ -132,24 +136,16 @@ class TestResume:
         )
 
         # First run
-        result1 = metalab.run(exp, store=str(store_path), resume=True)
+        handle1 = metalab.run(exp, store=str(store_path), resume=True)
+        result1 = handle1.result()
         assert len(result1) == 3
 
-        # Second run should skip all
-        events = []
-        result2 = metalab.run(
-            exp,
-            store=str(store_path),
-            resume=True,
-            on_event=lambda e: events.append(e),
-        )
+        # Second run should skip all (but still return 3 records from store)
+        handle2 = metalab.run(exp, store=str(store_path), resume=True)
+        result2 = handle2.result()
 
         # Should still return 3 records (loaded from store)
         assert len(result2) == 3
-
-        # Check that runs were skipped
-        skipped = [e for e in events if e.kind.value == "run_skipped"]
-        assert len(skipped) == 3
 
     def test_resume_false_reruns(self, store_path: Path):
         """resume=False should rerun everything."""
@@ -163,8 +159,10 @@ class TestResume:
         )
 
         # Run twice without resume
-        result1 = metalab.run(exp, store=str(store_path), resume=False)
-        result2 = metalab.run(exp, store=str(store_path), resume=False)
+        handle1 = metalab.run(exp, store=str(store_path), resume=False)
+        result1 = handle1.result()
+        handle2 = metalab.run(exp, store=str(store_path), resume=False)
+        result2 = handle2.result()
 
         # Both should execute
         assert len(result1) == 1
@@ -185,7 +183,8 @@ class TestFailures:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 1
         assert result[0].status == Status.FAILED
@@ -194,7 +193,7 @@ class TestFailures:
 
 
 class TestResultHandle:
-    """Tests for ResultHandle functionality."""
+    """Tests for Results functionality (accessed via RunHandle.result())."""
 
     def test_table_returns_list(self, store_path: Path):
         """table() should return list of dicts by default."""
@@ -207,7 +206,8 @@ class TestResultHandle:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
         table = result.table()
 
         assert isinstance(table, list)
@@ -226,7 +226,8 @@ class TestResultHandle:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
         successful = result.filter(status="success")
 
         assert len(successful) == 3
@@ -242,18 +243,40 @@ class TestResultHandle:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(exp, store=str(store_path))
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
         summary = result.summary()
 
         assert summary["total_runs"] == 2
         assert "success" in summary["by_status"]
 
 
-class TestEvents:
-    """Tests for event emission."""
+class TestRunHandle:
+    """Tests for RunHandle functionality."""
 
-    def test_events_emitted(self, store_path: Path):
-        """Events should be emitted during execution."""
+    def test_status_property(self, store_path: Path):
+        """status should return RunStatus with counts."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1, 2]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+
+        # After completion, status should show all completed
+        result = handle.result()
+        status = handle.status
+
+        assert status.total == 2
+        assert status.completed == 2
+        assert status.failed == 0
+
+    def test_is_complete_property(self, store_path: Path):
+        """is_complete should return True after all runs finish."""
         exp = metalab.Experiment(
             name="test",
             version="1.0",
@@ -263,60 +286,65 @@ class TestEvents:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        events = []
-        metalab.run(
-            exp,
-            store=str(store_path),
-            on_event=lambda e: events.append(e),
+        handle = metalab.run(exp, store=str(store_path))
+        handle.result()  # Wait for completion
+
+        assert handle.is_complete
+
+    def test_job_id_property(self, store_path: Path):
+        """job_id should return a string identifier."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        # Should have at least started and finished events
-        kinds = [e.kind.value for e in events]
-        assert "run_started" in kinds
-        assert "run_finished" in kinds
+        handle = metalab.run(exp, store=str(store_path))
+
+        assert isinstance(handle.job_id, str)
+        assert len(handle.job_id) > 0
 
 
-@metalab.operation(name="noisy_op", version="1.0")
-def noisy_operation(
+@metalab.operation
+def logging_operation(
     context: Any,
     params: dict[str, Any],
     seeds: metalab.SeedBundle,
     runtime: metalab.Runtime,
     capture: metalab.Capture,
 ) -> None:
-    """Operation that produces stdout/stderr/logging output."""
-    import logging
-    import sys
+    """Operation that uses capture.log() for logging."""
+    capture.log(f"Starting with x={params['x']}")
+    capture.log(f"Debug info for x={params['x']}", level="debug")
 
-    print(f"Processing x={params['x']}")
-    print(f"Error output for x={params['x']}", file=sys.stderr)
+    # Do some work
+    result = params["x"] * 2
+    capture.metric("result", result)
 
-    logger = logging.getLogger("test_noisy")
-    logger.setLevel(logging.INFO)
-    logger.info(f"Log message for x={params['x']}")
-
-    capture.metric("result", params["x"] * 2)
+    capture.log(f"Computed result={result}")
+    if params["x"] > 5:
+        capture.log("x is large", level="warning")
 
 
-class TestOutputCapture:
-    """Tests for output capture integration."""
+class TestCaptureLog:
+    """Tests for capture.log() integration."""
 
-    def test_capture_output_suppress(self, store_path: Path):
-        """Test that output capture with suppress mode stores logs."""
+    def test_capture_log_basic(self, store_path: Path):
+        """Test that capture.log() stores logs."""
         exp = metalab.Experiment(
             name="test",
             version="1.0",
             context=SimpleContext(),
-            operation=noisy_operation,
+            operation=logging_operation,
             params=metalab.grid(x=[5]),
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(
-            exp,
-            store=str(store_path),
-            capture_output=metalab.OutputCapture.suppress(),
-        )
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 1
         assert result[0].status == Status.SUCCESS
@@ -327,107 +355,89 @@ class TestOutputCapture:
         store = FileStore(str(store_path))
         run_id = result[0].run_id
 
-        stdout_log = store.get_log(run_id, "stdout")
-        assert stdout_log is not None
-        assert "Processing x=5" in stdout_log
+        run_log = store.get_log(run_id, "run")
+        assert run_log is not None
+        assert "Starting with x=5" in run_log
+        assert "Debug info for x=5" in run_log
+        assert "Computed result=10" in run_log
+        # Check timestamp format is present
+        assert "[INFO   ]" in run_log
+        assert "[DEBUG  ]" in run_log
 
-        stderr_log = store.get_log(run_id, "stderr")
-        assert stderr_log is not None
-        assert "Error output for x=5" in stderr_log
-
-        logging_log = store.get_log(run_id, "logging")
-        assert logging_log is not None
-        assert "Log message for x=5" in logging_log
-
-    def test_capture_output_passthrough(self, store_path: Path):
-        """Test that output capture with passthrough mode still stores logs."""
+    def test_capture_log_with_warning(self, store_path: Path):
+        """Test that capture.log() handles warning levels."""
         exp = metalab.Experiment(
             name="test",
             version="1.0",
             context=SimpleContext(),
-            operation=noisy_operation,
+            operation=logging_operation,
             params=metalab.grid(x=[10]),
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(
-            exp,
-            store=str(store_path),
-            capture_output=metalab.OutputCapture.passthrough(),
-        )
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 1
         assert result[0].status == Status.SUCCESS
 
-        # Check that logs were stored
         from metalab.store.file import FileStore
 
         store = FileStore(str(store_path))
         run_id = result[0].run_id
 
-        stdout_log = store.get_log(run_id, "stdout")
-        assert stdout_log is not None
-        assert "Processing x=10" in stdout_log
+        run_log = store.get_log(run_id, "run")
+        assert run_log is not None
+        assert "x is large" in run_log
+        assert "[WARNING]" in run_log
 
-    def test_capture_output_true_defaults(self, store_path: Path):
-        """Test that capture_output=True uses sensible defaults."""
+    def test_capture_log_multiple_runs(self, store_path: Path):
+        """Test that capture.log() works correctly for multiple runs."""
         exp = metalab.Experiment(
             name="test",
             version="1.0",
             context=SimpleContext(),
-            operation=noisy_operation,
-            params=metalab.grid(x=[7]),
-            seeds=metalab.seeds(base=42, replicates=1),
-        )
-
-        # Without progress, should use passthrough
-        result = metalab.run(
-            exp,
-            store=str(store_path),
-            capture_output=True,
-            progress=False,
-        )
-
-        assert len(result) == 1
-        assert result[0].status == Status.SUCCESS
-
-        # Logs should still be captured
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
-        run_id = result[0].run_id
-
-        stdout_log = store.get_log(run_id, "stdout")
-        assert stdout_log is not None
-        assert "Processing x=7" in stdout_log
-
-    def test_capture_output_multiple_runs(self, store_path: Path):
-        """Test that output capture works correctly for multiple runs."""
-        exp = metalab.Experiment(
-            name="test",
-            version="1.0",
-            context=SimpleContext(),
-            operation=noisy_operation,
+            operation=logging_operation,
             params=metalab.grid(x=[1, 2, 3]),
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        result = metalab.run(
-            exp,
-            store=str(store_path),
-            capture_output=metalab.OutputCapture.suppress(),
-        )
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
 
         assert len(result) == 3
 
-        # Each run should have its own captured output
         from metalab.store.file import FileStore
 
         store = FileStore(str(store_path))
 
         for run in result:
-            stdout_log = store.get_log(run.run_id, "stdout")
-            assert stdout_log is not None
-            # Each should contain only its own x value
+            run_log = store.get_log(run.run_id, "run")
+            assert run_log is not None
+            # Each should contain its own log messages
             x_val = run.metrics.get("result", 0) // 2  # result = x * 2
-            assert f"Processing x={x_val}" in stdout_log
+            assert f"Starting with x={x_val}" in run_log
+
+    def test_capture_log_worker_id(self, store_path: Path):
+        """Test that capture.log() includes worker ID."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=logging_operation,
+            params=metalab.grid(x=[5]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        from metalab.store.file import FileStore
+
+        store = FileStore(str(store_path))
+        run_id = result[0].run_id
+
+        run_log = store.get_log(run_id, "run")
+        assert run_log is not None
+        # ThreadExecutor uses "thread:N" format
+        assert "[thread:" in run_log

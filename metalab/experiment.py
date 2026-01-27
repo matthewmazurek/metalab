@@ -3,10 +3,10 @@ Experiment: Container for experiment configuration.
 
 An Experiment bundles together:
 - Operation to run
-- Context specification
+- Context specification (lightweight manifest)
 - Parameter source
 - Seed plan
-- Optional resolver and builder
+- Optional resolver
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from metalab.context.builder import ContextBuilder
     from metalab.context.spec import ContextSpec
     from metalab.operation import OperationWrapper
     from metalab.params.resolver import ParamResolver
@@ -30,8 +29,9 @@ class Experiment:
 
     An Experiment defines what to run and how:
     - name/version: Identifies the experiment
+    - description: Optional human-readable description
     - operation: The computation to perform
-    - context: Shared data/configuration
+    - context: Shared configuration (lightweight spec)
     - params: Parameter sweep definition
     - seeds: Seed plan for replication
 
@@ -39,7 +39,8 @@ class Experiment:
         exp = Experiment(
             name="pi_mc",
             version="0.1",
-            context=EmptyContextSpec(),
+            description="Estimate pi using Monte Carlo sampling",
+            context={},  # or a @context_spec decorated class
             operation=pi_monte_carlo,
             params=grid(n_samples=[1000, 10000]),
             seeds=seeds(base=42, replicates=3),
@@ -53,8 +54,8 @@ class Experiment:
     operation: OperationWrapper
     params: ParamSource
     seeds: SeedPlan
+    description: str | None = None
     tags: list[str] = field(default_factory=list)
-    context_builder: ContextBuilder | None = None
     param_resolver: ParamResolver | None = None
 
     @property
@@ -67,7 +68,8 @@ class Experiment:
         return f"{self.name}:{self.version}"
 
     def __repr__(self) -> str:
+        desc = f", description={self.description!r}" if self.description else ""
         return (
-            f"Experiment(name={self.name!r}, version={self.version!r}, "
+            f"Experiment(name={self.name!r}, version={self.version!r}{desc}, "
             f"params={self.params!r}, seeds={self.seeds!r})"
         )

@@ -28,7 +28,7 @@ import metalab
 from metalab import ProcessExecutor
 
 # =============================================================================
-# Test Functions
+# Test Functions (simplified from benchmark.py)
 # =============================================================================
 
 
@@ -40,16 +40,9 @@ class TestFunction:
     fn: Callable[[np.ndarray], float]
     bounds: tuple[float, float]
     optimum: float = 0.0
-    optimum_x: tuple[float, ...] | None = None  # Known optimal point (None = origin)
 
     def __call__(self, x: np.ndarray) -> float:
         return self.fn(x)
-
-    def optimal_point(self, dim: int) -> np.ndarray:
-        """Return the known optimal point for this function."""
-        if self.optimum_x is None:
-            return np.zeros(dim)  # Default: origin
-        return np.array([self.optimum_x[0]] * dim)
 
 
 def sphere(x: np.ndarray) -> float:
@@ -71,18 +64,14 @@ def rastrigin(x: np.ndarray) -> float:
 
 # Registry of test functions
 PROBLEMS = {
-    "sphere": TestFunction("sphere", sphere, bounds=(-5.12, 5.12), optimum_x=(0.0,)),
-    "rosenbrock": TestFunction(
-        "rosenbrock", rosenbrock, bounds=(-5.0, 10.0), optimum_x=(1.0,)
-    ),
-    "rastrigin": TestFunction(
-        "rastrigin", rastrigin, bounds=(-5.12, 5.12), optimum_x=(0.0,)
-    ),
+    "sphere": TestFunction("sphere", sphere, bounds=(-5.12, 5.12)),
+    "rosenbrock": TestFunction("rosenbrock", rosenbrock, bounds=(-5.0, 10.0)),
+    "rastrigin": TestFunction("rastrigin", rastrigin, bounds=(-5.12, 5.12)),
 }
 
 
 # =============================================================================
-# Optimization Algorithms
+# Optimization Algorithms (simplified)
 # =============================================================================
 
 
@@ -301,47 +290,6 @@ def run_optimization(context, params, seeds, capture):
     capture.metric("iterations", result.iterations)
     capture.metric("optimality_gap", float(result.best_f - problem.optimum))
 
-    # =========================================================================
-    # Additional metrics for radar/heatmap/candlestick visualizations
-    # =========================================================================
-
-    # Convergence rate: slope of log(f) over iterations (more negative = faster)
-    # Useful for radar charts comparing algorithm speed
-    history_arr = np.array(result.history)
-    positive_history = history_arr[history_arr > 1e-10]  # Avoid log(0)
-    if len(positive_history) > 10:
-        log_history = np.log10(positive_history)
-        x_vals = np.arange(len(log_history))
-        slope, _ = np.polyfit(x_vals, log_history, 1)
-        capture.metric("convergence_rate", float(-slope))  # Positive = faster
-    else:
-        capture.metric("convergence_rate", 0.0)
-
-    # Solution distance: Euclidean distance from known optimal point
-    # Useful for radar charts comparing solution quality
-    optimal_x = problem.optimal_point(dim)
-    solution_distance = float(np.linalg.norm(result.best_x - optimal_x))
-    capture.metric("solution_distance", solution_distance)
-
-    # Iterations to threshold: steps to reach f < 0.1 (or max if never reached)
-    # Useful for radar charts comparing convergence speed
-    threshold = 0.1
-    iterations_to_threshold = result.iterations  # Default: didn't reach
-    for i, f in enumerate(result.history):
-        if f < threshold:
-            iterations_to_threshold = i
-            break
-    capture.metric("iterations_to_threshold", iterations_to_threshold)
-
-    # Stability metric: variance of last 10% of iterations
-    # Useful for radar charts comparing algorithm stability
-    last_10_pct = history_arr[int(len(history_arr) * 0.9) :]
-    if len(last_10_pct) > 1:
-        stability = float(np.std(last_10_pct))
-    else:
-        stability = 0.0
-    capture.metric("stability", stability)
-
     # Artifacts
     capture.artifact("convergence_curve", np.array(result.history))
     capture.artifact("solution", result.best_x)
@@ -460,26 +408,8 @@ if __name__ == "__main__":
     print("Atlas Visualization Tips")
     print("=" * 60)
     print("In metalab-atlas, try these visualizations:")
-    print("")
-    print("  SCATTER/LINE:")
-    print("    - metrics.final_f vs params.dim, group by params.algorithm")
-    print("    - convergence_curve artifact as line chart")
-    print("")
-    print("  BAR:")
-    print("    - Compare mean final_f by algorithm")
-    print("    - Compare iterations_to_threshold by problem")
-    print("")
-    print("  HEATMAP:")
-    print("    - params.algorithm × params.problem → metrics.final_f")
-    print("    - params.dim × params.lr → metrics.convergence_rate")
-    print("")
-    print("  RADAR:")
-    print("    - Compare algorithms across metrics:")
-    print(
-        "      convergence_rate, solution_distance, stability, iterations_to_threshold"
-    )
-    print("    - Group by params.algorithm to see multi-dimensional comparison")
-    print("")
-    print("  CANDLESTICK/HISTOGRAM:")
-    print("    - Distribution of final_f across replicates")
-    print("    - Compare variance between algorithms")
+    print("  - Plot: metrics.final_f vs params.dim, group by params.algorithm")
+    print("  - Plot: metrics.final_f vs params.problem, group by params.algorithm")
+    print("  - Compare: algorithms on the same problem")
+    print("  - View: convergence_curve artifact as line chart")
+    print("  - Filter: by converged=true to see successful optimizations")

@@ -297,22 +297,105 @@ class FileStore:
 
     # Log operations
 
-    def put_log(self, run_id: str, name: str, content: str) -> None:
-        """Store a log file for a run."""
-        log_dir = self._root / self.LOGS_DIR / run_id
+    def put_log(
+        self,
+        run_id: str,
+        name: str,
+        content: str,
+        label: str | None = None,
+    ) -> None:
+        """
+        Store a log file for a run.
+
+        Uses flat structure with human-readable filenames:
+        - With label: {label}_{run_id[:8]}_{name}.log
+        - Without label: {run_id}_{name}.log
+        """
+        log_dir = self._root / self.LOGS_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        log_path = log_dir / f"{name}.txt"
+        # Build filename with optional label prefix
+        short_id = run_id[:8]
+        if label:
+            # Sanitize label for filesystem safety
+            safe_label = self._sanitize_label(label)
+            filename = f"{safe_label}_{short_id}_{name}.log"
+        else:
+            filename = f"{run_id}_{name}.log"
+
+        log_path = log_dir / filename
         self._atomic_write(log_path, content.encode("utf-8"))
 
+    @staticmethod
+    def _sanitize_label(label: str) -> str:
+        """Sanitize a label for use in filenames."""
+        import re
+        # Replace any non-alphanumeric chars (except underscore/hyphen) with underscore
+        sanitized = re.sub(r"[^\w\-]", "_", label)
+        # Collapse multiple underscores
+        sanitized = re.sub(r"_+", "_", sanitized)
+        # Trim underscores from ends
+        sanitized = sanitized.strip("_")
+        # Limit length
+        return sanitized[:50] if sanitized else "run"
+
     def get_log(self, run_id: str, name: str) -> str | None:
-        """Retrieve a log file."""
-        log_path = self._root / self.LOGS_DIR / run_id / f"{name}.txt"
+        """
+        Retrieve a log file.
 
-        if not log_path.exists():
-            return None
+        Searches for logs matching the run_id in the flat structure.
+        Handles both new flat format and legacy nested format.
+        """
+        log_dir = self._root / self.LOGS_DIR
+        short_id = run_id[:8]
 
-        return log_path.read_text(encoding="utf-8")
+        # Try new flat format: look for files ending with _{short_id}_{name}.log
+        # or starting with {run_id}_{name}.log
+        for pattern in [f"*_{short_id}_{name}.log", f"{run_id}_{name}.log"]:
+            matches = list(log_dir.glob(pattern))
+            if matches:
+                return matches[0].read_text(encoding="utf-8")
+
+        # Fall back to legacy nested format: {run_id}/{name}.txt
+        legacy_path = log_dir / run_id / f"{name}.txt"
+        if legacy_path.exists():
+            return legacy_path.read_text(encoding="utf-8")
+
+        return None
+
+    def list_logs(self, run_id: str) -> list[str]:
+        """
+        List available log names for a run.
+
+        Returns a list of log names (e.g., ["run", "stdout", "stderr"]).
+        Searches both new flat format and legacy nested format.
+        """
+        log_dir = self._root / self.LOGS_DIR
+        short_id = run_id[:8]
+        log_names: set[str] = set()
+
+        # Search new flat format: *_{short_id}_{name}.log or {run_id}_{name}.log
+        for pattern in [f"*_{short_id}_*.log", f"{run_id}_*.log"]:
+            for log_file in log_dir.glob(pattern):
+                # Extract log name from filename
+                filename = log_file.stem  # Remove .log extension
+                # Pattern: {label}_{short_id}_{name} or {run_id}_{name}
+                if f"_{short_id}_" in filename:
+                    # Extract name after _{short_id}_
+                    name = filename.split(f"_{short_id}_", 1)[-1]
+                    log_names.add(name)
+                elif filename.startswith(f"{run_id}_"):
+                    # Extract name after {run_id}_
+                    name = filename[len(run_id) + 1 :]
+                    log_names.add(name)
+
+        # Search legacy nested format: {run_id}/{name}.txt
+        legacy_dir = log_dir / run_id
+        if legacy_dir.exists() and legacy_dir.is_dir():
+            for log_file in legacy_dir.glob("*.txt"):
+                log_names.add(log_file.stem)
+
+        return sorted(log_names)
 
     # Utility methods
 
@@ -329,10 +412,19 @@ class FileStore:
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
 
-            # Delete logs
-            log_dir = self._root / self.LOGS_DIR / run_id
-            if log_dir.exists():
-                shutil.rmtree(log_dir)
+            # Delete logs - handle both flat and nested formats
+            log_dir = self._root / self.LOGS_DIR
+            short_id = run_id[:8]
+
+            # Delete flat format logs: *_{short_id}_*.log and {run_id}_*.log
+            for pattern in [f"*_{short_id}_*.log", f"{run_id}_*.log"]:
+                for log_file in log_dir.glob(pattern):
+                    log_file.unlink()
+
+            # Delete legacy nested format
+            nested_log_dir = log_dir / run_id
+            if nested_log_dir.exists():
+                shutil.rmtree(nested_log_dir)
 
         # Delete lock file
         lock_path = self._root / self.LOCKS_DIR / f"{run_id}.lock"

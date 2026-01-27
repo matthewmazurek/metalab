@@ -1,19 +1,20 @@
 # metalab
 
-A general experiment runner: `(FrozenContext, Params, SeedBundle) -> RunRecord + Artifacts`
+A general experiment runner: `(Context, Params, SeedBundle) -> RunRecord + Artifacts`
 
 metalab is a lightweight, backend-agnostic framework for running reproducible experiments. Define your experiment logic once, sweep parameters, control randomness, and capture results—all with built-in support for resume, deduplication, and parallel execution.
 
 ## Installation
 
 ```bash
-pip install metalab
+uv add metalab
 
 # With optional dependencies
-pip install metalab[numpy]   # NumPy array serialization
-pip install metalab[pandas]  # DataFrame export
-pip install metalab[rich]    # Progress bars
-pip install metalab[full]    # All of the above
+uv add metalab[numpy]   # NumPy array serialization
+uv add metalab[pandas]  # DataFrame export
+uv add metalab[rich]    # Progress bars
+uv add metalab[slurm]   # SLURM cluster execution
+uv add metalab[full]    # All of the above
 ```
 
 ## Minimal Working Example
@@ -23,7 +24,7 @@ Estimate π using Monte Carlo sampling across different sample sizes with multip
 ```python
 import metalab
 
-@metalab.operation(name="pi_mc", version="0.1")
+@metalab.operation
 def estimate_pi(params, seeds, capture):
     n = params["n_samples"]
     rng = seeds.numpy()
@@ -40,8 +41,9 @@ exp = metalab.Experiment(
     seeds=metalab.seeds(base=42, replicates=3),
 )
 
-result = metalab.run(exp)  # Stores results in ./runs/pi_mc
-print(result.table())
+handle = metalab.run(exp)  # Returns a RunHandle, stores results in ./runs/pi_mc
+results = handle.result()  # Block until complete
+print(results.table())
 ```
 
 This runs 9 experiments (3 sample sizes × 3 replicates) with deterministic random seeds.
@@ -82,8 +84,8 @@ params = metalab.manual([
 Control all randomness through `SeedBundle`:
 
 ```python
-@metalab.operation(name="my_op")
-def my_operation(seeds):
+@metalab.operation
+def my_operation(seeds, capture):
     # Get a NumPy random generator
     rng = seeds.numpy()
     
@@ -93,7 +95,8 @@ def my_operation(seeds):
     # Derive sub-seeds for different components
     model_seed = seeds.derive("model")
     data_seed = seeds.derive("data_split")
-    ...
+    
+    capture.metric("result", rng.random())
 ```
 
 Specify replicates when defining the experiment:
@@ -107,8 +110,10 @@ seeds = metalab.seeds(base=42, replicates=5)  # 5 independent runs per param con
 Record metrics, artifacts, and logs during execution:
 
 ```python
-@metalab.operation(name="train")
+@metalab.operation
 def train(params, seeds, capture):
+    capture.log("Starting training")
+    
     # Scalar metrics
     capture.metric("accuracy", 0.95)
     capture.metric("loss", 0.05)
@@ -119,6 +124,7 @@ def train(params, seeds, capture):
     # Time-series metrics
     for epoch, loss in enumerate(losses):
         capture.metric("train_loss", loss, step=epoch)
+        capture.log(f"Epoch {epoch}: loss={loss:.4f}")
     
     # Artifacts (auto-serialized)
     capture.artifact("predictions", predictions_array)  # NumPy array
@@ -127,8 +133,58 @@ def train(params, seeds, capture):
     # Matplotlib figures
     capture.figure("learning_curve", fig)
     
-    # Log messages
-    capture.log("Training completed successfully")
+    capture.log("Training completed")
+    # No return needed - success is implicit
+```
+
+### Logging
+
+Use `capture.log()` for operation logging. Messages include timestamps, log levels, and worker identification, and are saved to the run's log directory.
+
+```python
+@metalab.operation
+def train(params, seeds, capture):
+    capture.log("Starting training")
+    capture.log(f"Parameters: lr={params['lr']}", level="debug")
+    
+    for epoch in range(params['epochs']):
+        loss = train_epoch(...)
+        capture.log(f"Epoch {epoch}: loss={loss:.4f}")
+        capture.metric("loss", loss, step=epoch)
+    
+    capture.log("Training complete")
+    if loss > threshold:
+        capture.log("Loss above threshold", level="warning")
+```
+
+For long-running operations, enable immediate logging so progress is visible even if the operation fails:
+
+```python
+@metalab.operation
+def long_job(params, seeds, capture):
+    capture.set_immediate_logging(True)  # Write logs as they happen
+    
+    for batch in batches:
+        capture.log(f"Processing batch {batch.id}")
+        process(batch)
+    
+    # Or use immediate=True for specific critical checkpoints:
+    capture.log("Reached checkpoint", immediate=True)
+```
+
+For advanced logging (custom handlers, stream routing), use Python's standard `logging` module directly:
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+@metalab.operation
+def my_operation(params, seeds, capture):
+    # Standard Python logging (goes to console/configured handlers)
+    logger.info("This uses standard Python logging")
+    
+    # capture.log() is stored with the run
+    capture.log("This is saved to the run's log file")
 ```
 
 ### Results API
@@ -136,25 +192,32 @@ def train(params, seeds, capture):
 Query and analyze results:
 
 ```python
-result = metalab.run(exp)
+handle = metalab.run(exp)
+
+# Check status without blocking
+print(handle.status)       # RunStatus(total=9, completed=3, running=6, ...)
+print(handle.is_complete)  # False
+
+# Block until complete and get results
+results = handle.result()
 
 # Access individual runs
-run = result[0]
+run = results[0]
 print(run.metrics)
 artifact = run.artifact("predictions")
 
 # Tabular view
-df = result.table(as_dataframe=True)
+df = results.table(as_dataframe=True)
 
 # Filter runs
-successful = result.successful
-filtered = result.filter(learning_rate=0.01)
+successful = results.successful
+filtered = results.filter(learning_rate=0.01)
 
 # Summary and display
-result.display(group_by=["learning_rate"])
+results.display(group_by=["learning_rate"])
 
 # Export
-result.to_csv("results.csv")
+results.to_csv("results.csv")
 
 # Load previous results
 old_results = metalab.load_results("./runs/my_exp")
@@ -166,45 +229,133 @@ Resume interrupted experiments—completed runs are automatically skipped:
 
 ```python
 # First run: executes all 100 configurations
-result = metalab.run(exp, resume=True)
+results = metalab.run(exp, resume=True).results()
 
 # Second run: skips completed, only runs new/failed
-result = metalab.run(exp, resume=True)
+results = metalab.run(exp, resume=True).results()
 ```
 
 Run IDs are stable hashes derived from experiment + context + params + seed fingerprints, enabling reliable deduplication.
 
-### Progress Display
+### Progress Tracking
 
-Track execution with rich progress bars (requires `rich`):
+Monitor experiment execution with live progress display:
 
 ```python
-result = metalab.run(exp, progress=True)
+# Simple progress bar (auto-detects rich, falls back to text)
+handle = metalab.run(exp, progress=True)
+results = handle.result()  # Shows live progress
+
+# Customized progress display
+handle = metalab.run(
+    exp,
+    progress=metalab.Progress(
+        title="Training Models",
+        display_metrics=["loss:.4f", "accuracy:.2%"],
+    ),
+)
+results = handle.result()
+```
+
+For manual status checking without a progress display:
+
+```python
+handle = metalab.run(exp)
+print(handle.status)       # RunStatus(total=9, completed=3, running=6, ...)
+print(handle.is_complete)  # False
+results = handle.result()  # Block until complete
 ```
 
 ## Advanced Usage
 
-### Custom Context
+### Context Specs
 
-Share read-only data across runs with context specs:
+Share configuration across runs with context specs. The context is a lightweight, serializable manifest that operations receive directly:
 
 ```python
 @metalab.context_spec
 class DataContext:
-    dataset_path: str
+    dataset: metalab.FilePath  # Hash computed lazily at run() time
     vocab_size: int = 10000
+
+@metalab.operation
+def nlp_operation(context, params, capture):
+    # Operations receive the context spec directly
+    # Load data yourself using paths from the context
+    data = load_data(str(context.dataset))
+    capture.metric("vocab_size", context.vocab_size)
 
 exp = metalab.Experiment(
     name="nlp_exp",
-    context=DataContext(dataset_path="data/train.csv"),
-    operation=my_operation,
+    version="0.1",
+    context=DataContext(
+        dataset=metalab.FilePath("data/train.csv"),
+        vocab_size=10000,
+    ),
+    operation=nlp_operation,
     params=metalab.grid(hidden=[64, 128]),
     seeds=metalab.seeds(base=42),
 )
-
-# Fingerprint is auto-computed
-print(exp.context.fingerprint)
 ```
+
+**Key points:**
+- Context specs are lightweight manifests (paths, config, parameters)
+- Use `metalab.FilePath` for files and `metalab.DirPath` for directories—hashes are computed lazily at `run()` time
+- Operations load data themselves using paths from the spec
+- Metadata-based hashing (size, mtime, inode) is O(1) regardless of file size
+- Each run gets a fresh copy of any mutable data (no shared state issues)
+
+### Data Preprocessing
+
+For experiments with expensive preprocessing, run it explicitly before the experiment. The `FilePath` hash is computed lazily at `run()` time, so the file doesn't need to exist when creating the spec:
+
+```python
+from pathlib import Path
+import scanpy as sc
+
+@metalab.context_spec
+class SingleCellSpec:
+    data: metalab.FilePath  # Hash computed at run() time
+    min_genes: int = 200
+    n_hvg: int = 2000
+
+def preprocess_data(raw_path: str, spec: SingleCellSpec):
+    """Run this once before the experiment."""
+    cache_path = str(spec.data)  # FilePath supports str() and os.fspath()
+    if not Path(cache_path).exists():
+        adata = sc.read_10x_mtx(raw_path)
+        sc.pp.filter_cells(adata, min_genes=spec.min_genes)
+        sc.pp.highly_variable_genes(adata, n_top_genes=spec.n_hvg)
+        adata.write_h5ad(cache_path)
+
+@metalab.operation
+def analyze(context, params, capture):
+    # Load preprocessed data (each run gets its own copy)
+    adata = sc.read_h5ad(str(context.data))
+    sc.pp.neighbors(adata, n_neighbors=params["n_neighbors"])
+    # ... analysis ...
+
+# Create spec (file doesn't need to exist yet)
+spec = SingleCellSpec(
+    data=metalab.FilePath("./cache/adata.h5ad"),
+    min_genes=200,
+)
+
+# Preprocess explicitly (run once, before experiment)
+preprocess_data("data/raw/", spec)
+
+# Now run experiments - hash computed here, workers load from cached file
+exp = metalab.Experiment(
+    name="single_cell_exp",
+    version="0.1",
+    context=spec,
+    operation=analyze,
+    params=metalab.grid(n_neighbors=[10, 15, 30]),
+    seeds=metalab.seeds(base=42),
+)
+```
+
+**HPC/SLURM**: Run preprocessing interactively on the login node. Workers load from the cached file on shared storage.
 
 ### Parallel Execution
 
@@ -213,21 +364,58 @@ Use process-based parallelism for CPU-bound work:
 ```python
 from metalab import ProcessExecutor
 
-result = metalab.run(
-    exp,
-    executor=ProcessExecutor(max_workers=4),
-)
+handle = metalab.run(exp, executor=ProcessExecutor(max_workers=4))
+results = handle.result()
 ```
+
+### SLURM Cluster Execution
+
+Submit experiments to a SLURM cluster (requires `submitit`):
+
+```python
+handle = metalab.run(
+    exp,
+    store="/scratch/runs/my_exp",  # Shared filesystem path
+    executor=metalab.SlurmExecutor(
+        metalab.SlurmConfig(
+            partition="gpu",
+            time="2:00:00",
+            cpus=4,
+            memory="16G",
+            gpus=1,
+        )
+    ),
+    progress=True,  # Watch job progress
+)
+
+# Block until all jobs complete (shows live progress)
+results = handle.result()
+```
+
+**Reconnecting to SLURM jobs**: If you disconnect (e.g., close your terminal), you can reconnect later:
+
+```python
+# In a new session, reconnect to watch progress
+handle = metalab.reconnect("/scratch/runs/my_exp", progress=True)
+results = handle.result()
+
+# Or just check status
+handle = metalab.reconnect("/scratch/runs/my_exp")
+print(handle.status)  # RunStatus(total=100, completed=45, ...)
+```
+
+The `SlurmExecutor` uses `submitit` under the hood to handle job array submission, serialization, and result collection. Results are written directly to the shared filesystem store.
 
 ### Custom Storage
 
 Store results in a custom location:
 
 ```python
-result = metalab.run(exp, store="./my_experiments/run_001")
+handle = metalab.run(exp, store="./my_experiments/run_001")
+results = handle.result()
 
 # Load previous results
-result = metalab.load_results("./my_experiments/run_001")
+results = metalab.load_results("./my_experiments/run_001")
 ```
 
 ## Development

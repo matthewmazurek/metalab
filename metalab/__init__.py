@@ -1,7 +1,7 @@
 """
 metalab: A general experiment runner framework.
 
-An Experiment is a reproducible mapping from (FrozenContext, Params, Seeds)
+An Experiment is a reproducible mapping from (Context, Params, Seeds)
 to (RunRecord + Artifacts), executed over a ParamSource using an Executor,
 persisted by a Store.
 
@@ -10,8 +10,8 @@ Everything else is plug-ins.
 Example:
     import metalab
 
-    @metalab.operation(name="pi_mc")
-    def estimate_pi(context, params, seeds, runtime, capture):
+    @metalab.operation
+    def estimate_pi(params, seeds, capture):
         n = params["n_samples"]
         rng = seeds.numpy()
         x, y = rng.random(n), rng.random(n)
@@ -27,22 +27,29 @@ Example:
         seeds=metalab.seeds(base=42, replicates=3),
     )
 
-    result = metalab.run(exp)  # stores in ./runs/pi_mc by default
-    print(result.table())
+    # Run and get results
+    handle = metalab.run(exp)  # returns RunHandle
+    results = handle.result()  # blocks until complete
+    print(results.table())
+
+    # Or for SLURM execution:
+    handle = metalab.run(
+        exp,
+        store="/scratch/runs/pi_mc",
+        executor=metalab.SlurmExecutor(metalab.SlurmConfig(partition="gpu")),
+    )
+    print(handle.status)  # check progress without blocking
 """
 
 __version__ = "0.1.0"
 
 # Capture / Runtime
 from metalab.capture import Capture
-from metalab.capture.output import OutputCapture
 
 # Context
 from metalab.context import (
-    ContextBuilder,
     ContextProvider,
     ContextSpec,
-    DefaultContextBuilder,
     DefaultContextProvider,
     FrozenContext,
     context_spec,
@@ -52,7 +59,33 @@ from metalab.context import (
 from metalab.events import Event, EventCallback, EventKind
 
 # Executor (for advanced usage)
-from metalab.executor import Executor, ProcessExecutor, RunPayload, ThreadExecutor
+from metalab.executor import (
+    Executor,
+    LocalRunHandle,
+    ProcessExecutor,
+    RunHandle,
+    RunPayload,
+    RunStatus,
+    ThreadExecutor,
+)
+
+
+# Lazy import for SLURM (requires submitit)
+def __getattr__(name: str):
+    if name in ("SlurmExecutor", "SlurmConfig", "SlurmRunHandle"):
+        from metalab.executor.slurm import SlurmConfig, SlurmExecutor, SlurmRunHandle
+
+        if name == "SlurmExecutor":
+            return SlurmExecutor
+        elif name == "SlurmConfig":
+            return SlurmConfig
+        elif name == "SlurmRunHandle":
+            return SlurmRunHandle
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Utilities / File hashing
+from metalab._ids import DirPath, FilePath, Fingerprintable, dir_hash, file_hash
 
 # Experiment
 from metalab.experiment import Experiment
@@ -91,10 +124,10 @@ from metalab.progress import (
 from metalab.progress.display import display_results
 
 # Result
-from metalab.result import Results, ResultHandle, Run
+from metalab.result import Results, Run
 
 # High-level run facade
-from metalab.runner import load_results, run
+from metalab.runner import load_results, reconnect, run
 from metalab.runtime import CancellationToken, CancelledError, Runtime
 
 # Seeds
@@ -124,7 +157,6 @@ __all__ = [
     "seeds",
     # Capture / Runtime
     "Capture",
-    "OutputCapture",
     "Runtime",
     "CancellationToken",
     "CancelledError",
@@ -152,19 +184,17 @@ __all__ = [
     "ContextSpec",
     "FrozenContext",
     "context_spec",
-    "ContextBuilder",
     "ContextProvider",
-    "DefaultContextBuilder",
     "DefaultContextProvider",
     # Experiment
     "Experiment",
     # Result
     "Results",
-    "ResultHandle",  # Backward compatibility alias
     "Run",
     # Run
     "run",
     "load_results",
+    "reconnect",
     # Store
     "Store",
     "FileStore",
@@ -173,6 +203,13 @@ __all__ = [
     "ThreadExecutor",
     "ProcessExecutor",
     "RunPayload",
+    "RunHandle",
+    "RunStatus",
+    "LocalRunHandle",
+    # SLURM (lazy-loaded)
+    "SlurmExecutor",
+    "SlurmConfig",
+    "SlurmRunHandle",
     # Progress
     "MetricDisplay",
     "Progress",
@@ -180,4 +217,10 @@ __all__ = [
     "SimpleProgressTracker",
     "create_progress_tracker",
     "display_results",
+    # Utilities / File hashing
+    "file_hash",
+    "dir_hash",
+    "FilePath",
+    "DirPath",
+    "Fingerprintable",
 ]

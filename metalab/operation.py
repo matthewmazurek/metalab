@@ -28,7 +28,7 @@ class OperationWrapper:
     Wrapper around an operation function.
 
     Provides:
-    - Metadata (name, version)
+    - Metadata (name)
     - Consistent interface
     - Code hash for provenance
     - Automatic signature inspection (only inject requested parameters)
@@ -40,20 +40,17 @@ class OperationWrapper:
     def __init__(
         self,
         func: Callable[..., RunRecord],
-        name: str,
-        version: str | None = None,
+        name: str | None = None,
     ) -> None:
         """
         Initialize the wrapper.
 
         Args:
             func: The operation function.
-            name: The operation name.
-            version: Optional version string.
+            name: The operation name (defaults to function name).
         """
         self._func = func
-        self._name = name
-        self._version = version or "0.0.0"
+        self._name = name or func.__name__
         self._code_hash: str | None = None
 
         # Inspect signature to determine which parameters to inject
@@ -64,7 +61,7 @@ class OperationWrapper:
         invalid = self._param_names - self.INJECTABLE_PARAMS
         if invalid:
             raise ValueError(
-                f"Operation '{name}' has invalid parameter(s): {invalid}. "
+                f"Operation '{self._name}' has invalid parameter(s): {invalid}. "
                 f"Valid parameters are: {self.INJECTABLE_PARAMS}"
             )
 
@@ -75,11 +72,6 @@ class OperationWrapper:
     def name(self) -> str:
         """The operation name."""
         return self._name
-
-    @property
-    def version(self) -> str:
-        """The operation version."""
-        return self._version
 
     @property
     def code_hash(self) -> str:
@@ -111,7 +103,7 @@ class OperationWrapper:
         Only injects parameters that the function signature requests.
         This allows operations to declare only the parameters they need:
 
-            @metalab.operation(name="my_op")
+            @metalab.operation
             def my_op(params, seeds, capture):  # Only request what you need
                 ...
 
@@ -149,7 +141,7 @@ class OperationWrapper:
         return self.run(context, params, seeds, runtime, capture)
 
     def __repr__(self) -> str:
-        return f"Operation({self._name}:{self._version})"
+        return f"Operation({self._name})"
 
     @property
     def ref(self) -> str:
@@ -164,11 +156,22 @@ class OperationWrapper:
 
 
 def operation(
-    name: str,
-    version: str | None = None,
-) -> Callable[[F], OperationWrapper]:
+    func: F | None = None,
+    *,
+    name: str | None = None,
+) -> OperationWrapper | Callable[[F], OperationWrapper]:
     """
     Decorator to mark a function as a metalab operation.
+
+    Can be used with or without arguments:
+        @metalab.operation
+        def my_op(params, capture): ...
+
+        @metalab.operation()
+        def my_op(params, capture): ...
+
+        @metalab.operation(name="custom_name")
+        def my_op(params, capture): ...
 
     The decorated function can request any subset of these parameters:
         - context: The frozen context (shared read-only data)
@@ -180,15 +183,15 @@ def operation(
     Only include the parameters your operation needs—unused ones can be omitted.
 
     Args:
-        name: The operation name (used in experiment_id).
-        version: Optional version string.
+        func: The function to decorate (when used without parentheses).
+        name: Optional operation name (defaults to function name).
 
     Returns:
-        A decorator that wraps the function in an OperationWrapper.
+        An OperationWrapper or a decorator that creates one.
 
     Example:
-        # Minimal signature - only what you need
-        @metalab.operation(name="pi_mc", version="1.0")
+        # Simplest form - uses function name as operation name
+        @metalab.operation
         def estimate_pi(params, seeds, capture):
             n = params["n_samples"]
             rng = seeds.numpy()
@@ -196,14 +199,23 @@ def operation(
             pi_est = 4.0 * (x**2 + y**2 <= 1).mean()
             capture.metric("pi_estimate", pi_est)
 
+        # With custom name
+        @metalab.operation(name="pi_mc")
+        def estimate_pi(params, seeds, capture):
+            ...
+
         # Full signature also works
-        @metalab.operation(name="full_op")
+        @metalab.operation
         def full_operation(context, params, seeds, runtime, capture):
             ...
     """
 
-    def decorator(func: F) -> OperationWrapper:
-        return OperationWrapper(func, name=name, version=version)
+    def decorator(fn: F) -> OperationWrapper:
+        return OperationWrapper(fn, name=name)
+
+    # Support @operation without parentheses
+    if func is not None:
+        return decorator(func)
 
     return decorator
 
