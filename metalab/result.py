@@ -143,9 +143,7 @@ class Run:
                 break
 
         if descriptor is None:
-            raise FileNotFoundError(
-                f"Artifact '{name}' not found in run {self.run_id}"
-            )
+            raise FileNotFoundError(f"Artifact '{name}' not found in run {self.run_id}")
 
         # Load and deserialize based on format
         from metalab.capture.registry import SerializerRegistry
@@ -324,9 +322,7 @@ class Results:
 
         # Optionally drop fingerprint columns
         if not include_fingerprints:
-            fingerprint_cols = [
-                c for c in df.columns if c.endswith("_fingerprint")
-            ]
+            fingerprint_cols = [c for c in df.columns if c.endswith("_fingerprint")]
             df = df.drop(columns=fingerprint_cols, errors="ignore")
 
         df.to_csv(path, index=False)
@@ -497,7 +493,11 @@ class Results:
                 console.print("\n[bold]Results Summary[/bold]")
                 console.print(f"  Total runs: {summary['total_runs']}")
                 for status, count in summary["by_status"].items():
-                    color = "green" if status == "success" else "red" if status == "failed" else "yellow"
+                    color = (
+                        "green"
+                        if status == "success"
+                        else "red" if status == "failed" else "yellow"
+                    )
                     console.print(f"  [{color}]{status}[/{color}]: {count}")
                 console.print(f"  Avg duration: {summary['avg_duration_ms']:.1f}ms")
 
@@ -518,7 +518,11 @@ class Results:
                 for key, recs in sorted(groups.items()):
                     success = sum(1 for r in recs if r.status == Status.SUCCESS)
                     failed = sum(1 for r in recs if r.status == Status.FAILED)
-                    row = [str(v) for v in key] + [str(success), str(failed), str(len(recs))]
+                    row = [str(v) for v in key] + [
+                        str(success),
+                        str(failed),
+                        str(len(recs)),
+                    ]
                     table.add_row(*row)
 
                 console.print(table)
@@ -574,7 +578,3 @@ class Results:
         summary = self.summary()
         status_parts = [f"{k}={v}" for k, v in summary["by_status"].items()]
         return f"Results({summary['total_runs']} runs: {', '.join(status_parts)})"
-
-
-# Backward compatibility alias
-ResultHandle = Results

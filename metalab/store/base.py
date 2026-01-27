@@ -121,14 +121,23 @@ class Store(Protocol):
 
     # Optional log operations
 
-    def put_log(self, run_id: str, name: str, content: str) -> None:
+    def put_log(
+        self,
+        run_id: str,
+        name: str,
+        content: str,
+        label: str | None = None,
+    ) -> None:
         """
         Store a log file for a run.
 
         Args:
             run_id: The run identifier.
-            name: The log name (e.g., "stdout", "stderr").
+            name: The log name (e.g., "stdout", "stderr", "logging").
             content: The log content.
+            label: Optional human-readable label for the log filename.
+                   If provided, filename becomes: {label}_{run_id[:8]}_{name}.log
+                   If not provided, filename is: {run_id}_{name}.log
         """
         ...
 

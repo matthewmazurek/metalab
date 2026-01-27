@@ -3,7 +3,7 @@
 import pytest
 
 import metalab
-from metalab.operation import operation, OperationWrapper
+from metalab.operation import OperationWrapper, operation
 
 
 class TestSignatureInspection:
@@ -11,6 +11,7 @@ class TestSignatureInspection:
 
     def test_minimal_signature(self):
         """Operation can have just capture parameter."""
+
         @operation(name="minimal")
         def minimal_op(capture):
             capture.metric("test", 1)
@@ -20,6 +21,7 @@ class TestSignatureInspection:
 
     def test_partial_signature(self):
         """Operation can have subset of parameters."""
+
         @operation(name="partial")
         def partial_op(params, seeds, capture):
             pass
@@ -28,6 +30,7 @@ class TestSignatureInspection:
 
     def test_full_signature(self):
         """Operation can have all parameters (backward compatible)."""
+
         @operation(name="full")
         def full_op(context, params, seeds, runtime, capture):
             pass
@@ -37,6 +40,7 @@ class TestSignatureInspection:
     def test_invalid_parameter_raises(self):
         """Operation with unknown parameter name raises ValueError."""
         with pytest.raises(ValueError, match="invalid parameter"):
+
             @operation(name="bad")
             def bad_op(params, unknown_param, capture):
                 pass
@@ -80,26 +84,48 @@ class TestSignatureInspection:
 class TestOperationMetadata:
     """Test operation metadata and properties."""
 
-    def test_name_and_version(self):
-        """Operation has correct name and version."""
-        @operation(name="test_op", version="1.2.3")
+    def test_custom_name(self):
+        """Operation can have a custom name."""
+
+        @operation(name="custom_name")
         def my_op(capture):
             pass
 
-        assert my_op.name == "test_op"
-        assert my_op.version == "1.2.3"
+        assert my_op.name == "custom_name"
 
-    def test_default_version(self):
-        """Operation defaults to version 0.0.0."""
-        @operation(name="test_op")
-        def my_op(capture):
+    def test_default_name_from_function(self):
+        """Operation defaults to function name."""
+
+        @operation
+        def my_operation(capture):
             pass
 
-        assert my_op.version == "0.0.0"
+        assert my_operation.name == "my_operation"
+
+    def test_bare_decorator(self):
+        """Operation works as bare decorator without parentheses."""
+
+        @operation
+        def bare_op(capture):
+            pass
+
+        assert isinstance(bare_op, OperationWrapper)
+        assert bare_op.name == "bare_op"
+
+    def test_empty_parentheses(self):
+        """Operation works with empty parentheses."""
+
+        @operation()
+        def empty_parens_op(capture):
+            pass
+
+        assert isinstance(empty_parens_op, OperationWrapper)
+        assert empty_parens_op.name == "empty_parens_op"
 
     def test_code_hash_is_stable(self):
         """Code hash is deterministic."""
-        @operation(name="test_op")
+
+        @operation
         def my_op(capture):
             x = 1 + 1
             return x
@@ -112,8 +138,9 @@ class TestOperationMetadata:
 
     def test_repr(self):
         """Operation has readable repr."""
-        @operation(name="test_op", version="1.0")
+
+        @operation(name="test_op")
         def my_op(capture):
             pass
 
-        assert repr(my_op) == "Operation(test_op:1.0)"
+        assert repr(my_op) == "Operation(test_op)"

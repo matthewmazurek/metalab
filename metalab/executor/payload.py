@@ -29,9 +29,9 @@ class RunPayload:
         params_resolved: The resolved parameter dictionary.
         seed_bundle: The seed bundle for this run.
         store_locator: Path or URI to the store.
+        fingerprints: Dict with context_fingerprint, params_fingerprint, seed_fingerprint.
         runtime_hints: Serializable hints (no logger objects).
         operation_ref: Reference to operation (e.g., "module:name").
-        context_builder_ref: Reference to context builder (None = default).
     """
 
     run_id: str
@@ -40,9 +40,45 @@ class RunPayload:
     params_resolved: dict[str, Any]
     seed_bundle: SeedBundle
     store_locator: str
+    fingerprints: dict[str, str] = field(default_factory=dict)
     runtime_hints: dict[str, Any] = field(default_factory=dict)
     operation_ref: str = ""
-    context_builder_ref: str | None = None
+
+    def make_log_label(self, max_params: int = 3) -> str:
+        """
+        Generate a human-readable label for log filenames.
+
+        Creates a label from key parameter values and seed replicate index.
+        Format: {param1}_{param2}_r{replicate_index}
+
+        Args:
+            max_params: Maximum number of param values to include.
+
+        Returns:
+            A sanitized label suitable for filenames.
+        """
+        parts: list[str] = []
+
+        # Extract string/numeric param values (skip internal params starting with _)
+        for key, value in sorted(self.params_resolved.items()):
+            if key.startswith("_"):
+                continue
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, bool):
+                if value:
+                    parts.append(key)
+            elif isinstance(value, (int, float)):
+                # For numbers, include key name for clarity
+                parts.append(f"{key}{value}")
+
+            if len(parts) >= max_params:
+                break
+
+        # Add replicate index
+        parts.append(f"r{self.seed_bundle.replicate_index}")
+
+        return "_".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
@@ -53,9 +89,9 @@ class RunPayload:
             "params_resolved": self.params_resolved,
             "seed_bundle": self.seed_bundle.to_dict(),
             "store_locator": self.store_locator,
+            "fingerprints": self.fingerprints,
             "runtime_hints": self.runtime_hints,
             "operation_ref": self.operation_ref,
-            "context_builder_ref": self.context_builder_ref,
         }
 
     @classmethod
@@ -68,9 +104,9 @@ class RunPayload:
             params_resolved=data["params_resolved"],
             seed_bundle=SeedBundle.from_dict(data["seed_bundle"]),
             store_locator=data["store_locator"],
+            fingerprints=data.get("fingerprints", {}),
             runtime_hints=data.get("runtime_hints", {}),
             operation_ref=data.get("operation_ref", ""),
-            context_builder_ref=data.get("context_builder_ref"),
         )
 
 

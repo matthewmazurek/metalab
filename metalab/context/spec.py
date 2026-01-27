@@ -1,20 +1,21 @@
 """
 ContextSpec protocol and FrozenContext type alias.
 
-Invariants (codified here):
+The context system provides lightweight, serializable configuration that travels
+across executor boundaries. Operations receive the spec directly and are responsible
+for loading any heavy data they need.
+
+Invariants:
 1. ContextSpec MUST be serializable (JSON-compatible or reconstructable from manifest)
-2. ContextBuilder.build(spec) MUST be deterministic given the same environment/resources
-3. FrozenContext MUST be treated as read-only by Operations (no mutation)
-4. Runner MAY cache FrozenContext by context_fingerprint within a worker process
-5. Context builders SHOULD avoid lazy mutation after build (thread safety)
+2. ContextSpec is passed directly to operations (no separate "builder" step)
+3. Operations load their own data using paths/references from the spec
+4. Context fingerprint is computed from spec fields only
 
-What "Shared Context" Means:
-- ThreadExecutor: Same FrozenContext instance reused across runs (in-memory cache)
-- ProcessExecutor: Each process has its own cache (useful for batched runs)
-- ARC/HPC: Each job has its own cache; cross-node sharing via external storage only
-
-IMPORTANT: "Shared across ARC workers" means shared via external materialization
-(dataset paths, cached artifacts on shared storage)—NOT in-memory sharing.
+Design rationale:
+- Specs are lightweight manifests (paths, config, checksums)
+- Operations load data themselves (avoids mutation/serialization issues)
+- Each run gets fresh data if needed (no shared mutable state)
+- Preprocessing is explicit (run before experiment, not hidden in framework)
 """
 
 from __future__ import annotations
@@ -32,26 +33,36 @@ class ContextSpec(Protocol):
     """
     Protocol for context specifications.
 
-    A ContextSpec is a serializable manifest that describes how to construct
-    the actual context (FrozenContext) on any worker. It should contain:
+    A ContextSpec is a serializable manifest that describes the shared context
+    for an experiment. It should contain:
     - Dataset/resource identifiers (paths, URIs, IDs, checksums)
     - Configuration fragments
     - Versions of upstream processing steps (optional but recommended)
 
-    The spec itself should be small and serializable. Heavy data loading
-    happens in the ContextBuilder.
+    The spec itself should be small and serializable. Operations load data
+    themselves using paths/references from the spec.
 
     Implementations can be:
-    - A frozen dataclass
+    - A frozen dataclass (recommended, use @context_spec decorator)
     - A plain dict
     - Any object that can be canonically serialized
 
     Example:
-        @dataclass(frozen=True)
-        class MyContextSpec:
-            dataset_path: str
-            dataset_checksum: str
-            config: dict
+        @metalab.context_spec
+        class DataContext:
+            dataset: metalab.FilePath  # Hash computed lazily at run() time
+            vocab_size: int = 10000
+
+        @metalab.operation
+        def my_op(context, params, capture):
+            # Load data using paths from context
+            data = pd.read_csv(str(context.dataset))
+            ...
+
+        # Preprocessing can happen after spec creation
+        spec = DataContext(dataset=metalab.FilePath("./cache/data.csv"))
+        preprocess(spec)  # File created here
+        metalab.run(...)  # Hash computed here
     """
 
     # No required methods - any serializable object can be a ContextSpec
@@ -59,8 +70,7 @@ class ContextSpec(Protocol):
     pass
 
 
-# Type alias for built context
-# User decides actual immutability; we just promise to treat it as read-only
+# Type alias for context (the spec IS the context now)
 FrozenContext = Any
 
 

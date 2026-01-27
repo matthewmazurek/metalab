@@ -1,12 +1,13 @@
 """
-Context module: Serializable manifests that reconstruct on workers.
+Context module: Lightweight, serializable context specs.
 
-This module provides the two-tier context model:
-- ContextSpec (serializable): Crosses process boundaries
-- FrozenContext (in-memory): Cached within worker processes
+The context system provides:
+- ContextSpec: A serializable manifest (paths, config, checksums)
+- context_spec: Decorator to create frozen dataclasses with fingerprinting
+
+Operations receive the spec directly and load any heavy data themselves.
 """
 
-from metalab.context.builder import ContextBuilder, DefaultContextBuilder
 from metalab.context.provider import ContextProvider, DefaultContextProvider
 from metalab.context.spec import ContextSpec, FrozenContext, context_spec
 
@@ -14,8 +15,6 @@ __all__ = [
     "ContextSpec",
     "FrozenContext",
     "context_spec",
-    "ContextBuilder",
-    "DefaultContextBuilder",
     "ContextProvider",
     "DefaultContextProvider",
 ]

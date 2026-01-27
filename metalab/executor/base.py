@@ -4,51 +4,51 @@ Executor protocol: Platform-agnostic execution interface.
 The Executor abstraction supports:
 - Threads (same process)
 - Processes (multiple processes)
-- Future: HPC batch systems (ARC/Slurm)
+- SLURM/HPC batch systems via submitit
 """
 
 from __future__ import annotations
 
-from concurrent.futures import Future
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from metalab.executor.payload import RunPayload
-from metalab.types import RunRecord
+if TYPE_CHECKING:
+    from metalab.executor.handle import RunHandle
+    from metalab.executor.payload import RunPayload
+    from metalab.operation import OperationWrapper
+    from metalab.store.base import Store
 
 
 class Executor(Protocol):
     """
     Protocol for execution backends.
 
-    An Executor submits RunPayloads for execution and returns Futures
-    that resolve to RunRecords.
+    All executors implement submit() which takes a batch of payloads
+    and returns a RunHandle for tracking/awaiting results.
 
-    Key design decision: submit() takes only a RunPayload (no callables).
-    Workers resolve operation and context_builder from string references.
-    This ensures pickle-safety for ProcessExecutor and HPC backends.
+    Key design decisions:
+    - submit() takes all payloads at once (enables job arrays for SLURM)
+    - Returns RunHandle, not individual futures (unified interface)
+    - Workers resolve operation from string references (pickle-safe)
     """
 
-    def submit(self, payload: RunPayload) -> Future[RunRecord]:
+    def submit(
+        self,
+        payloads: list[RunPayload],
+        store: Store,
+        operation: OperationWrapper,
+        run_ids: list[str] | None = None,
+    ) -> RunHandle:
         """
-        Submit a run for execution.
+        Submit payloads for execution and return a handle.
 
         Args:
-            payload: The serializable run payload.
+            payloads: List of run payloads to execute.
+            store: Store for persisting results.
+            operation: The operation to run.
+            run_ids: All run IDs including skipped (for status tracking).
 
         Returns:
-            A Future that resolves to a RunRecord.
-        """
-        ...
-
-    def gather(self, futures: list[Future[RunRecord]]) -> list[RunRecord]:
-        """
-        Wait for multiple futures and return results.
-
-        Args:
-            futures: List of futures from submit().
-
-        Returns:
-            List of RunRecords (in same order as futures).
+            A RunHandle for tracking and awaiting results.
         """
         ...
 

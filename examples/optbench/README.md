@@ -1,168 +1,148 @@
-# Optimization Benchmark - metalab Stress Test
+# Optimization Benchmark Example
 
-A comprehensive stress-test experiment for metalab that exercises multiple system capabilities simultaneously.
+This example demonstrates **context specs**, **ProcessExecutor**, and **comprehensive result analysis** by benchmarking multiple optimization algorithms on classic test functions.
 
-## Purpose
+## Features Demonstrated
 
-This experiment is designed to find breaking points in metalab by stressing:
+| Feature | Description |
+|---------|-------------|
+| `@metalab.context_spec` | Shared configuration across runs |
+| `ProcessExecutor` | Process-based parallelism for CPU-bound work |
+| Multiple algorithms | Compare optimization methods |
+| Multiple problems | Classic test functions |
+| Stepped metrics | Optimization trajectories |
+| Comprehensive artifacts | Convergence curves, solutions |
 
-1. **Combinatorial explosion** - Large parameter grids (up to millions of combinations)
-2. **Artifact generation** - Multiple numpy arrays + JSON per run
-3. **Stepped metrics** - Time-series data at every iteration
-4. **Concurrent execution** - Many parallel workers hitting FileStore
-5. **Memory pressure** - Varying problem dimensions (5 to 200)
-6. **Context fingerprinting** - Non-trivial context specs
-7. **Parameter resolution** - Derived/conditional parameters
-
-## Usage
+## Running the Example
 
 ```bash
-# Quick validation (32 runs, ~1 second)
-uv run python examples/optbench/run.py --intensity light
-
-# Reasonable stress test (1,152 runs, ~5-10 minutes)
-uv run python examples/optbench/run.py --intensity medium --workers 8 --yes
-
-# Heavy stress test (tens of thousands of runs)
-uv run python examples/optbench/run.py --intensity heavy --workers 16 --yes
-
-# Extreme (WARNING: may create millions of run configurations)
-uv run python examples/optbench/run.py --intensity extreme --workers 32 --yes
-
-# Targeted investigation of specific algorithm/problem
-uv run python examples/optbench/run.py --targeted adam rosenbrock --replicates 20
-
-# Random hyperparameter search
-uv run python examples/optbench/run.py --random --n-trials 500 --workers 16
+uv run python examples/optbench/run.py
 ```
 
-## Intensity Levels
+## Code Highlights
 
-| Intensity | Param Combos | Replicates | Total Runs | Estimated Time |
-|-----------|-------------|------------|------------|----------------|
-| light     | 16          | 2          | 32         | ~1 second      |
-| medium    | 384         | 3          | 1,152      | ~5-10 minutes  |
-| heavy     | ~4,000      | 5          | ~20,000    | ~1-2 hours     |
-| extreme   | ~millions   | 10         | millions+  | ∞ (grid explosion) |
+### Context Specification
 
-## Discovered Breaking Points
-
-### 1. Grid Explosion (Critical)
-
-The Cartesian product of all parameters creates exponential growth even when many parameters don't apply to all algorithms:
+Define shared configuration using a frozen dataclass:
 
 ```python
-# Example: 5 algorithms × 5 problems × 5 dims × 5 lr × 5 momentum × ...
-# Each added param multiplies the total, even if it only applies to 1 algorithm
+@metalab.context_spec
+class BenchmarkConfig:
+    """Shared configuration for all optimization runs."""
+    max_iterations: int = 500
+    convergence_threshold: float = 1e-6
+
+config = BenchmarkConfig(max_iterations=500)
+exp = metalab.Experiment(context=config, ...)
 ```
 
-**Impact**: The "extreme" intensity creates so many combinations that even counting them times out.
-
-**Recommendation**: For future versions, consider:
-- Algorithm-specific parameter grids (compose, not product)
-- Conditional parameters that are only included when relevant
-- A `grid_union()` helper for combining algorithm-specific grids
-
-### 2. Execution Speed at Scale
-
-Observed performance:
-- **~35ms average** per run (light intensity, simple operations)
-- **~1.1s average** per run (medium intensity, including overhead)
-- Linear scaling with run count
-
-At 1000+ runs, even fast individual runs accumulate significant total time.
-
-**Recommendation**: 
-- The current ThreadExecutor is well-suited for CPU-bound tasks
-- For I/O-bound or heavily parallel workloads, ProcessExecutor may help
-- Consider async artifact writing to reduce blocking
-
-### 3. Artifact Storage Warnings
-
-When multiple workers complete runs simultaneously, artifact files with the same name (e.g., `convergence_curve.npz`) trigger "already exists, overwriting" warnings. This appears to be a race condition in the artifact naming.
-
-**Root cause**: The artifact path uses just the artifact name, not a unique identifier.
-
-**Recommendation**: Include `run_id` or `artifact_id` in the filename to ensure uniqueness.
-
-### 4. Resume Behavior
-
-The resume feature works correctly:
-- Skips runs with existing successful records
-- Re-runs failed runs
-- Handles partial completion gracefully
-
-**Observation**: With 560/1152 runs completed before timeout, re-running with `--resume` correctly skips completed runs.
-
-### 5. FileStore Locking
-
-The per-run `flock()` locking works correctly under concurrent load. No corruption or deadlocks observed with 8 parallel workers.
-
-## Benchmark Components
-
-### Test Functions
-
-| Function   | Characteristics | Difficulty |
-|------------|-----------------|------------|
-| sphere     | Convex, smooth  | Easy       |
-| rosenbrock | Narrow valley   | Medium     |
-| ackley     | Many local min  | Hard       |
-| rastrigin  | Highly multimodal| Hard      |
-| griewank   | Widespread local| Medium     |
-
-### Optimization Algorithms
-
-| Algorithm | Type | Key Params |
-|-----------|------|------------|
-| gradient_descent | First-order | lr, momentum, lr_decay |
-| adam | Adaptive first-order | lr, beta1, beta2 |
-| simulated_annealing | Metaheuristic | t_initial, cooling, step_size |
-| random_search | Derivative-free | strategy, shrink_factor |
-| evolution_strategy | Population-based | pop_size, elite_frac, sigma |
-
-## Artifacts Generated Per Run
-
-1. `convergence_curve.npz` - Function values at each iteration
-2. `best_solution.npz` - Final solution vector and value
-3. `trajectory.npz` - Subsampled position history
-4. `summary.json` - Run configuration and results
-5. `report.txt` - Human-readable summary
-
-## Example Analysis
+Access in operations:
 
 ```python
-import metalab
-from examples.optbench.experiment import build_experiment
-
-# Load results
-store = metalab.FileStore("./runs/optbench")
-records = store.list_run_records()
-
-# Convert to DataFrame
-import pandas as pd
-df = pd.DataFrame([
-    {
-        "run_id": r.run_id,
-        "status": r.status.value,
-        **r.metrics,
-    }
-    for r in records
-])
-
-# Analyze by algorithm
-print(df.groupby("algorithm")["best_f"].agg(["mean", "std", "min"]))
-
-# Find best configuration
-best_idx = df[df["status"] == "success"]["best_f"].idxmin()
-print(df.loc[best_idx])
+@metalab.operation
+def run_optimization(context, params, seeds, capture):
+    for i in range(context.max_iterations):
+        # ... optimization loop
 ```
 
-## Future Stress Tests
+### Process-Based Parallelism
 
-To further test metalab, consider:
+For CPU-bound optimization work, use ProcessExecutor to bypass Python's GIL:
 
-1. **Memory stress**: Generate very large artifacts (GB-scale arrays)
-2. **Failure injection**: Introduce random failures to test error handling
-3. **Long-running operations**: Multi-hour optimization runs
-4. **Rapid-fire metrics**: Capture thousands of stepped metrics per run
-5. **Nested experiments**: Experiment that spawns sub-experiments
+```python
+from metalab import ProcessExecutor
+
+executor = ProcessExecutor(max_workers=4)
+handle = metalab.run(exp, executor=executor, progress=True)
+```
+
+### Multiple Algorithms and Problems
+
+Grid over algorithms and test functions:
+
+```python
+params=metalab.grid(
+    algorithm=["gd", "adam", "sa"],
+    problem=["sphere", "rosenbrock", "rastrigin"],
+    dim=[2, 10],
+    lr=[0.01, 0.1],
+)
+```
+
+## Atlas Visualization
+
+This example is designed to showcase multiple atlas chart types:
+
+### Scatter/Line Charts
+- `metrics.final_f` vs `params.dim`, grouped by `params.algorithm`
+- `convergence_curve` artifact as line chart (convergence trajectory)
+
+### Bar Charts
+- Compare mean `final_f` by algorithm
+- Compare `iterations_to_threshold` by problem
+
+### Heatmap
+- `params.algorithm` × `params.problem` → `metrics.final_f`
+- `params.dim` × `params.lr` → `metrics.convergence_rate`
+
+### Radar Charts
+Compare algorithms across multiple dimensions:
+- `convergence_rate` - How fast the algorithm converges (higher = faster)
+- `solution_distance` - Distance from known optimum (lower = better)
+- `stability` - Variance in final iterations (lower = more stable)
+- `iterations_to_threshold` - Steps to reach f < 0.1 (lower = faster)
+
+### Candlestick/Histogram
+- Distribution of `final_f` across 5 replicates
+- Compare variance between algorithms
+- Show [min, q1, q3, max] for each algorithm/problem combination
+
+## Parameter Grid
+
+| Parameter | Values | Purpose |
+|-----------|--------|---------|
+| `algorithm` | gd, adam, sa | Categorical grouping |
+| `problem` | sphere, rosenbrock, rastrigin | Categorical grouping |
+| `dim` | 2, 10 | Numeric dimension |
+| `lr` | 0.01, 0.1 | Learning rate |
+| replicates | 5 | Robust statistics |
+
+**Total runs:** 180 (36 param combos × 5 seeds)
+**Runtime:** ~2-3 minutes
+
+## Algorithms
+
+| Algorithm | Description |
+|-----------|-------------|
+| **gd** (Gradient Descent) | Classic gradient descent with momentum |
+| **adam** | Adaptive moment estimation optimizer |
+| **sa** (Simulated Annealing) | Probabilistic global optimization |
+
+## Test Functions
+
+| Function | Description | Optimum |
+|----------|-------------|---------|
+| **Sphere** | Simplest convex quadratic | f(0,...,0) = 0 |
+| **Rosenbrock** | Narrow curved valley | f(1,...,1) = 0 |
+| **Rastrigin** | Highly multimodal | f(0,...,0) = 0 |
+
+## Metrics Captured
+
+### Core Metrics
+- `final_f` - Final function value (lower is better)
+- `converged` - Whether optimization converged
+- `iterations` - Number of iterations run
+- `optimality_gap` - Distance from known optimum value
+- `f_value` (stepped) - Optimization trajectory
+
+### Radar Chart Metrics
+These metrics enable multi-dimensional algorithm comparison:
+- `convergence_rate` - Slope of log(f) over iterations (higher = faster convergence)
+- `solution_distance` - Euclidean distance from known optimal point
+- `iterations_to_threshold` - Steps to reach f < 0.1 (lower = faster)
+- `stability` - Std deviation of last 10% of iterations (lower = more stable)
+
+## Artifacts
+
+- `convergence_curve` - 1D array of function values over iterations
+- `solution` - Final solution vector
