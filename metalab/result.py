@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, overload
 
 if TYPE_CHECKING:
+    from metalab.derived import DerivedMetricFn
     from metalab.store.base import Store
 
 from metalab.types import ArtifactDescriptor, RunRecord, Status
@@ -178,6 +179,16 @@ class Run:
         """
         return self._store.list_artifacts(self.run_id)
 
+    @property
+    def derived(self) -> dict[str, Any]:
+        """
+        Derived metrics computed post-hoc.
+
+        These are stored separately from the run record in /derived/{run_id}.json.
+        Returns an empty dict if no derived metrics exist.
+        """
+        return self._store.get_derived(self.run_id) or {}
+
     def __repr__(self) -> str:
         return f"Run({self.run_id[:8]}..., status={self.status.value})"
 
@@ -289,6 +300,8 @@ class Results:
         include_params: bool = True,
         include_metrics: bool = True,
         include_record: bool = True,
+        include_derived: bool = False,
+        derived_metrics: "list[DerivedMetricFn] | None" = None,
         artifact_reducers: (
             dict[str, ArtifactReducer | ContextAwareReducer] | None
         ) = None,
@@ -301,15 +314,19 @@ class Results:
         - Resolved parameters (prefixed with 'param_')
         - Captured metrics
         - Record metadata (run_id, status, duration, etc.)
-        - Artifact-derived columns via reducer functions
+        - Persisted derived metrics (from /derived/{run_id}.json)
+        - On-the-fly derived metrics via reducer functions
 
         Args:
             include_params: Include params_resolved columns (prefixed with 'param_').
             include_metrics: Include metrics columns.
             include_record: Include record fields (run_id, status, duration, etc.).
-            artifact_reducers: Dict mapping artifact name to reducer function.
-                Simple reducer: fn(artifact) -> dict[str, scalar]
-                Context-aware: fn(artifact, run) -> dict[str, scalar]
+            include_derived: Include persisted derived metrics from /derived/.
+            derived_metrics: List of derived metric functions for on-the-fly
+                computation (not persisted). Each function receives a Run object
+                and returns dict[str, Metric].
+            artifact_reducers: (Deprecated, use derived_metrics) Dict mapping
+                artifact name to reducer function.
             progress: Show progress bar when loading artifacts (requires rich).
 
         Returns:
@@ -318,21 +335,21 @@ class Results:
         Raises:
             ImportError: If pandas is not installed.
 
-        Example (simple reducer):
+        Example (include persisted derived metrics):
+            df = results.to_dataframe(include_derived=True)
+
+        Example (on-the-fly derived metric):
+            def final_loss(run):
+                return {"final_loss": run.artifact("loss_history")[-1]}
+
+            df = results.to_dataframe(derived_metrics=[final_loss])
+
+        Example (artifact reducer - legacy):
             def reduce_history(arr):
                 return {"final": arr[:, -1].mean(), "best": arr.min()}
 
             df = results.to_dataframe(
                 artifact_reducers={"history": reduce_history}
-            )
-
-        Example (context-aware reducer):
-            def smart_reducer(arr, run):
-                threshold = run.params.get("threshold", 0.5)
-                return {"above_threshold": (arr > threshold).mean()}
-
-            df = results.to_dataframe(
-                artifact_reducers={"values": smart_reducer}
             )
         """
         try:
@@ -378,7 +395,28 @@ class Results:
                 for key, value in run.metrics.items():
                     row[key] = value
 
-            # Apply artifact reducers
+            # Include persisted derived metrics
+            if include_derived:
+                derived = run.derived
+                for key, value in derived.items():
+                    row[f"derived_{key}"] = value
+
+            # Apply on-the-fly derived metrics
+            if derived_metrics:
+                for func in derived_metrics:
+                    try:
+                        reduced = func(run)
+                        row.update(reduced)
+                    except Exception as e:
+                        import warnings
+
+                        func_name = getattr(func, "__name__", str(func))
+                        warnings.warn(
+                            f"Derived metric '{func_name}' failed on run "
+                            f"{run.run_id[:8]}: {e}"
+                        )
+
+            # Apply artifact reducers (legacy support)
             if artifact_reducers:
                 for artifact_name, reducer in artifact_reducers.items():
                     try:
@@ -472,6 +510,54 @@ class Results:
 
         df.to_csv(path, index=False)
         return path
+
+    def compute_derived(
+        self,
+        metrics: "list[DerivedMetricFn]",
+        *,
+        overwrite: bool = False,
+        progress: bool = False,
+    ) -> None:
+        """
+        Compute derived metrics for all runs and persist to store.
+
+        This method computes derived metrics from run artifacts/params/metrics
+        and stores them in /derived/{run_id}.json for each run.
+
+        Args:
+            metrics: List of derived metric functions. Each function receives
+                a Run object and returns dict[str, Metric].
+            overwrite: If True, recompute even if derived metrics exist.
+            progress: Show progress bar (requires rich).
+
+        Example:
+            def final_loss(run: Run) -> dict[str, Metric]:
+                loss_history = run.artifact("loss_history")
+                return {"final_loss": float(loss_history[-1])}
+
+            results.compute_derived([final_loss])
+        """
+        from metalab.derived import compute_derived_for_run
+
+        runs = self.runs
+
+        # Set up progress bar if requested
+        iterator: Any = runs
+        if progress:
+            try:
+                from rich.progress import track
+
+                iterator = track(runs, description="Computing derived metrics...")
+            except ImportError:
+                pass  # Fall back to no progress bar
+
+        for run in iterator:
+            # Skip if already exists and not overwriting
+            if not overwrite and self._store.derived_exists(run.run_id):
+                continue
+
+            derived = compute_derived_for_run(run, metrics)
+            self._store.put_derived(run.run_id, derived)
 
     def load(self, run_id: str, artifact_name: str) -> Any:
         """

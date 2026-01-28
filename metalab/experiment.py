@@ -34,7 +34,13 @@ class Experiment:
     - context: Shared configuration (lightweight spec)
     - params: Parameter sweep definition
     - seeds: Seed plan for replication
-    - runtime_hints: Non-reproducible hints (e.g., max_attempts, resource requests)
+    - metadata: Experiment-level metadata (not fingerprinted)
+
+    The metadata field is for arbitrary experiment-level information that should
+    be persisted but does NOT affect reproducibility or run identity. Examples:
+    - Resource hints: {"gpu": True, "memory_gb": 16}
+    - Documentation: {"author": "name", "notes": "..."}
+    - Data summaries: {"n_samples": 1000, "groups": ["A", "B"]}
 
     Example:
         exp = Experiment(
@@ -46,6 +52,7 @@ class Experiment:
             params=grid(n_samples=[1000, 10000]),
             seeds=seeds(base=42, replicates=3),
             tags=["example", "monte_carlo"],
+            metadata={"author": "you", "resource_hints": {"gpu": False}},
         )
     """
 
@@ -58,7 +65,7 @@ class Experiment:
     description: str | None = None
     tags: list[str] = field(default_factory=list)
     param_resolver: ParamResolver | None = None
-    runtime_hints: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def experiment_id(self) -> str:

@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from metalab.types import ArtifactDescriptor, RunRecord
+from metalab.types import ArtifactDescriptor, Metric, RunRecord
 
 
 class Store(Protocol):
@@ -116,6 +116,42 @@ class Store(Protocol):
 
         Returns:
             List of artifact descriptors.
+        """
+        ...
+
+    # Derived metrics operations
+
+    def put_derived(self, run_id: str, derived: dict[str, Metric]) -> None:
+        """
+        Persist derived metrics for a run.
+
+        Args:
+            run_id: The run identifier.
+            derived: Dict of derived metric values.
+        """
+        ...
+
+    def get_derived(self, run_id: str) -> dict[str, Metric] | None:
+        """
+        Retrieve derived metrics for a run.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            Dict of derived metrics, or None if not found.
+        """
+        ...
+
+    def derived_exists(self, run_id: str) -> bool:
+        """
+        Check if derived metrics exist for a run.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            True if derived metrics exist.
         """
         ...
 

@@ -121,7 +121,7 @@ class ThreadExecutor:
         # Create runtime
         runtime = create_runtime(
             run_id=payload.run_id,
-            resource_hints=payload.runtime_hints,
+            metadata=payload.metadata,
         )
 
         # Create capture interface with worker ID for logging
@@ -169,7 +169,7 @@ class ThreadExecutor:
             finished_at = datetime.now()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
-            return RunRecord(
+            result = RunRecord(
                 run_id=payload.run_id,
                 experiment_id=payload.experiment_id,
                 status=record.status,
@@ -188,6 +188,12 @@ class ThreadExecutor:
                 tags=record.tags,
                 artifacts=capture_data["artifacts"],
             )
+
+            # Compute derived metrics if configured (post-hoc, doesn't affect fingerprint)
+            if payload.derived_metric_refs:
+                self._compute_derived_metrics(result, store, payload.derived_metric_refs)
+
+            return result
 
         except Exception as e:
             # Finalize capture even on failure (flushes logs)
@@ -215,6 +221,43 @@ class ThreadExecutor:
                 params_resolved=payload.params_resolved,
                 artifacts=capture_data["artifacts"],
             )
+
+    def _compute_derived_metrics(
+        self,
+        record: RunRecord,
+        store: "Store",
+        metric_refs: list[str],
+    ) -> None:
+        """
+        Compute and store derived metrics for a completed run.
+
+        Args:
+            record: The completed run record.
+            store: The store for persisting derived metrics.
+            metric_refs: List of function references ('module:func' format).
+        """
+        from metalab.derived import compute_derived_for_run, import_derived_metric
+        from metalab.result import Run
+
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        # Create Run object from record
+        run = Run(record, store)
+
+        # Import and apply metric functions
+        functions = []
+        for ref in metric_refs:
+            try:
+                func = import_derived_metric(ref)
+                functions.append(func)
+            except Exception as e:
+                logger.warning(f"Failed to import derived metric '{ref}': {e}")
+
+        if functions:
+            derived = compute_derived_for_run(run, functions)
+            store.put_derived(record.run_id, derived)
 
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the thread pool."""

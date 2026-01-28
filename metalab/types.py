@@ -15,6 +15,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+# Type alias for metric values (scalar types only)
+Metric = float | int | str | bool
+
 
 class Status(str, Enum):
     """Run completion status."""
@@ -113,7 +116,7 @@ class RunRecord:
     started_at: datetime
     finished_at: datetime
     duration_ms: int
-    metrics: dict[str, float | int | str | bool] = field(default_factory=dict)
+    metrics: dict[str, Metric] = field(default_factory=dict)
     provenance: Provenance = field(default_factory=Provenance)
     error: dict[str, Any] | None = None
 
