@@ -157,21 +157,6 @@ def train(params, seeds, capture):
         capture.log("Loss above threshold", level="warning")
 ```
 
-For long-running operations, enable immediate logging so progress is visible even if the operation fails:
-
-```python
-@metalab.operation
-def long_job(params, seeds, capture):
-    capture.set_immediate_logging(True)  # Write logs as they happen
-    
-    for batch in batches:
-        capture.log(f"Processing batch {batch.id}")
-        process(batch)
-    
-    # Or use immediate=True for specific critical checkpoints:
-    capture.log("Reached checkpoint", immediate=True)
-```
-
 For advanced logging (custom handlers, stream routing), use Python's standard `logging` module directly:
 
 ```python

@@ -70,7 +70,6 @@ class Capture:
         allow_pickle: bool = False,
         artifact_dir: Path | None = None,
         worker_id: str | None = None,
-        immediate_logging: bool = False,  # Kept for backward compat, now always True
     ) -> None:
         """
         Initialize the capture interface.
@@ -82,7 +81,6 @@ class Capture:
             allow_pickle: Whether to allow pickle serialization.
             artifact_dir: Directory for temporary artifact files.
             worker_id: Worker identifier for log messages (e.g., "thread:2", "process:3").
-            immediate_logging: Deprecated - logging is now always streamed immediately.
         """
         self._store = store
         self._run_id = run_id
@@ -204,19 +202,10 @@ class Capture:
             (lg, h) for lg, h in self._subscribed_loggers if lg.name != name
         ]
 
-    def set_immediate_logging(self, enabled: bool) -> None:
-        """
-        Deprecated: Logging is now always immediate (streamed to file).
-
-        This method is kept for backward compatibility but has no effect.
-        """
-        pass  # No-op - logging is always immediate now
-
     def log(
         self,
         message: str,
         level: str = "info",
-        immediate: bool | None = None,
     ) -> None:
         """
         Log a message for this run.
@@ -227,7 +216,6 @@ class Capture:
         Args:
             message: The log message.
             level: Log level - "debug", "info", "warning", "error" (default: "info").
-            immediate: Deprecated - logging is always immediate now.
 
         Example:
             capture.log("Starting optimization")
