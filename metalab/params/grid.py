@@ -60,6 +60,14 @@ class GridSource:
         params_str = ", ".join(f"{k}={v}" for k, v in sorted(self._params.items()))
         return f"GridSource({params_str})"
 
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation for experiment manifests."""
+        return {
+            "type": "GridSource",
+            "spec": self._params,
+            "total_cases": len(self),
+        }
+
 
 def grid(**kwargs: list[Any]) -> GridSource:
     """

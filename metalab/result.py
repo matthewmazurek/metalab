@@ -11,14 +11,19 @@ Provides:
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, overload
+from typing import TYPE_CHECKING, Any, Callable, Iterator, overload
 
 if TYPE_CHECKING:
     from metalab.store.base import Store
 
 from metalab.types import ArtifactDescriptor, RunRecord, Status
+
+# Type aliases for artifact reducers
+ArtifactReducer = Callable[[Any], dict[str, Any]]
+ContextAwareReducer = Callable[[Any, "Run"], dict[str, Any]]
 
 
 class Run:
@@ -75,6 +80,11 @@ class Run:
     def metrics(self) -> dict[str, Any]:
         """Metrics captured during the run."""
         return dict(self._record.metrics)
+
+    @property
+    def params(self) -> dict[str, Any]:
+        """Resolved parameters for this run."""
+        return dict(self._record.params_resolved)
 
     @property
     def tags(self) -> list[str]:
@@ -272,6 +282,141 @@ class Results:
                 "pandas is required for as_dataframe=True. "
                 "Install it with: pip install metalab[pandas]"
             ) from e
+
+    def to_dataframe(
+        self,
+        *,
+        include_params: bool = True,
+        include_metrics: bool = True,
+        include_record: bool = True,
+        artifact_reducers: (
+            dict[str, ArtifactReducer | ContextAwareReducer] | None
+        ) = None,
+        progress: bool = False,
+    ) -> Any:
+        """
+        Export results to a pandas DataFrame with optional artifact reduction.
+
+        This method provides flexible DataFrame export with:
+        - Resolved parameters (prefixed with 'param_')
+        - Captured metrics
+        - Record metadata (run_id, status, duration, etc.)
+        - Artifact-derived columns via reducer functions
+
+        Args:
+            include_params: Include params_resolved columns (prefixed with 'param_').
+            include_metrics: Include metrics columns.
+            include_record: Include record fields (run_id, status, duration, etc.).
+            artifact_reducers: Dict mapping artifact name to reducer function.
+                Simple reducer: fn(artifact) -> dict[str, scalar]
+                Context-aware: fn(artifact, run) -> dict[str, scalar]
+            progress: Show progress bar when loading artifacts (requires rich).
+
+        Returns:
+            pandas DataFrame with the requested columns.
+
+        Raises:
+            ImportError: If pandas is not installed.
+
+        Example (simple reducer):
+            def reduce_history(arr):
+                return {"final": arr[:, -1].mean(), "best": arr.min()}
+
+            df = results.to_dataframe(
+                artifact_reducers={"history": reduce_history}
+            )
+
+        Example (context-aware reducer):
+            def smart_reducer(arr, run):
+                threshold = run.params.get("threshold", 0.5)
+                return {"above_threshold": (arr > threshold).mean()}
+
+            df = results.to_dataframe(
+                artifact_reducers={"values": smart_reducer}
+            )
+        """
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for to_dataframe(). "
+                "Install it with: pip install metalab[pandas]"
+            ) from e
+
+        rows = []
+        runs = self.runs
+
+        # Set up progress bar if requested
+        iterator: Any = runs
+        if progress:
+            try:
+                from rich.progress import track
+
+                iterator = track(runs, description="Loading runs...")
+            except ImportError:
+                pass  # Fall back to no progress bar
+
+        for run in iterator:
+            row: dict[str, Any] = {}
+
+            # Include record fields
+            if include_record:
+                row["run_id"] = run.run_id
+                row["experiment_id"] = run.experiment_id
+                row["status"] = run.status.value
+                row["duration_ms"] = run.duration_ms
+                row["started_at"] = run.started_at.isoformat()
+                row["finished_at"] = run.finished_at.isoformat()
+
+            # Include params (prefixed to avoid collisions)
+            if include_params:
+                for key, value in run.params.items():
+                    row[f"param_{key}"] = value
+
+            # Include metrics
+            if include_metrics:
+                for key, value in run.metrics.items():
+                    row[key] = value
+
+            # Apply artifact reducers
+            if artifact_reducers:
+                for artifact_name, reducer in artifact_reducers.items():
+                    try:
+                        artifact = run.artifact(artifact_name)
+
+                        # Detect if reducer needs run context (2 args vs 1 arg)
+                        sig = inspect.signature(reducer)
+                        num_params = len(
+                            [
+                                p
+                                for p in sig.parameters.values()
+                                if p.default is inspect.Parameter.empty
+                            ]
+                        )
+
+                        if num_params >= 2:
+                            # Context-aware reducer
+                            reduced = reducer(artifact, run)
+                        else:
+                            # Simple reducer
+                            reduced = reducer(artifact)
+
+                        row.update(reduced)
+                    except FileNotFoundError:
+                        # Artifact missing - leave columns as NaN
+                        pass
+                    except Exception as e:
+                        # Log warning but continue
+                        import warnings
+
+                        warnings.warn(
+                            f"Reducer for '{artifact_name}' failed on run "
+                            f"{run.run_id[:8]}: {e}"
+                        )
+
+            rows.append(row)
+
+        return pd.DataFrame(rows)
 
     def to_csv(
         self,

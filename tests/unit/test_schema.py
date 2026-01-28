@@ -174,3 +174,52 @@ class TestDumpArtifactDescriptor:
         assert restored.artifact_id == desc.artifact_id
         assert restored.name == desc.name
         assert restored.metadata == desc.metadata
+
+
+class TestRunningStatus:
+    """Tests for RUNNING status support."""
+
+    def test_running_status_exists(self):
+        """RUNNING should be a valid status value."""
+        assert Status.RUNNING.value == "running"
+
+    def test_running_factory_method(self):
+        """RunRecord.running() should create a running record."""
+        record = RunRecord.running(
+            run_id="test123",
+            experiment_id="exp:1.0",
+            context_fingerprint="ctx",
+            params_fingerprint="params",
+            seed_fingerprint="seed",
+        )
+        assert record.status == Status.RUNNING
+        assert record.run_id == "test123"
+        assert record.duration_ms == 0  # Placeholder
+
+    def test_running_record_roundtrip(self):
+        """RUNNING status should survive serialization round-trip."""
+        record = RunRecord.running(
+            run_id="test123",
+            experiment_id="exp:1.0",
+            context_fingerprint="ctx",
+            params_fingerprint="params",
+            seed_fingerprint="seed",
+            params_resolved={"x": 10},
+        )
+
+        data = dump_run_record(record)
+        restored = load_run_record(data)
+
+        assert restored.status == Status.RUNNING
+        assert restored.run_id == record.run_id
+        assert restored.params_resolved == record.params_resolved
+
+    def test_load_running_status_from_string(self):
+        """Load should handle 'running' status string."""
+        data = {
+            "run_id": "test",
+            "status": "running",
+            "experiment_id": "exp:1.0",
+        }
+        record = load_run_record(data)
+        assert record.status == Status.RUNNING

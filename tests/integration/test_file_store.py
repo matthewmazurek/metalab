@@ -131,7 +131,9 @@ class TestArtifacts:
             kind="json",
             format="json",
             uri=str(test_file),
-            metadata={"_run_id": "test_run"},  # Required for proper artifact association
+            metadata={
+                "_run_id": "test_run"
+            },  # Required for proper artifact association
         )
 
         store.put_artifact(test_file, descriptor)
@@ -161,25 +163,15 @@ class TestLogs:
         assert store.get_log("run123", "stdout") == "Standard output"
         assert store.get_log("run123", "stderr") == "Standard error"
 
-    def test_log_with_label(self, store: FileStore):
-        """Store log with human-readable label."""
-        store.put_log("abc123def456", "stdout", "Output", label="rastrigin_gd_r0")
-        content = store.get_log("abc123def456", "stdout")
+    def test_log_filename_format(self, store: FileStore):
+        """Log files use {run_id}_{name}.log format."""
+        store.put_log("abc123def456", "run", "Output")
+        content = store.get_log("abc123def456", "run")
         assert content == "Output"
 
-        # Verify flat file structure with label prefix
-        log_files = list((store.root / "logs").glob("rastrigin_gd_r0_abc123de_stdout.log"))
-        assert len(log_files) == 1
-
-    def test_log_label_sanitization(self, store: FileStore):
-        """Labels with special chars are sanitized."""
-        store.put_log("run456", "logging", "Log content", label="my/bad:label!")
-        content = store.get_log("run456", "logging")
-        assert content == "Log content"
-
-        # Verify special chars replaced
-        log_files = list((store.root / "logs").glob("my_bad_label_run456*_logging.log"))
-        assert len(log_files) == 1
+        # Verify flat file structure: {run_id}_{name}.log
+        log_path = store.root / "logs" / "abc123def456_run.log"
+        assert log_path.exists()
 
 
 class TestAtomicity:

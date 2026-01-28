@@ -13,6 +13,8 @@ Layout:
     │   └── {run_id}/
     │       ├── stdout.txt
     │       └── stderr.txt
+    ├── experiments/
+    │   └── {exp_id}_{timestamp}.json  # Experiment manifest (versioned)
     ├── .locks/
     │   └── {run_id}.lock           # Per-run lock files
     └── _meta.json                  # Store metadata (schema version)
@@ -58,6 +60,7 @@ class FileStore:
     ARTIFACTS_DIR = "artifacts"
     LOGS_DIR = "logs"
     LOCKS_DIR = ".locks"
+    EXPERIMENTS_DIR = "experiments"
     META_FILE = "_meta.json"
     MANIFEST_FILE = "_manifest.json"
 
@@ -81,10 +84,13 @@ class FileStore:
         # Write meta file if it doesn't exist
         meta_path = self._root / self.META_FILE
         if not meta_path.exists():
-            self._atomic_write_json(meta_path, {
-                "schema_version": SCHEMA_VERSION,
-                "created_by": "metalab",
-            })
+            self._atomic_write_json(
+                meta_path,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "created_by": "metalab",
+                },
+            )
 
     @property
     def root(self) -> Path:
@@ -179,7 +185,7 @@ class FileStore:
         """Store an artifact."""
         # Get run_id from descriptor metadata (preferred) or fall back to extraction
         run_id = descriptor.metadata.get("_run_id")
-        
+
         if not run_id:
             # Fallback: try to extract from path (legacy behavior)
             if isinstance(data, Path):
@@ -191,7 +197,7 @@ class FileStore:
                         if len(parts) >= 2:
                             run_id = parts[1]
                             break
-            
+
             if not run_id:
                 # Last resort: use artifact_id prefix
                 run_id = descriptor.artifact_id[:16]
@@ -252,22 +258,25 @@ class FileStore:
             manifest = {"artifacts": []}
 
         # Add or update entry (strip internal _run_id from metadata)
-        clean_metadata = {k: v for k, v in descriptor.metadata.items() if not k.startswith("_")}
-        updated_descriptor = dump_artifact_descriptor(ArtifactDescriptor(
-            artifact_id=descriptor.artifact_id,
-            name=descriptor.name,
-            kind=descriptor.kind,
-            format=descriptor.format,
-            uri=uri,
-            content_hash=descriptor.content_hash,
-            size_bytes=descriptor.size_bytes,
-            metadata=clean_metadata,
-        ))
+        clean_metadata = {
+            k: v for k, v in descriptor.metadata.items() if not k.startswith("_")
+        }
+        updated_descriptor = dump_artifact_descriptor(
+            ArtifactDescriptor(
+                artifact_id=descriptor.artifact_id,
+                name=descriptor.name,
+                kind=descriptor.kind,
+                format=descriptor.format,
+                uri=uri,
+                content_hash=descriptor.content_hash,
+                size_bytes=descriptor.size_bytes,
+                metadata=clean_metadata,
+            )
+        )
 
         # Remove existing entry with same name (overwrite)
         manifest["artifacts"] = [
-            a for a in manifest["artifacts"]
-            if a.get("name") != descriptor.name
+            a for a in manifest["artifacts"] if a.get("name") != descriptor.name
         ]
         manifest["artifacts"].append(updated_descriptor)
 
@@ -290,10 +299,7 @@ class FileStore:
             return []
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return [
-            load_artifact_descriptor(a)
-            for a in manifest.get("artifacts", [])
-        ]
+        return [load_artifact_descriptor(a) for a in manifest.get("artifacts", [])]
 
     # Log operations
 
@@ -302,56 +308,60 @@ class FileStore:
         run_id: str,
         name: str,
         content: str,
-        label: str | None = None,
     ) -> None:
         """
         Store a log file for a run.
 
-        Uses flat structure with human-readable filenames:
-        - With label: {label}_{run_id[:8]}_{name}.log
-        - Without label: {run_id}_{name}.log
+        Uses flat structure: {run_id}_{name}.log
         """
         log_dir = self._root / self.LOGS_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build filename with optional label prefix
-        short_id = run_id[:8]
-        if label:
-            # Sanitize label for filesystem safety
-            safe_label = self._sanitize_label(label)
-            filename = f"{safe_label}_{short_id}_{name}.log"
-        else:
-            filename = f"{run_id}_{name}.log"
-
+        filename = f"{run_id}_{name}.log"
         log_path = log_dir / filename
         self._atomic_write(log_path, content.encode("utf-8"))
 
-    @staticmethod
-    def _sanitize_label(label: str) -> str:
-        """Sanitize a label for use in filenames."""
-        import re
-        # Replace any non-alphanumeric chars (except underscore/hyphen) with underscore
-        sanitized = re.sub(r"[^\w\-]", "_", label)
-        # Collapse multiple underscores
-        sanitized = re.sub(r"_+", "_", sanitized)
-        # Trim underscores from ends
-        sanitized = sanitized.strip("_")
-        # Limit length
-        return sanitized[:50] if sanitized else "run"
+    def get_log_path(self, run_id: str, name: str) -> Path:
+        """
+        Get the path where a log file should be written.
+
+        This enables streaming loggers to write directly to the store
+        without buffering. The parent directory is created if needed.
+
+        Args:
+            run_id: The run identifier.
+            name: The log name (e.g., "run", "stdout", "stderr").
+
+        Returns:
+            Path to the log file location.
+
+        Example:
+            log_path = store.get_log_path(run_id, "run")
+            handler = logging.FileHandler(log_path)
+        """
+        log_dir = self._root / self.LOGS_DIR
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{run_id}_{name}.log"
+        return log_dir / filename
 
     def get_log(self, run_id: str, name: str) -> str | None:
         """
         Retrieve a log file.
 
         Searches for logs matching the run_id in the flat structure.
-        Handles both new flat format and legacy nested format.
+        Handles both new format and legacy formats.
         """
         log_dir = self._root / self.LOGS_DIR
-        short_id = run_id[:8]
 
-        # Try new flat format: look for files ending with _{short_id}_{name}.log
-        # or starting with {run_id}_{name}.log
-        for pattern in [f"*_{short_id}_{name}.log", f"{run_id}_{name}.log"]:
+        # Try new format: {run_id}_{name}.log
+        new_path = log_dir / f"{run_id}_{name}.log"
+        if new_path.exists():
+            return new_path.read_text(encoding="utf-8")
+
+        # Fall back to legacy label format: *_{short_id}_{name}.log
+        short_id = run_id[:8]
+        for pattern in [f"*_{short_id}_{name}.log"]:
             matches = list(log_dir.glob(pattern))
             if matches:
                 return matches[0].read_text(encoding="utf-8")
@@ -412,14 +422,17 @@ class FileStore:
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
 
-            # Delete logs - handle both flat and nested formats
+            # Delete logs - handle current and legacy formats
             log_dir = self._root / self.LOGS_DIR
-            short_id = run_id[:8]
 
-            # Delete flat format logs: *_{short_id}_*.log and {run_id}_*.log
-            for pattern in [f"*_{short_id}_*.log", f"{run_id}_*.log"]:
-                for log_file in log_dir.glob(pattern):
-                    log_file.unlink()
+            # Delete current format: {run_id}_*.log
+            for log_file in log_dir.glob(f"{run_id}_*.log"):
+                log_file.unlink()
+
+            # Delete legacy label format: *_{short_id}_*.log
+            short_id = run_id[:8]
+            for log_file in log_dir.glob(f"*_{short_id}_*.log"):
+                log_file.unlink()
 
             # Delete legacy nested format
             nested_log_dir = log_dir / run_id

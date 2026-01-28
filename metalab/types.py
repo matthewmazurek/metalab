@@ -22,6 +22,7 @@ class Status(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    RUNNING = "running"
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,39 @@ class RunRecord:
             finished_at=end,
             duration_ms=duration,
             metrics=metrics or {},
+            provenance=provenance or Provenance(),
+            params_resolved=params_resolved or {},
+            tags=tags or [],
+        )
+
+    @classmethod
+    def running(
+        cls,
+        *,
+        run_id: str = "",
+        experiment_id: str = "",
+        context_fingerprint: str = "",
+        params_fingerprint: str = "",
+        seed_fingerprint: str = "",
+        started_at: datetime | None = None,
+        provenance: Provenance | None = None,
+        params_resolved: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> RunRecord:
+        """Factory method to create a running (in-progress) RunRecord."""
+        now = datetime.now()
+        start = started_at or now
+
+        return cls(
+            run_id=run_id,
+            experiment_id=experiment_id,
+            status=Status.RUNNING,
+            context_fingerprint=context_fingerprint,
+            params_fingerprint=params_fingerprint,
+            seed_fingerprint=seed_fingerprint,
+            started_at=start,
+            finished_at=start,  # Placeholder, will be updated when complete
+            duration_ms=0,  # Placeholder, will be updated when complete
             provenance=provenance or Provenance(),
             params_resolved=params_resolved or {},
             tags=tags or [],

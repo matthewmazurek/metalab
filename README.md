@@ -203,7 +203,8 @@ results = handle.result()
 
 # Access individual runs
 run = results[0]
-print(run.metrics)
+print(run.params)   # Resolved parameters
+print(run.metrics)  # Captured metrics
 artifact = run.artifact("predictions")
 
 # Tabular view
@@ -222,6 +223,41 @@ results.to_csv("results.csv")
 # Load previous results
 old_results = metalab.load_results("./runs/my_exp")
 ```
+
+### DataFrame Export with Artifact Reducers
+
+Export results to pandas with artifact-derived columns using reducer functions:
+
+```python
+# Define reducers to extract scalars from artifacts
+def reduce_loss_history(arr):
+    """Simple reducer: artifact -> dict of scalars."""
+    return {"final_loss": float(arr[-1]), "best_loss": float(arr.min())}
+
+def context_reducer(arr, run):
+    """Context-aware reducer: can access run.params."""
+    threshold = run.params.get("threshold", 0.5)
+    return {"above_threshold": float((arr > threshold).mean())}
+
+# Export to DataFrame with reduced artifacts
+df = results.to_dataframe(
+    include_params=True,      # Columns prefixed with 'param_'
+    include_metrics=True,     # Captured metrics
+    include_record=True,      # run_id, status, duration, etc.
+    artifact_reducers={
+        "loss_history": reduce_loss_history,
+        "predictions": context_reducer,
+    },
+)
+
+# Now use pandas for analysis
+summary = df.groupby("param_learning_rate").agg({
+    "final_loss": ["mean", "std"],
+    "above_threshold": "mean",
+})
+```
+
+Reducers with 1 argument receive just the artifact; reducers with 2 arguments also receive the `Run` object for context-aware computation.
 
 ### Resume and Deduplication
 
@@ -357,6 +393,64 @@ exp = metalab.Experiment(
 
 **HPC/SLURM**: Run preprocessing interactively on the login node. Workers load from the cached file on shared storage.
 
+### Seeded Preprocessing
+
+If your preprocessing requires randomness (e.g., train/test splits, data augmentation), use `SeedBundle.for_preprocessing()` to get reproducible RNG. Use the same base seed for both preprocessing and the experiment, and include it in your context spec so it becomes part of the fingerprint:
+
+```python
+from metalab.seeds import SeedBundle
+
+BASE_SEED = 42
+
+@metalab.context_spec
+class MyContext:
+    raw_data: metalab.FilePath
+    processed_data: metalab.FilePath
+    base_seed: int  # Included in context fingerprint
+
+def preprocess(raw_path: str, output_path: str, base_seed: int):
+    """Preprocessing with reproducible randomness."""
+    # Create a SeedBundle using the same API as inside operations
+    seeds = SeedBundle.for_preprocessing(base_seed)
+    
+    data = load_data(raw_path)
+    
+    # Use derived RNGs for different preprocessing steps
+    rng_split = seeds.numpy("train_test_split")
+    train, test = train_test_split(data, rng=rng_split)
+    
+    rng_aug = seeds.numpy("augmentation")
+    train_aug = augment(train, rng=rng_aug)
+    
+    save(output_path, {"train": train_aug, "test": test})
+
+# Wire it together with one base seed
+spec = MyContext(
+    raw_data=metalab.FilePath("./data/raw.csv"),
+    processed_data=metalab.FilePath("./cache/processed.h5ad"),
+    base_seed=BASE_SEED,
+)
+
+# Preprocess with seeded RNG
+preprocess(str(spec.raw_data), str(spec.processed_data), BASE_SEED)
+
+# Experiment uses same base seed - all randomness shares one hierarchy
+exp = metalab.Experiment(
+    name="my_exp",
+    version="0.1",
+    context=spec,
+    operation=train_model,
+    params=metalab.grid(lr=[0.01, 0.001]),
+    seeds=metalab.seeds(base=BASE_SEED, replicates=5),
+)
+```
+
+**Key points:**
+- One base seed controls everything: preprocessing and experiment runs
+- `SeedBundle.for_preprocessing(base_seed)` derives a preprocessing-specific seed that won't collide with replicate seeds
+- Include `base_seed` in your context spec so changing it changes the context fingerprint (triggering re-runs)
+- The preprocessing bundle supports the same interface as operation bundles: `.numpy()`, `.rng()`, `.derive()`
+
 ### Parallel Execution
 
 Use process-based parallelism for CPU-bound work:
@@ -417,6 +511,24 @@ results = handle.result()
 # Load previous results
 results = metalab.load_results("./my_experiments/run_001")
 ```
+
+### Experiment Manifests
+
+When you run an experiment, metalab automatically saves an experiment manifest capturing the full configuration:
+
+```
+{store}/experiments/{experiment_id}_{timestamp}.json
+```
+
+The manifest includes:
+- Experiment metadata (name, version, description, tags)
+- Operation reference and code hash
+- Full parameter source specification (e.g., grid values, random space)
+- Seed plan (base seed, number of replicates)
+- Context fingerprint
+- Total runs and submission timestamp
+
+This complements the per-run `RunRecord` (which captures individual results) by documenting the overall experiment design. Multiple runs create multiple timestamped manifests, enabling version tracking.
 
 ## Development
 

@@ -71,8 +71,8 @@ In metalab-atlas, try these visualizations:
 | Parameter | Values | Purpose |
 |-----------|--------|---------|
 | `learning_rate` | [0.01, 0.05, 0.1] | X-axis sweep |
-| `n_iterations` | [200, 500] | Grouping dimension |
+| `n_iterations` | [5000, 10000] | Grouping dimension |
 | replicates | 3 | Error bars in atlas |
 
 **Total runs:** 18 (6 param combos × 3 seeds)
-**Runtime:** ~2 seconds
+**Runtime:** ~5-10 seconds

@@ -41,7 +41,7 @@ def optimize_booth(params, seeds, capture):
     """Optimize Booth function using gradient descent with momentum."""
     lr = params["lr"]
     momentum = params["momentum"]
-    n_iterations = 200
+    n_iterations = 10_000
 
     # Initialize from random starting point
     rng = seeds.numpy()
@@ -125,7 +125,7 @@ random_exp = metalab.Experiment(
             "lr": metalab.loguniform(1e-4, 1e-1),  # Log-uniform: 0.0001 to 0.1
             "momentum": metalab.uniform(0.0, 0.99),  # Uniform: 0 to 0.99
         },
-        n_trials=100,
+        n_trials=27,  # Match grid search for fair comparison
         seed=123,  # Reproducible random sampling
     ),
     seeds=metalab.seeds(base=42, replicates=3),
@@ -184,7 +184,7 @@ if __name__ == "__main__":
         grid_exp, "Grid Search (9 param combos x 3 seeds = 27 runs)"
     )
     random_results = run_experiment(
-        random_exp, "Random Search (27 trials x 3 seeds = 81 runs)"
+        random_exp, "Random Search (27 trials × 3 seeds = 81 runs)"
     )
 
     # Analyze results

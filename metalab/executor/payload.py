@@ -44,42 +44,6 @@ class RunPayload:
     runtime_hints: dict[str, Any] = field(default_factory=dict)
     operation_ref: str = ""
 
-    def make_log_label(self, max_params: int = 3) -> str:
-        """
-        Generate a human-readable label for log filenames.
-
-        Creates a label from key parameter values and seed replicate index.
-        Format: {param1}_{param2}_r{replicate_index}
-
-        Args:
-            max_params: Maximum number of param values to include.
-
-        Returns:
-            A sanitized label suitable for filenames.
-        """
-        parts: list[str] = []
-
-        # Extract string/numeric param values (skip internal params starting with _)
-        for key, value in sorted(self.params_resolved.items()):
-            if key.startswith("_"):
-                continue
-            if isinstance(value, str):
-                parts.append(value)
-            elif isinstance(value, bool):
-                if value:
-                    parts.append(key)
-            elif isinstance(value, (int, float)):
-                # For numbers, include key name for clarity
-                parts.append(f"{key}{value}")
-
-            if len(parts) >= max_params:
-                break
-
-        # Add replicate index
-        parts.append(f"r{self.seed_bundle.replicate_index}")
-
-        return "_".join(parts)
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
         return {

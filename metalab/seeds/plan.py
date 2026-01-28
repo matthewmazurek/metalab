@@ -7,7 +7,7 @@ each with its own deterministically-derived SeedBundle.
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Any, Iterator
 
 from metalab.seeds.bundle import SeedBundle
 
@@ -60,11 +60,21 @@ class SeedPlan:
     def __getitem__(self, index: int) -> SeedBundle:
         """Get the SeedBundle for a specific replicate index."""
         if index < 0 or index >= self._replicates:
-            raise IndexError(f"Replicate index {index} out of range [0, {self._replicates})")
+            raise IndexError(
+                f"Replicate index {index} out of range [0, {self._replicates})"
+            )
         return SeedBundle(root_seed=self._base, replicate_index=index)
 
     def __repr__(self) -> str:
         return f"SeedPlan(base={self._base}, replicates={self._replicates})"
+
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation for experiment manifests."""
+        return {
+            "type": "SeedPlan",
+            "base": self._base,
+            "replicates": self._replicates,
+        }
 
 
 def seeds(base: int, replicates: int = 1) -> SeedPlan:

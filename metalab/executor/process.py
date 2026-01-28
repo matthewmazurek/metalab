@@ -75,9 +75,6 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
         worker_id=worker_id,
     )
 
-    # Set log label from payload for human-readable filenames
-    capture.set_log_label(payload.make_log_label())
-
     # Set up logging capture for third-party library output
     log_buffer = io.StringIO()
     log_handler = logging.StreamHandler(log_buffer)
@@ -89,6 +86,22 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
     old_level = root_logger.level
     root_logger.handlers = [log_handler]
     root_logger.setLevel(logging.DEBUG)
+
+    # Write RUNNING record before execution
+    running_record = RunRecord.running(
+        run_id=payload.run_id,
+        experiment_id=payload.experiment_id,
+        context_fingerprint=payload.fingerprints.get("context", ""),
+        params_fingerprint=payload.fingerprints.get("params", ""),
+        seed_fingerprint=payload.fingerprints.get("seed", ""),
+        started_at=started_at,
+        params_resolved=payload.params_resolved,
+        provenance=Provenance(
+            code_hash=operation.code_hash,
+            executor_id="process",
+        ),
+    )
+    store.put_run_record(running_record)
 
     try:
         # Execute
@@ -163,8 +176,7 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
         # Save third-party logging output if any
         log_content = log_buffer.getvalue()
         if log_content:
-            label = payload.make_log_label()
-            store.put_log(payload.run_id, "logging", log_content, label=label)
+            store.put_log(payload.run_id, "logging", log_content)
 
     # Serialize result for return (avoid pickle issues with complex objects)
     return dump_run_record(result)

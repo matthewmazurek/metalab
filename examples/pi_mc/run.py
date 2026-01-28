@@ -44,7 +44,7 @@ exp = metalab.Experiment(
     context={},
     operation=estimate_pi,
     # grid(): Cartesian product of parameters → 3 parameter combinations
-    params=metalab.grid(n_samples=[1000, 10000, 100000]),
+    params=metalab.grid(n_samples=[100_000, 1_000_000, 5_000_000]),
     # seeds(): base seed + replicates → 3 independent runs per param config
     # Total runs = 3 params × 3 replicates = 9 runs
     seeds=metalab.seeds(base=42, replicates=10),

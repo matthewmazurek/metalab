@@ -3,11 +3,19 @@ Capture: Interface for emitting metrics, artifacts, and logs.
 
 The Capture object is passed to Operation.run() and provides methods
 for recording experimental outputs without returning large objects.
+
+Logging:
+    Logs are streamed in real-time to the store using Python's logging module.
+    This enables:
+    - Real-time log visibility (tail -f works)
+    - Crash resilience (logs written immediately)
+    - Integration with third-party library logging via subscribe_logger()
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -25,12 +33,16 @@ class Capture:
     Interface for capturing metrics, artifacts, and logs during a run.
 
     The Capture object is created by the executor and passed to the operation.
-    It buffers data and persists it to the store.
+    Logs are streamed in real-time to the store.
 
     Example:
         @metalab.operation
         def my_operation(context, params, seeds, capture, runtime):
             capture.log("Starting operation")
+
+            # Subscribe to third-party library logs
+            capture.subscribe_logger("dynamo")
+            capture.subscribe_logger("sklearn", level=logging.WARNING)
 
             # Capture scalar metrics
             capture.metric("accuracy", 0.95)
@@ -46,6 +58,10 @@ class Capture:
             # No return needed - success is implicit
     """
 
+    # Default log format
+    LOG_FORMAT = "%(asctime)s [%(levelname)-7s] [%(name)s] %(message)s"
+    LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
     def __init__(
         self,
         store: Store,
@@ -54,7 +70,7 @@ class Capture:
         allow_pickle: bool = False,
         artifact_dir: Path | None = None,
         worker_id: str | None = None,
-        immediate_logging: bool = False,
+        immediate_logging: bool = False,  # Kept for backward compat, now always True
     ) -> None:
         """
         Initialize the capture interface.
@@ -66,7 +82,7 @@ class Capture:
             allow_pickle: Whether to allow pickle serialization.
             artifact_dir: Directory for temporary artifact files.
             worker_id: Worker identifier for log messages (e.g., "thread:2", "process:3").
-            immediate_logging: If True, log() calls write immediately to store.
+            immediate_logging: Deprecated - logging is now always streamed immediately.
         """
         self._store = store
         self._run_id = run_id
@@ -74,46 +90,127 @@ class Capture:
         self._allow_pickle = allow_pickle
         self._artifact_dir = artifact_dir or Path("/tmp/metalab_artifacts") / run_id
 
-        # Buffered data
+        # Buffered data (metrics and artifacts only - logs stream directly)
         self._metrics: dict[str, Any] = {}
         self._stepped_metrics: list[dict[str, Any]] = []
         self._artifacts: list[ArtifactDescriptor] = []
         self._finalized = False
 
-        # Logging
-        self._logs: list[str] = []
+        # Logging setup
         self._worker_id = worker_id
-        self._immediate_logging = immediate_logging
-        self._log_label: str | None = None
+        self._log_handler: logging.Handler | None = None
+        self._log_path: Path | None = None
+        self._subscribed_loggers: list[tuple[logging.Logger, logging.Handler]] = []
+
+        # Set up streaming logger
+        self._setup_streaming_logger()
+
+    def _setup_streaming_logger(self) -> None:
+        """Set up the streaming file logger."""
+        # Try to get a direct log path from the store (FileStore has this)
+        if hasattr(self._store, "get_log_path"):
+            self._log_path = self._store.get_log_path(self._run_id, "run")
+        elif hasattr(self._store, "root"):
+            # Fallback: construct path manually for FileStore-like stores
+            self._log_path = Path(self._store.root) / "logs" / f"{self._run_id}_run.log"
+        else:
+            # Remote store - use artifact_dir as scratch space, upload at finalize
+            self._log_path = self._artifact_dir / "run.log"
+
+        # Ensure parent directory exists
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create file handler for streaming
+        self._log_handler = logging.FileHandler(self._log_path, mode="a", encoding="utf-8")
+        self._log_handler.setLevel(logging.DEBUG)
+
+        # Format includes logger name for distinguishing sources
+        formatter = logging.Formatter(self.LOG_FORMAT, datefmt=self.LOG_DATE_FORMAT)
+        self._log_handler.setFormatter(formatter)
+
+        # Create the run's logger
+        logger_name = f"metalab.run.{self._run_id[:8]}"
+        if self._worker_id:
+            logger_name = f"{logger_name}.{self._worker_id}"
+
+        self._logger = logging.getLogger(logger_name)
+        self._logger.setLevel(logging.DEBUG)
+        self._logger.addHandler(self._log_handler)
+        self._logger.propagate = False  # Don't propagate to root
+
+    def subscribe_logger(
+        self,
+        name: str,
+        level: int = logging.DEBUG,
+    ) -> None:
+        """
+        Subscribe to a named logger to capture its output.
+
+        This attaches the capture's file handler to the specified logger,
+        capturing all its log messages to the run's log file. Works even
+        if the logger has propagate=False (like dynamo-release).
+
+        Args:
+            name: The logger name (e.g., "dynamo", "sklearn", "tensorflow").
+            level: Minimum log level to capture (default: DEBUG).
+
+        Example:
+            # Capture all dynamo logs
+            capture.subscribe_logger("dynamo")
+
+            # Capture sklearn warnings and above
+            capture.subscribe_logger("sklearn", level=logging.WARNING)
+
+            # Now any logging from these libraries is captured
+            import dynamo as dyn
+            dyn.tl.dynamics(adata)  # Logs captured automatically
+        """
+        if self._log_handler is None:
+            return
+
+        logger = logging.getLogger(name)
+
+        # Add our handler to their logger
+        logger.addHandler(self._log_handler)
+
+        # Ensure the logger level allows our desired messages through
+        if logger.level == logging.NOTSET or logger.level > level:
+            logger.setLevel(level)
+
+        # Track for cleanup
+        self._subscribed_loggers.append((logger, self._log_handler))
+
+        # Log the subscription
+        self._logger.debug(f"Subscribed to logger: {name} (level={logging.getLevelName(level)})")
+
+    def unsubscribe_logger(self, name: str) -> None:
+        """
+        Unsubscribe from a named logger.
+
+        Args:
+            name: The logger name to unsubscribe from.
+        """
+        if self._log_handler is None:
+            return
+
+        logger = logging.getLogger(name)
+
+        # Remove our handler if present
+        if self._log_handler in logger.handlers:
+            logger.removeHandler(self._log_handler)
+
+        # Remove from tracking list
+        self._subscribed_loggers = [
+            (lg, h) for lg, h in self._subscribed_loggers if lg.name != name
+        ]
 
     def set_immediate_logging(self, enabled: bool) -> None:
         """
-        Set whether logs are written immediately or buffered.
+        Deprecated: Logging is now always immediate (streamed to file).
 
-        For long-running operations, enable immediate logging so progress
-        is visible even if the operation fails partway through.
-
-        Args:
-            enabled: If True, all subsequent log() calls write immediately.
-                     If False, logs are buffered until finalize().
-
-        Example:
-            capture.set_immediate_logging(True)
-            capture.log("Progress checkpoint")  # Written immediately
+        This method is kept for backward compatibility but has no effect.
         """
-        self._immediate_logging = enabled
-
-    def set_log_label(self, label: str) -> None:
-        """
-        Set the label used for log filenames.
-
-        This is typically called by the executor to set a human-readable
-        label for the log file (e.g., based on parameters).
-
-        Args:
-            label: Human-readable label for log filenames.
-        """
-        self._log_label = label
+        pass  # No-op - logging is always immediate now
 
     def log(
         self,
@@ -124,44 +221,39 @@ class Capture:
         """
         Log a message for this run.
 
-        Messages are stored with timestamp, level, and worker ID, then saved
-        to the run's log file. By default, logs are buffered and written when
-        the operation completes. Use immediate=True or set_immediate_logging(True)
-        for long-running operations.
+        Messages are streamed immediately to the run's log file, enabling
+        real-time visibility (e.g., via tail -f).
 
         Args:
             message: The log message.
             level: Log level - "debug", "info", "warning", "error" (default: "info").
-            immediate: Override immediate write behavior for this call.
-                       None = use capture-level default (set via set_immediate_logging).
+            immediate: Deprecated - logging is always immediate now.
 
         Example:
             capture.log("Starting optimization")
             capture.log(f"Iteration {i}: loss={loss:.4f}")
             capture.log("Convergence failed", level="warning")
-
-            # For long-running operations:
-            capture.set_immediate_logging(True)
-            capture.log("Progress checkpoint")  # Written immediately
-
-            # Or override per-call:
-            capture.log("Critical checkpoint", immediate=True)
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        worker_part = f" [{self._worker_id}]" if self._worker_id else ""
-        formatted = f"{timestamp} [{level.upper():7}]{worker_part} {message}"
-        self._logs.append(formatted)
+        log_method = getattr(self._logger, level.lower(), self._logger.info)
+        log_method(message)
 
-        # Determine if we should write immediately
-        write_now = immediate if immediate is not None else self._immediate_logging
-        if write_now:
-            self._flush_logs()
+    @property
+    def logger(self) -> logging.Logger:
+        """
+        Get the Python logger for this run.
+
+        Use this for direct access to Python's logging API.
+
+        Example:
+            capture.logger.info("Using standard logging API")
+            capture.logger.exception("Caught error", exc_info=True)
+        """
+        return self._logger
 
     def _flush_logs(self) -> None:
-        """Write buffered logs to store."""
-        if self._logs:
-            log_content = "\n".join(self._logs)
-            self._store.put_log(self._run_id, "run", log_content, label=self._log_label)
+        """Flush any buffered log content."""
+        if self._log_handler:
+            self._log_handler.flush()
 
     @property
     def metrics(self) -> dict[str, Any]:
@@ -381,7 +473,7 @@ class Capture:
         )
 
     def flush(self) -> None:
-        """Persist any buffered data to the store."""
+        """Flush any buffered log content to disk."""
         self._flush_logs()
 
     def finalize(self) -> dict[str, Any]:
@@ -389,7 +481,8 @@ class Capture:
         Finalize capture and return collected data.
 
         This is called by the executor in a finally block to ensure
-        partial results are captured even on failure.
+        partial results are captured even on failure. Cleans up logging
+        handlers and uploads logs for remote stores.
 
         Returns:
             Dict containing metrics, artifacts, and logs.
@@ -398,7 +491,39 @@ class Capture:
             return self._get_summary()
 
         self._finalized = True
-        self._flush_logs()
+
+        # Clean up subscribed loggers
+        for logger, handler in self._subscribed_loggers:
+            try:
+                logger.removeHandler(handler)
+            except Exception:
+                pass  # Best effort cleanup
+
+        self._subscribed_loggers.clear()
+
+        # Close and flush the main log handler
+        if self._log_handler:
+            try:
+                self._log_handler.flush()
+                self._log_handler.close()
+            except Exception:
+                pass  # Best effort cleanup
+
+            # Remove handler from our logger
+            if self._logger and self._log_handler in self._logger.handlers:
+                self._logger.removeHandler(self._log_handler)
+
+        # For remote stores, upload the log file
+        # (FileStore writes directly, no upload needed)
+        if self._log_path and self._log_path.exists():
+            if not hasattr(self._store, "get_log_path") and not hasattr(self._store, "root"):
+                # Remote store - upload via put_log
+                try:
+                    log_content = self._log_path.read_text(encoding="utf-8")
+                    self._store.put_log(self._run_id, "run", log_content)
+                except Exception:
+                    pass  # Best effort
+
         return self._get_summary()
 
     def _get_summary(self) -> dict[str, Any]:

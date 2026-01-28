@@ -20,7 +20,7 @@ import metalab
 from metalab import ThreadExecutor
 
 
-def generate_data(rng, n_points: int = 50, noise: float = 0.1):
+def generate_data(rng, n_points: int = 500, noise: float = 0.1):
     """Generate noisy exponential decay data."""
     # True parameters: a=2.0, b=0.5, c=0.5
     x = np.linspace(0, 5, n_points)
@@ -70,7 +70,7 @@ def fit_curve(params, seeds, capture):
     rng = seeds.numpy()
 
     # Generate noisy training data
-    x_data, y_data = generate_data(rng, n_points=50, noise=0.1)
+    x_data, y_data = generate_data(rng, n_points=500, noise=0.1)
 
     # Initialize parameters randomly: [a, b, c]
     theta = rng.uniform(0.5, 3.0, size=3)
@@ -126,7 +126,10 @@ exp = metalab.Experiment(
     # Grid search over learning rates and iteration counts
     params=metalab.grid(
         learning_rate=[0.01, 0.05, 0.1],  # X-axis sweep in atlas
-        n_iterations=[200, 500],  # Grouping dimension
+        n_iterations=[
+            5_000,
+            10_000,
+        ],  # Grouping dimension (more iterations for visible runtime)
     ),
     # 3 replicates for error bars in atlas
     seeds=metalab.seeds(base=42, replicates=3),
@@ -182,3 +185,63 @@ if __name__ == "__main__":
     )
     print("  - View loss_history artifact as a line chart (1D array)")
     print("  - Compare runs with different learning rates side-by-side")
+
+    # ==========================================================================
+    # NEW: to_dataframe() with artifact reducers
+    # ==========================================================================
+    print("\n" + "=" * 60)
+    print("DataFrame Export with Artifact Reducers")
+    print("=" * 60)
+
+    # Define reducers to extract scalars from artifacts
+    def reduce_loss_history(arr):
+        """Extract convergence statistics from loss history."""
+        return {
+            "initial_loss": float(arr[0]),
+            "final_loss_check": float(arr[-1]),
+            "improvement_ratio": float(arr[0] / arr[-1]) if arr[-1] > 0 else 0.0,
+        }
+
+    def reduce_fitted_params(arr, run):
+        """Extract fitted parameters with context-aware naming."""
+        # Context-aware: we can access run.params if needed
+        return {
+            "fitted_a": float(arr[0]),
+            "fitted_b": float(arr[1]),
+            "fitted_c": float(arr[2]),
+        }
+
+    # Export to DataFrame with artifact-derived columns
+    df = results.to_dataframe(
+        artifact_reducers={
+            "loss_history": reduce_loss_history,
+            "fitted_params": reduce_fitted_params,
+        }
+    )
+
+    print(f"DataFrame shape: {df.shape}")
+    print(f"Columns: {list(df.columns)}")
+    print("\nSample rows (first 3):")
+    print(
+        df[
+            [
+                "param_learning_rate",
+                "param_n_iterations",
+                "final_loss",
+                "improvement_ratio",
+                "fitted_a",
+            ]
+        ].head(3)
+    )
+
+    # Example: Analyze with pandas groupby
+    print("\n" + "=" * 60)
+    print("Pandas Analysis Example")
+    print("=" * 60)
+    summary = (
+        df.groupby("param_learning_rate")
+        .agg({"final_loss": ["mean", "std"], "improvement_ratio": "mean"})
+        .round(4)
+    )
+    print("Final loss by learning rate:")
+    print(summary)
