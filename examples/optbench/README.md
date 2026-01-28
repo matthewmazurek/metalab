@@ -29,10 +29,10 @@ Define shared configuration using a frozen dataclass:
 @metalab.context_spec
 class BenchmarkConfig:
     """Shared configuration for all optimization runs."""
-    max_iterations: int = 500
+    max_iterations: int = 2000
     convergence_threshold: float = 1e-6
 
-config = BenchmarkConfig(max_iterations=500)
+config = BenchmarkConfig(max_iterations=2000)
 exp = metalab.Experiment(context=config, ...)
 ```
 
@@ -64,7 +64,7 @@ Grid over algorithms and test functions:
 params=metalab.grid(
     algorithm=["gd", "adam", "sa"],
     problem=["sphere", "rosenbrock", "rastrigin"],
-    dim=[2, 10],
+    dim=[10, 30],
     lr=[0.01, 0.1],
 )
 ```
@@ -103,12 +103,12 @@ Compare algorithms across multiple dimensions:
 |-----------|--------|---------|
 | `algorithm` | gd, adam, sa | Categorical grouping |
 | `problem` | sphere, rosenbrock, rastrigin | Categorical grouping |
-| `dim` | 2, 10 | Numeric dimension |
+| `dim` | 10, 30 | Numeric dimension |
 | `lr` | 0.01, 0.1 | Learning rate |
 | replicates | 5 | Robust statistics |
 
 **Total runs:** 180 (36 param combos × 5 seeds)
-**Runtime:** ~2-3 minutes
+**Runtime:** ~1-2 minutes
 
 ## Algorithms
 

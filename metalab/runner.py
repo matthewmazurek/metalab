@@ -174,8 +174,12 @@ def generate_payloads(
             )
         logger.debug(f"Saved context manifest to {manifest_path}")
 
-    payloads = []
+    # First pass: compute all run_ids and store resolved params/seeds
+    # We need this before writing the manifest so we can include run_ids
     all_run_ids = []
+    run_data: list[tuple[str, dict, Any, str, str]] = (
+        []
+    )  # (run_id, resolved_params, seed_bundle, params_fp, seed_fp)
 
     for param_case in experiment.params:
         # Resolve params if resolver is provided
@@ -202,29 +206,62 @@ def generate_payloads(
             )
 
             all_run_ids.append(run_id)
+            run_data.append((run_id, resolved_params, seed_bundle, params_fp, seed_fp))
 
-            # Check for resume
-            if resume and store.run_exists(run_id):
-                existing = store.get_run_record(run_id)
-                if existing and existing.status == Status.SUCCESS:
-                    continue
+    # Write experiment manifest (versioned by timestamp) - now includes run_ids
+    if persist_manifest and hasattr(store, "root"):
+        import json
+        from datetime import datetime
+        from pathlib import Path
 
-            payload = RunPayload(
-                run_id=run_id,
-                experiment_id=experiment.experiment_id,
-                context_spec=experiment.context,
-                params_resolved=resolved_params,
-                seed_bundle=seed_bundle,
-                store_locator=str(store.root) if hasattr(store, "root") else "",
-                fingerprints={
-                    "context": ctx_fp,
-                    "params": params_fp,
-                    "seed": seed_fp,
-                },
-                operation_ref=experiment.operation.ref,
-            )
+        from metalab.manifest import build_experiment_manifest
 
-            payloads.append(payload)
+        exp_manifest = build_experiment_manifest(
+            experiment=experiment,
+            context_fingerprint=ctx_fp,
+            total_runs=len(all_run_ids),
+            run_ids=all_run_ids,
+        )
+
+        exp_dir = Path(store.root) / "experiments"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_id = experiment.experiment_id.replace(":", "_")
+        exp_manifest_path = exp_dir / f"{safe_id}_{timestamp}.json"
+
+        with exp_manifest_path.open("w") as f:
+            json.dump(exp_manifest, f, indent=2, default=str)
+
+        logger.debug(f"Saved experiment manifest to {exp_manifest_path}")
+
+    # Second pass: create payloads, skipping successful runs if resume=True
+    payloads = []
+
+    for run_id, resolved_params, seed_bundle, params_fp, seed_fp in run_data:
+        # Check for resume
+        if resume and store.run_exists(run_id):
+            existing = store.get_run_record(run_id)
+            if existing and existing.status == Status.SUCCESS:
+                continue
+
+        payload = RunPayload(
+            run_id=run_id,
+            experiment_id=experiment.experiment_id,
+            context_spec=experiment.context,
+            params_resolved=resolved_params,
+            seed_bundle=seed_bundle,
+            store_locator=str(store.root) if hasattr(store, "root") else "",
+            fingerprints={
+                "context": ctx_fp,
+                "params": params_fp,
+                "seed": seed_fp,
+            },
+            runtime_hints=experiment.runtime_hints,
+            operation_ref=experiment.operation.ref,
+        )
+
+        payloads.append(payload)
 
     return payloads, all_run_ids
 

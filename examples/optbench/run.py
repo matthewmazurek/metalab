@@ -247,7 +247,7 @@ class BenchmarkConfig:
     - Type-safe configuration
     """
 
-    max_iterations: int = 500
+    max_iterations: int = 2000
     convergence_threshold: float = 1e-6
 
 
@@ -354,7 +354,7 @@ def run_optimization(context, params, seeds, capture):
 # =============================================================================
 
 # Create context with custom settings
-config = BenchmarkConfig(max_iterations=500, convergence_threshold=1e-6)
+config = BenchmarkConfig(max_iterations=2000, convergence_threshold=1e-6)
 
 exp = metalab.Experiment(
     name="optbench",
@@ -365,7 +365,7 @@ exp = metalab.Experiment(
     params=metalab.grid(
         algorithm=["gd", "adam", "sa"],
         problem=["sphere", "rosenbrock", "rastrigin"],
-        dim=[2, 10],
+        dim=[10, 30],  # Higher dimensions for more computation
         lr=[0.01, 0.1],
     ),
     # 5 replicates for robust statistics

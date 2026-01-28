@@ -187,9 +187,6 @@ def _slurm_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
         worker_id=worker_id,
     )
 
-    # Set log label from payload for human-readable filenames
-    capture.set_log_label(payload.make_log_label())
-
     # Set up logging capture for third-party library output
     log_buffer = io.StringIO()
     log_handler = _logging.StreamHandler(log_buffer)
@@ -285,8 +282,7 @@ def _slurm_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
         # Save third-party logging output if any
         log_content = log_buffer.getvalue()
         if log_content:
-            label = payload.make_log_label()
-            store.put_log(payload.run_id, "logging", log_content, label=label)
+            store.put_log(payload.run_id, "logging", log_content)
 
 
 class SlurmExecutor:

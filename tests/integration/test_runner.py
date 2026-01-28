@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,24 @@ def failing_operation(
 ) -> metalab.RunRecord:
     """Operation that fails."""
     raise ValueError("Intentional failure")
+
+
+@metalab.operation
+def operation_with_artifact(
+    context: Any,
+    params: dict[str, Any],
+    seeds: metalab.SeedBundle,
+    runtime: metalab.Runtime,
+    capture: metalab.Capture,
+) -> None:
+    """Operation that captures an artifact."""
+    import numpy as np
+
+    # Create a simple array based on params
+    arr = np.array([[params["x"] * i for i in range(5)] for _ in range(3)])
+    capture.artifact("data", arr, kind="numpy")
+    capture.metric("sum", float(arr.sum()))
+    capture.metric("threshold", params.get("threshold", 0.5))
 
 
 @pytest.fixture
@@ -250,6 +269,128 @@ class TestResultHandle:
         assert summary["total_runs"] == 2
         assert "success" in summary["by_status"]
 
+    def test_run_params_property(self, store_path: Path):
+        """Run.params should expose resolved parameters."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[10, 20]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        # Check that params are accessible
+        run = result[0]
+        assert "x" in run.params
+        assert run.params["x"] in [10, 20]
+
+    def test_to_dataframe_basic(self, store_path: Path):
+        """to_dataframe() should return a DataFrame with params and metrics."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1, 2, 3]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        import pandas as pd
+
+        df = result.to_dataframe()
+
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 3
+        # Check param column is prefixed
+        assert "param_x" in df.columns
+        # Check metric is included
+        assert "result" in df.columns
+        # Check record fields are included by default
+        assert "run_id" in df.columns
+        assert "status" in df.columns
+
+    def test_to_dataframe_exclude_options(self, store_path: Path):
+        """to_dataframe() should respect include_* flags."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        # Exclude everything
+        df = result.to_dataframe(
+            include_params=False, include_metrics=False, include_record=False
+        )
+
+        assert len(df) == 1
+        assert "param_x" not in df.columns
+        assert "result" not in df.columns
+        assert "run_id" not in df.columns
+
+    def test_to_dataframe_with_simple_reducer(self, store_path: Path):
+        """to_dataframe() should apply simple artifact reducers."""
+        pytest.importorskip("numpy")
+
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_artifact,
+            params=metalab.grid(x=[2, 3]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        def simple_reducer(arr):
+            return {"arr_mean": float(arr.mean()), "arr_max": float(arr.max())}
+
+        df = result.to_dataframe(artifact_reducers={"data": simple_reducer})
+
+        assert "arr_mean" in df.columns
+        assert "arr_max" in df.columns
+        assert len(df) == 2
+
+    def test_to_dataframe_with_context_aware_reducer(self, store_path: Path):
+        """to_dataframe() should pass run context to 2-arg reducers."""
+        pytest.importorskip("numpy")
+
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_artifact,
+            params=metalab.grid(x=[2], threshold=[0.5, 1.0]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        def context_reducer(arr, run):
+            # Use threshold from run params
+            threshold = run.params.get("threshold", 0.5)
+            return {"above_threshold": float((arr > threshold).mean())}
+
+        df = result.to_dataframe(artifact_reducers={"data": context_reducer})
+
+        assert "above_threshold" in df.columns
+        assert len(df) == 2
+
 
 class TestRunHandle:
     """Tests for RunHandle functionality."""
@@ -439,5 +580,378 @@ class TestCaptureLog:
 
         run_log = store.get_log(run_id, "run")
         assert run_log is not None
-        # ThreadExecutor uses "thread:N" format
-        assert "[thread:" in run_log
+        # ThreadExecutor uses "thread:N" format in the logger name
+        assert "thread:" in run_log
+
+    def test_capture_subscribe_logger(self, store_path: Path):
+        """Test that capture.subscribe_logger() captures third-party logs."""
+        import logging
+
+        # Create a "third-party" logger that doesn't propagate
+        third_party_logger = logging.getLogger("my_library")
+        third_party_logger.setLevel(logging.DEBUG)
+        third_party_logger.propagate = False  # Like dynamo-release
+
+        @metalab.operation
+        def op_with_subscribe(context, params, seeds, capture, runtime):
+            # Subscribe to the third-party logger
+            capture.subscribe_logger("my_library")
+
+            capture.log("Operation started")
+
+            # Log from the third-party logger
+            third_party_logger.info("Third-party info message")
+            third_party_logger.warning("Third-party warning")
+
+            capture.log("Operation completed")
+
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=op_with_subscribe,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        from metalab.store.file import FileStore
+
+        store = FileStore(str(store_path))
+        run_id = result[0].run_id
+
+        run_log = store.get_log(run_id, "run")
+        assert run_log is not None
+
+        # Check that our operation logs are captured
+        assert "Operation started" in run_log
+        assert "Operation completed" in run_log
+
+        # Check that third-party logger output is captured
+        assert "Third-party info message" in run_log
+        assert "Third-party warning" in run_log
+        assert "[my_library]" in run_log  # Logger name should appear
+
+    def test_capture_logger_property(self, store_path: Path):
+        """Test that capture.logger provides access to Python's logging API."""
+
+        @metalab.operation
+        def op_with_logger_property(context, params, seeds, capture, runtime):
+            # Use the logger property directly
+            capture.logger.info("Using logger.info")
+            capture.logger.debug("Using logger.debug")
+            capture.logger.warning("Using logger.warning")
+
+            # Can also use capture.log() interchangeably
+            capture.log("Using capture.log")
+
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=op_with_logger_property,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        from metalab.store.file import FileStore
+
+        store = FileStore(str(store_path))
+        run_id = result[0].run_id
+
+        run_log = store.get_log(run_id, "run")
+        assert run_log is not None
+
+        # All logging methods should work
+        assert "Using logger.info" in run_log
+        assert "Using logger.debug" in run_log
+        assert "Using logger.warning" in run_log
+        assert "Using capture.log" in run_log
+
+
+class TestExperimentManifest:
+    """Tests for experiment manifest creation."""
+
+    def test_manifest_created_on_run(self, store_path: Path):
+        """Experiment manifest should be created when run() is called."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            description="Test experiment",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1, 2, 3]),
+            seeds=metalab.seeds(base=42, replicates=2),
+            tags=["test", "integration"],
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        handle.result()
+
+        # Check that experiments directory exists
+        experiments_dir = store_path / "experiments"
+        assert experiments_dir.exists()
+
+        # Check that a manifest file was created
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        assert len(manifest_files) == 1
+
+        # Load and verify content
+        manifest = json.loads(manifest_files[0].read_text())
+        assert manifest["experiment_id"] == "test:1.0"
+        assert manifest["name"] == "test"
+        assert manifest["version"] == "1.0"
+        assert manifest["description"] == "Test experiment"
+        assert manifest["tags"] == ["test", "integration"]
+        assert manifest["total_runs"] == 6  # 3 params * 2 replicates
+
+    def test_manifest_contains_param_source(self, store_path: Path):
+        """Manifest should contain serialized param source."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1, 2, 3], y=[10, 20]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        handle.result()
+
+        experiments_dir = store_path / "experiments"
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        manifest = json.loads(manifest_files[0].read_text())
+
+        # Check params section
+        assert manifest["params"]["type"] == "GridSource"
+        assert manifest["params"]["spec"] == {"x": [1, 2, 3], "y": [10, 20]}
+        assert manifest["params"]["total_cases"] == 6
+
+    def test_manifest_contains_seed_plan(self, store_path: Path):
+        """Manifest should contain serialized seed plan."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=123, replicates=5),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        handle.result()
+
+        experiments_dir = store_path / "experiments"
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        manifest = json.loads(manifest_files[0].read_text())
+
+        # Check seeds section
+        assert manifest["seeds"]["type"] == "SeedPlan"
+        assert manifest["seeds"]["base"] == 123
+        assert manifest["seeds"]["replicates"] == 5
+
+    def test_manifest_contains_operation_info(self, store_path: Path):
+        """Manifest should contain operation reference and code hash."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        handle.result()
+
+        experiments_dir = store_path / "experiments"
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        manifest = json.loads(manifest_files[0].read_text())
+
+        # Check operation section
+        assert "operation" in manifest
+        assert manifest["operation"]["name"] == "simple_operation"
+        assert "ref" in manifest["operation"]
+        assert "code_hash" in manifest["operation"]
+
+    def test_manifest_has_timestamp(self, store_path: Path):
+        """Manifest should include submission timestamp."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        handle.result()
+
+        experiments_dir = store_path / "experiments"
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        manifest = json.loads(manifest_files[0].read_text())
+
+        # Check timestamp
+        assert "submitted_at" in manifest
+        # Should be ISO format
+        from datetime import datetime
+
+        datetime.fromisoformat(manifest["submitted_at"])
+
+    def test_multiple_runs_create_multiple_manifests(self, store_path: Path):
+        """Multiple runs should create multiple timestamped manifests."""
+        import time
+
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        # First run
+        handle1 = metalab.run(exp, store=str(store_path))
+        handle1.result()
+
+        # Wait a second to ensure different timestamp
+        time.sleep(1.1)
+
+        # Second run (with resume=False to force re-execution)
+        handle2 = metalab.run(exp, store=str(store_path), resume=False)
+        handle2.result()
+
+        experiments_dir = store_path / "experiments"
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        assert len(manifest_files) == 2
+
+    def test_manifest_contains_run_ids(self, store_path: Path):
+        """Manifest should contain all expected run_ids."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1, 2, 3]),
+            seeds=metalab.seeds(base=42, replicates=2),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        # Get the run IDs from the results
+        result_run_ids = set(run.run_id for run in result)
+
+        # Check the manifest
+        experiments_dir = store_path / "experiments"
+        manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
+        manifest = json.loads(manifest_files[0].read_text())
+
+        # Manifest should have run_ids field
+        assert "run_ids" in manifest
+        assert manifest["run_ids"] is not None
+
+        # All result run IDs should be in the manifest
+        manifest_run_ids = set(manifest["run_ids"])
+        assert result_run_ids == manifest_run_ids
+
+        # Count should match total_runs
+        assert len(manifest["run_ids"]) == manifest["total_runs"]
+
+
+class TestRunningStatusRecords:
+    """Tests for RUNNING status record functionality."""
+
+    def test_running_record_written_before_completion(self, store_path: Path):
+        """A running record should be written before the operation completes."""
+        import threading
+        import time
+
+        # Track when we see the running record
+        seen_running = threading.Event()
+        seen_run_id = [None]
+
+        @metalab.operation
+        def slow_operation(
+            context: Any,
+            params: dict[str, Any],
+            seeds: metalab.SeedBundle,
+            runtime: metalab.Runtime,
+            capture: metalab.Capture,
+        ) -> None:
+            """Operation that takes some time."""
+            # Give the test time to check for RUNNING record
+            time.sleep(0.5)
+            capture.metric("result", params["x"] * 2)
+
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=slow_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        from metalab.store.file import FileStore
+
+        # Use a monitor to check for running records
+        def monitor_for_running():
+            store = FileStore(str(store_path))
+            for _ in range(20):  # Try for up to 2 seconds
+                records = store.list_run_records()
+                for record in records:
+                    if record.status == Status.RUNNING:
+                        seen_run_id[0] = record.run_id
+                        seen_running.set()
+                        return
+                time.sleep(0.1)
+
+        monitor_thread = threading.Thread(target=monitor_for_running)
+        monitor_thread.start()
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        monitor_thread.join()
+
+        # We should have seen a running record
+        assert seen_running.is_set(), "Should have seen a RUNNING status record"
+        # The run should have eventually succeeded
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+        # The run ID should match
+        assert result[0].run_id == seen_run_id[0]
+
+    def test_final_record_overwrites_running(self, store_path: Path):
+        """The final SUCCESS/FAILED record should overwrite the RUNNING record."""
+        exp = metalab.Experiment(
+            name="test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        # Check the final record in the store
+        from metalab.store.file import FileStore
+
+        store = FileStore(str(store_path))
+        records = store.list_run_records()
+
+        # Should only have one record per run_id
+        assert len(records) == 1
+        # Final status should be SUCCESS, not RUNNING
+        assert records[0].status == Status.SUCCESS

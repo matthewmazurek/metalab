@@ -96,11 +96,11 @@ In metalab-atlas, try these visualizations:
 - 3 replicates = 27 total runs
 
 ### Random Search
-- 30 trials with distributions
+- 27 trials with distributions (matching grid search)
 - 3 replicates = 81 total runs
 
 **Total runs:** ~108
-**Runtime:** ~30 seconds
+**Runtime:** ~5-15 seconds
 
 ## Domain
 

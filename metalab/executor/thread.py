@@ -132,8 +132,21 @@ class ThreadExecutor:
             worker_id=worker_id,
         )
 
-        # Set log label from payload for human-readable filenames
-        capture.set_log_label(payload.make_log_label())
+        # Write RUNNING record before execution
+        running_record = RunRecord.running(
+            run_id=payload.run_id,
+            experiment_id=payload.experiment_id,
+            context_fingerprint=payload.fingerprints.get("context", ""),
+            params_fingerprint=payload.fingerprints.get("params", ""),
+            seed_fingerprint=payload.fingerprints.get("seed", ""),
+            started_at=started_at,
+            params_resolved=payload.params_resolved,
+            provenance=Provenance(
+                code_hash=operation.code_hash,
+                executor_id="thread",
+            ),
+        )
+        store.put_run_record(running_record)
 
         try:
             # Execute the operation

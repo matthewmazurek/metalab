@@ -55,6 +55,15 @@ class ManualSource:
     def __repr__(self) -> str:
         return f"ManualSource({len(self._cases)} cases)"
 
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation for experiment manifests."""
+        return {
+            "type": "ManualSource",
+            "cases": self._cases,
+            "tags": self._tags,
+            "total_cases": len(self._cases),
+        }
+
 
 def manual(
     cases: list[dict[str, Any]],

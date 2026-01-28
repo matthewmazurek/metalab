@@ -90,6 +90,53 @@ class TestSeedBundle:
         assert restored.root_seed == bundle.root_seed
         assert restored.replicate_index == bundle.replicate_index
 
+    def test_for_preprocessing_returns_bundle(self):
+        """for_preprocessing() should return a SeedBundle."""
+        bundle = SeedBundle.for_preprocessing(42)
+        assert isinstance(bundle, SeedBundle)
+        assert bundle.replicate_index is None
+
+    def test_for_preprocessing_deterministic(self):
+        """Same base seed should produce same preprocessing bundle."""
+        b1 = SeedBundle.for_preprocessing(42)
+        b2 = SeedBundle.for_preprocessing(42)
+        assert b1.root_seed == b2.root_seed
+
+    def test_for_preprocessing_different_seeds(self):
+        """Different base seeds should produce different preprocessing bundles."""
+        b1 = SeedBundle.for_preprocessing(42)
+        b2 = SeedBundle.for_preprocessing(123)
+        assert b1.root_seed != b2.root_seed
+
+    def test_for_preprocessing_no_collision_with_replicates(self):
+        """Preprocessing seed should not collide with replicate seeds."""
+        base_seed = 42
+        prep_bundle = SeedBundle.for_preprocessing(base_seed)
+
+        # Create replicate bundles (as SeedPlan would)
+        replicate_bundles = [
+            SeedBundle(root_seed=base_seed, replicate_index=i) for i in range(10)
+        ]
+
+        # Preprocessing root should differ from replicate derivations
+        # (they use different namespaces internally)
+        prep_derived = prep_bundle.derive("test")
+        replicate_derived = [b.derive("test") for b in replicate_bundles]
+
+        assert prep_derived not in replicate_derived
+
+    def test_for_preprocessing_rng_reproducible(self):
+        """Preprocessing bundle should produce reproducible RNG."""
+        b1 = SeedBundle.for_preprocessing(42)
+        b2 = SeedBundle.for_preprocessing(42)
+
+        rng1 = b1.rng("split")
+        rng2 = b2.rng("split")
+
+        values1 = [rng1.random() for _ in range(10)]
+        values2 = [rng2.random() for _ in range(10)]
+        assert values1 == values2
+
 
 class TestSeedPlan:
     """Tests for SeedPlan."""

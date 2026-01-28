@@ -15,7 +15,6 @@ from typing import Any, Iterator, Protocol
 from metalab._ids import fingerprint_params
 from metalab.params.source import ParamCase
 
-
 # Distribution protocols and implementations
 
 
@@ -37,6 +36,10 @@ class Uniform:
     def sample(self, rng: stdlib_random.Random) -> float:
         return rng.uniform(self.low, self.high)
 
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation."""
+        return {"type": "Uniform", "low": self.low, "high": self.high}
+
 
 @dataclass(frozen=True)
 class LogUniform:
@@ -49,6 +52,10 @@ class LogUniform:
         log_low = math.log(self.low)
         log_high = math.log(self.high)
         return math.exp(rng.uniform(log_low, log_high))
+
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation."""
+        return {"type": "LogUniform", "low": self.low, "high": self.high}
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,10 @@ class LogUniformInt:
         log_high = math.log(self.high)
         return int(round(math.exp(rng.uniform(log_low, log_high))))
 
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation."""
+        return {"type": "LogUniformInt", "low": self.low, "high": self.high}
+
 
 @dataclass(frozen=True)
 class RandInt:
@@ -74,6 +85,10 @@ class RandInt:
     def sample(self, rng: stdlib_random.Random) -> int:
         return rng.randint(self.low, self.high)
 
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation."""
+        return {"type": "RandInt", "low": self.low, "high": self.high}
+
 
 @dataclass(frozen=True)
 class Choice:
@@ -83,6 +98,10 @@ class Choice:
 
     def sample(self, rng: stdlib_random.Random) -> Any:
         return rng.choice(self.options)
+
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation."""
+        return {"type": "Choice", "options": list(self.options)}
 
 
 # Convenience constructors for distributions
@@ -169,6 +188,17 @@ class RandomSource:
 
     def __repr__(self) -> str:
         return f"RandomSource(n_trials={self._n_trials}, seed={self._seed})"
+
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dict representation for experiment manifests."""
+        from metalab.manifest import serialize
+
+        return {
+            "type": "RandomSource",
+            "space": {k: serialize(v) for k, v in self._space.items()},
+            "n_trials": self._n_trials,
+            "seed": self._seed,
+        }
 
 
 def random(

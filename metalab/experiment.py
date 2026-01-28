@@ -34,6 +34,7 @@ class Experiment:
     - context: Shared configuration (lightweight spec)
     - params: Parameter sweep definition
     - seeds: Seed plan for replication
+    - runtime_hints: Non-reproducible hints (e.g., max_attempts, resource requests)
 
     Example:
         exp = Experiment(
@@ -57,6 +58,7 @@ class Experiment:
     description: str | None = None
     tags: list[str] = field(default_factory=list)
     param_resolver: ParamResolver | None = None
+    runtime_hints: dict[str, Any] = field(default_factory=dict)
 
     @property
     def experiment_id(self) -> str:

@@ -132,3 +132,45 @@ class SeedBundle:
             root_seed=data["root_seed"],
             replicate_index=data.get("replicate_index"),
         )
+
+    @classmethod
+    def for_preprocessing(cls, base_seed: int) -> SeedBundle:
+        """
+        Create a SeedBundle for preprocessing steps.
+
+        Use this when you need reproducible randomness during data
+        preprocessing, before the experiment runs. The preprocessing seed
+        is derived from the base seed using a "preprocessing" namespace,
+        ensuring it doesn't collide with replicate seeds.
+
+        To ensure reproducibility, include the same base_seed in your
+        ContextSpec so it becomes part of the context fingerprint.
+
+        Args:
+            base_seed: The experiment's base seed (same value you pass to
+                metalab.seeds(base=...)). This ensures preprocessing and
+                experiment runs share the same seed hierarchy.
+
+        Returns:
+            A SeedBundle for use in preprocessing code.
+
+        Example:
+            BASE_SEED = 42
+
+            # Use for preprocessing (before metalab.run)
+            seeds = SeedBundle.for_preprocessing(BASE_SEED)
+            rng = seeds.numpy("train_test_split")
+            train, test = my_split(data, rng=rng)
+
+            # Same base seed for experiment
+            exp = metalab.Experiment(
+                context=MyContext(data=..., base_seed=BASE_SEED),
+                seeds=metalab.seeds(base=BASE_SEED, replicates=5),
+                ...
+            )
+        """
+        # Derive a preprocessing-specific root seed from the base
+        data = f"{base_seed}:preprocessing:0"
+        h = hashlib.sha256(data.encode("utf-8")).digest()
+        prep_root = int.from_bytes(h[:8], "big")
+        return cls(root_seed=prep_root, replicate_index=None)
