@@ -5,6 +5,8 @@ Layout:
     {root}/
     ├── runs/
     │   └── {run_id}.json           # RunRecord (schema-versioned)
+    ├── derived/
+    │   └── {run_id}.json           # Derived metrics (post-hoc computed)
     ├── artifacts/
     │   └── {run_id}/
     │       ├── {name}.{ext}        # Artifact files
@@ -43,7 +45,7 @@ from metalab.schema import (
     load_artifact_descriptor,
     load_run_record,
 )
-from metalab.types import ArtifactDescriptor, RunRecord
+from metalab.types import ArtifactDescriptor, Metric, RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ class FileStore:
 
     # Layout constants
     RUNS_DIR = "runs"
+    DERIVED_DIR = "derived"
     ARTIFACTS_DIR = "artifacts"
     LOGS_DIR = "logs"
     LOCKS_DIR = ".locks"
@@ -77,6 +80,7 @@ class FileStore:
     def _ensure_layout(self) -> None:
         """Create the directory structure if needed."""
         (self._root / self.RUNS_DIR).mkdir(parents=True, exist_ok=True)
+        (self._root / self.DERIVED_DIR).mkdir(parents=True, exist_ok=True)
         (self._root / self.ARTIFACTS_DIR).mkdir(parents=True, exist_ok=True)
         (self._root / self.LOGS_DIR).mkdir(parents=True, exist_ok=True)
         (self._root / self.LOCKS_DIR).mkdir(parents=True, exist_ok=True)
@@ -301,6 +305,51 @@ class FileStore:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         return [load_artifact_descriptor(a) for a in manifest.get("artifacts", [])]
 
+    # Derived metrics operations
+
+    def put_derived(self, run_id: str, derived: dict[str, Metric]) -> None:
+        """
+        Persist derived metrics for a run.
+
+        Args:
+            run_id: The run identifier.
+            derived: Dict of derived metric values.
+        """
+        path = self._root / self.DERIVED_DIR / f"{run_id}.json"
+
+        with self._run_lock(run_id):
+            self._atomic_write_json(path, derived)
+
+    def get_derived(self, run_id: str) -> dict[str, Metric] | None:
+        """
+        Retrieve derived metrics for a run.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            Dict of derived metrics, or None if not found.
+        """
+        path = self._root / self.DERIVED_DIR / f"{run_id}.json"
+
+        if not path.exists():
+            return None
+
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def derived_exists(self, run_id: str) -> bool:
+        """
+        Check if derived metrics exist for a run.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            True if derived metrics exist.
+        """
+        path = self._root / self.DERIVED_DIR / f"{run_id}.json"
+        return path.exists()
+
     # Log operations
 
     def put_log(
@@ -410,12 +459,17 @@ class FileStore:
     # Utility methods
 
     def delete_run(self, run_id: str) -> None:
-        """Delete a run and all its artifacts/logs."""
+        """Delete a run and all its artifacts/logs/derived metrics."""
         with self._run_lock(run_id):
             # Delete run record
             run_path = self._root / self.RUNS_DIR / f"{run_id}.json"
             if run_path.exists():
                 run_path.unlink()
+
+            # Delete derived metrics
+            derived_path = self._root / self.DERIVED_DIR / f"{run_id}.json"
+            if derived_path.exists():
+                derived_path.unlink()
 
             # Delete artifacts
             artifact_dir = self._root / self.ARTIFACTS_DIR / run_id

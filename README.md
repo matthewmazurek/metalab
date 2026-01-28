@@ -209,40 +209,78 @@ results.to_csv("results.csv")
 old_results = metalab.load_results("./runs/my_exp")
 ```
 
-### DataFrame Export with Artifact Reducers
+### Derived Metrics
 
-Export results to pandas with artifact-derived columns using reducer functions:
+Compute post-hoc metrics from run artifacts, parameters, and captured metrics. Derived metrics are stored separately and do **not** affect experiment fingerprints.
 
 ```python
-# Define reducers to extract scalars from artifacts
-def reduce_loss_history(arr):
-    """Simple reducer: artifact -> dict of scalars."""
-    return {"final_loss": float(arr[-1]), "best_loss": float(arr.min())}
+from metalab.types import Metric
 
-def context_reducer(arr, run):
-    """Context-aware reducer: can access run.params."""
-    threshold = run.params.get("threshold", 0.5)
-    return {"above_threshold": float((arr > threshold).mean())}
+# Define derived metric functions
+def final_loss(run) -> dict[str, Metric]:
+    """Compute final loss from the loss_history artifact."""
+    loss_history = run.artifact("loss_history")
+    return {
+        "final_loss": float(loss_history[-1]),
+        "best_loss": float(loss_history.min()),
+    }
 
-# Export to DataFrame with reduced artifacts
+def normalized_score(run) -> dict[str, Metric]:
+    """Compute normalized score using params and metrics."""
+    lr = run.params["learning_rate"]
+    score = run.metrics["score"]
+    return {"normalized_score": score / lr}
+```
+
+**Option 1: Compute at run time (worker-side)**
+
+```python
+# Pass derived metrics to run() - computed on workers after each run
+handle = metalab.run(
+    exp,
+    derived_metrics=[final_loss, normalized_score],
+)
+results = handle.result()
+
+# Access stored derived metrics
+print(results[0].derived)  # {"final_loss": 0.001, "best_loss": 0.0005, ...}
+```
+
+**Option 2: Compute post-hoc (client-side)**
+
+```python
+# Load existing results and compute derived metrics later
+results = metalab.load_results("./runs/my_exp")
+results.compute_derived([final_loss, normalized_score])
+
+# Recompute with overwrite
+results.compute_derived([final_loss], overwrite=True)
+```
+
+**DataFrame export with derived metrics:**
+
+```python
+# Include persisted derived metrics (from /derived/)
+df = results.to_dataframe(include_derived=True)
+# Columns: derived_final_loss, derived_best_loss, derived_normalized_score
+
+# Or compute on-the-fly without persisting
+df = results.to_dataframe(derived_metrics=[final_loss])
+
+# Full export with all options
 df = results.to_dataframe(
     include_params=True,      # Columns prefixed with 'param_'
     include_metrics=True,     # Captured metrics
     include_record=True,      # run_id, status, duration, etc.
-    artifact_reducers={
-        "loss_history": reduce_loss_history,
-        "predictions": context_reducer,
-    },
+    include_derived=True,     # Persisted derived metrics (prefixed 'derived_')
 )
 
-# Now use pandas for analysis
+# Analyze with pandas
 summary = df.groupby("param_learning_rate").agg({
-    "final_loss": ["mean", "std"],
-    "above_threshold": "mean",
+    "derived_final_loss": ["mean", "std"],
+    "derived_normalized_score": "mean",
 })
 ```
-
-Reducers with 1 argument receive just the artifact; reducers with 2 arguments also receive the `Run` object for context-aware computation.
 
 ### Resume and Deduplication
 
@@ -511,9 +549,42 @@ The manifest includes:
 - Full parameter source specification (e.g., grid values, random space)
 - Seed plan (base seed, number of replicates)
 - Context fingerprint
+- Custom metadata (see below)
 - Total runs and submission timestamp
 
 This complements the per-run `RunRecord` (which captures individual results) by documenting the overall experiment design. Multiple runs create multiple timestamped manifests, enabling version tracking.
+
+### Experiment Metadata
+
+Use the `metadata` field on `Experiment` to store arbitrary experiment-level information that should be persisted but does **not** affect reproducibility or run identity (it is not fingerprinted):
+
+```python
+exp = metalab.Experiment(
+    name="perturbation_exp",
+    version="1.0",
+    context=my_context,
+    operation=run_analysis,
+    params=metalab.grid(threshold=[0.1, 0.5]),
+    seeds=metalab.seeds(base=42),
+    metadata={
+        # Documentation
+        "author": "your_name",
+        "notes": "Testing new threshold values",
+        # Data summaries (derived from context data)
+        "n_cells": 50000,
+        "groups": ["control", "treatment_A", "treatment_B"],
+        # Resource hints for operations
+        "resource_hints": {"gpu": True, "memory_gb": 32},
+    },
+)
+```
+
+The metadata is:
+- Persisted in the experiment manifest for documentation
+- Available to operations via `runtime.metadata`
+- **Not fingerprinted** - changing metadata does not create new runs
+
+This is useful for capturing experiment-level details that are derived from your input data (e.g., group labels, sample counts) or documentation (author, notes) without affecting deduplication.
 
 ## Development
 

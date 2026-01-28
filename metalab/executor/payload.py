@@ -30,8 +30,10 @@ class RunPayload:
         seed_bundle: The seed bundle for this run.
         store_locator: Path or URI to the store.
         fingerprints: Dict with context_fingerprint, params_fingerprint, seed_fingerprint.
-        runtime_hints: Serializable hints (no logger objects).
+        metadata: Experiment-level metadata (not fingerprinted, passed to Runtime).
         operation_ref: Reference to operation (e.g., "module:name").
+        derived_metric_refs: List of derived metric function references (e.g., ["module:func"]).
+            These are post-hoc computations and do NOT affect run fingerprints.
     """
 
     run_id: str
@@ -41,12 +43,13 @@ class RunPayload:
     seed_bundle: SeedBundle
     store_locator: str
     fingerprints: dict[str, str] = field(default_factory=dict)
-    runtime_hints: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     operation_ref: str = ""
+    derived_metric_refs: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
-        return {
+        result = {
             "run_id": self.run_id,
             "experiment_id": self.experiment_id,
             "context_spec": self.context_spec,
@@ -54,9 +57,13 @@ class RunPayload:
             "seed_bundle": self.seed_bundle.to_dict(),
             "store_locator": self.store_locator,
             "fingerprints": self.fingerprints,
-            "runtime_hints": self.runtime_hints,
+            "metadata": self.metadata,
             "operation_ref": self.operation_ref,
         }
+        # Only include derived_metric_refs if set (not part of fingerprint)
+        if self.derived_metric_refs is not None:
+            result["derived_metric_refs"] = self.derived_metric_refs
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunPayload:
@@ -69,8 +76,9 @@ class RunPayload:
             seed_bundle=SeedBundle.from_dict(data["seed_bundle"]),
             store_locator=data["store_locator"],
             fingerprints=data.get("fingerprints", {}),
-            runtime_hints=data.get("runtime_hints", {}),
+            metadata=data.get("metadata", data.get("runtime_hints", {})),  # BC: accept old name
             operation_ref=data.get("operation_ref", ""),
+            derived_metric_refs=data.get("derived_metric_refs"),
         )
 
 

@@ -75,7 +75,7 @@ def build_experiment_manifest(
         "params": serialize(experiment.params),
         "seeds": serialize(experiment.seeds),
         "context_fingerprint": context_fingerprint,
-        "runtime_hints": experiment.runtime_hints,
+        "metadata": experiment.metadata,
         "total_runs": total_runs,
         "run_ids": run_ids,
         "submitted_at": datetime.now().isoformat(),

@@ -5,7 +5,7 @@ The Runtime provides:
 - Logger for operation output
 - Scratch directory for temporary files
 - Cancellation token for cooperative shutdown
-- Resource hints (serializable only)
+- Metadata (serializable experiment-level information)
 - Event callback for notifications
 """
 
@@ -70,14 +70,14 @@ class Runtime:
         logger: A logger for operation output.
         scratch_dir: A directory for temporary files (cleaned up after run).
         cancel_token: For cooperative cancellation.
-        resource_hints: Serializable hints (e.g., {"gpu": True, "memory_gb": 16}).
+        metadata: Experiment-level metadata (e.g., {"gpu": True, "author": "name"}).
         event_callback: Optional callback for runtime events.
     """
 
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("metalab.operation"))
     scratch_dir: Path = field(default_factory=lambda: Path(tempfile.mkdtemp(prefix="metalab_")))
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
-    resource_hints: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     event_callback: EventCallback | None = None
 
     def check_cancelled(self) -> None:
@@ -101,7 +101,7 @@ def create_runtime(
     run_id: str,
     logger: logging.Logger | None = None,
     scratch_dir: Path | None = None,
-    resource_hints: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
     event_callback: EventCallback | None = None,
 ) -> Runtime:
     """
@@ -111,7 +111,7 @@ def create_runtime(
         run_id: The run ID (used for logger name and scratch dir).
         logger: Custom logger (default: creates one named after run_id).
         scratch_dir: Custom scratch directory (default: temp dir).
-        resource_hints: Serializable resource hints.
+        metadata: Experiment-level metadata (not fingerprinted).
         event_callback: Optional event callback.
 
     Returns:
@@ -127,6 +127,6 @@ def create_runtime(
         logger=logger,
         scratch_dir=scratch_dir,
         cancel_token=CancellationToken(),
-        resource_hints=resource_hints or {},
+        metadata=metadata or {},
         event_callback=event_callback,
     )

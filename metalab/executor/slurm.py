@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from metalab.events import EventCallback
     from metalab.operation import OperationWrapper
     from metalab.store.base import Store
+    from metalab.types import RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,43 @@ class SlurmConfig:
             return float(mem_str)
 
 
+def _compute_derived_metrics_slurm(
+    record: "RunRecord",
+    store: "Store",
+    metric_refs: list[str],
+) -> None:
+    """
+    Compute and store derived metrics for a completed run (SLURM worker).
+
+    Args:
+        record: The completed run record.
+        store: The store for persisting derived metrics.
+        metric_refs: List of function references ('module:func' format).
+    """
+    import logging
+
+    from metalab.derived import compute_derived_for_run, import_derived_metric
+    from metalab.result import Run
+
+    logger = logging.getLogger(__name__)
+
+    # Create Run object from record
+    run = Run(record, store)
+
+    # Import and apply metric functions
+    functions = []
+    for ref in metric_refs:
+        try:
+            func = import_derived_metric(ref)
+            functions.append(func)
+        except Exception as e:
+            logger.warning(f"Failed to import derived metric '{ref}': {e}")
+
+    if functions:
+        derived = compute_derived_for_run(run, functions)
+        store.put_derived(record.run_id, derived)
+
+
 def _slurm_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Worker function that runs on SLURM compute nodes.
@@ -171,7 +209,7 @@ def _slurm_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
     # Create runtime
     runtime = create_runtime(
         run_id=payload.run_id,
-        resource_hints=payload.runtime_hints,
+        metadata=payload.metadata,
     )
 
     # Build worker_id from SLURM environment
@@ -241,6 +279,10 @@ def _slurm_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
 
         # Persist to store immediately (source of truth)
         store.put_run_record(result)
+
+        # Compute derived metrics if configured (post-hoc, doesn't affect fingerprint)
+        if payload.derived_metric_refs:
+            _compute_derived_metrics_slurm(result, store, payload.derived_metric_refs)
 
         return {"run_id": payload.run_id, "status": result.status.value}
 

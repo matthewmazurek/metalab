@@ -19,6 +19,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from metalab.derived import DerivedMetricFn
     from metalab.events import EventCallback
     from metalab.executor.base import Executor
     from metalab.executor.handle import RunHandle as RunHandleProtocol
@@ -136,6 +137,7 @@ def generate_payloads(
     store: Store,
     resume: bool = True,
     persist_manifest: bool = True,
+    derived_metric_refs: list[str] | None = None,
 ) -> tuple[list[RunPayload], list[str]]:
     """
     Generate payloads for an experiment.
@@ -145,6 +147,8 @@ def generate_payloads(
         store: Store for checking existing runs.
         resume: If True, skip already-completed runs.
         persist_manifest: If True, save resolved context manifest for auditability.
+        derived_metric_refs: List of derived metric function references ('module:func').
+            These are post-hoc computations that do NOT affect run fingerprints.
 
     Returns:
         Tuple of (payloads to execute, all run IDs including skipped).
@@ -257,8 +261,9 @@ def generate_payloads(
                 "params": params_fp,
                 "seed": seed_fp,
             },
-            runtime_hints=experiment.runtime_hints,
+            metadata=experiment.metadata,
             operation_ref=experiment.operation.ref,
+            derived_metric_refs=derived_metric_refs,
         )
 
         payloads.append(payload)
@@ -273,6 +278,7 @@ def run(
     resume: bool = True,
     progress: "bool | Progress | None" = None,
     on_event: "EventCallback | None" = None,
+    derived_metrics: "list[str | DerivedMetricFn] | None" = None,
 ) -> RunHandle:
     """
     Run an experiment and return a handle for tracking/awaiting results.
@@ -298,6 +304,11 @@ def run(
             - Progress(...): Customized progress display with title, metrics, etc.
         on_event: Optional event callback for custom event handling.
             Called in addition to any progress tracker.
+        derived_metrics: List of derived metric functions or import references.
+            These are post-hoc computations that do NOT affect run fingerprints.
+            Functions must be importable (not lambdas). Can be specified as:
+            - Function references: "myproject.metrics:final_loss"
+            - Callable functions: final_loss (must have __module__ and __name__)
 
     Returns:
         RunHandle for tracking and awaiting results.
@@ -331,9 +342,14 @@ def run(
             print(f"Event: {event.kind}")
         handle = metalab.run(exp, on_event=my_callback)
 
+        # With derived metrics
+        handle = metalab.run(exp, derived_metrics=[final_loss, convergence_stats])
+        results = handle.result()  # Derived metrics computed and stored per-run
+
         # Cancel if needed
         handle.cancel()
     """
+    from metalab.derived import get_func_ref
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
 
@@ -347,8 +363,21 @@ def run(
     if executor is None:
         executor = ThreadExecutor(max_workers=1)
 
+    # Convert derived_metrics to references
+    derived_metric_refs: list[str] | None = None
+    if derived_metrics:
+        derived_metric_refs = []
+        for metric in derived_metrics:
+            if isinstance(metric, str):
+                derived_metric_refs.append(metric)
+            else:
+                # Convert callable to reference
+                derived_metric_refs.append(get_func_ref(metric))
+
     # Generate payloads
-    payloads, all_run_ids = generate_payloads(experiment, store, resume)
+    payloads, all_run_ids = generate_payloads(
+        experiment, store, resume, derived_metric_refs=derived_metric_refs
+    )
 
     # Submit to executor
     handle = executor.submit(

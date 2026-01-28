@@ -63,7 +63,7 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
     # Create runtime
     runtime = create_runtime(
         run_id=payload.run_id,
-        resource_hints=payload.runtime_hints,
+        metadata=payload.metadata,
     )
 
     # Create capture with worker ID for logging
