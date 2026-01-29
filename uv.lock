@@ -519,6 +519,9 @@ version = "0.1.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
+atlas = [
+    { name = "metalab-atlas" },
+]
 dev = [
     { name = "numpy" },
     { name = "pandas" },
@@ -528,6 +531,7 @@ dev = [
     { name = "submitit" },
 ]
 full = [
+    { name = "metalab-atlas" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "rich" },
@@ -548,6 +552,8 @@ slurm = [
 
 [package.metadata]
 requires-dist = [
+    { name = "metalab-atlas", marker = "extra == 'atlas'", editable = "atlas" },
+    { name = "metalab-atlas", marker = "extra == 'full'", editable = "atlas" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'full'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'numpy'", specifier = ">=1.24" },
@@ -563,7 +569,7 @@ requires-dist = [
     { name = "submitit", marker = "extra == 'full'", specifier = ">=1.5" },
     { name = "submitit", marker = "extra == 'slurm'", specifier = ">=1.5" },
 ]
-provides-extras = ["numpy", "pandas", "rich", "slurm", "full", "dev"]
+provides-extras = ["numpy", "pandas", "rich", "slurm", "atlas", "full", "dev"]
 
 [[package]]
 name = "metalab-atlas"

@@ -418,9 +418,10 @@ exp = metalab.Experiment(
 
 ### Seeded Preprocessing
 
-If your preprocessing requires randomness (e.g., train/test splits, data augmentation), use `SeedBundle.for_preprocessing()` to get reproducible RNG. Use the same base seed for both preprocessing and the experiment, and include it in your context spec so it becomes part of the fingerprint:
+If your preprocessing requires randomness (e.g., train/test splits, data augmentation), use `SeedBundle.for_preprocessing()` to get reproducible RNG. **Include the seed in the preprocessed filename** so that changing the seed automatically triggers new preprocessing:
 
 ```python
+from pathlib import Path
 from metalab.seeds import SeedBundle
 
 BASE_SEED = 42
@@ -429,7 +430,6 @@ BASE_SEED = 42
 class MyContext:
     raw_data: metalab.FilePath
     processed_data: metalab.FilePath
-    base_seed: int  # Included in context fingerprint
 
 def preprocess(raw_path: str, output_path: str, base_seed: int):
     """Preprocessing with reproducible randomness."""
@@ -447,17 +447,17 @@ def preprocess(raw_path: str, output_path: str, base_seed: int):
     
     save(output_path, {"train": train_aug, "test": test})
 
-# Wire it together with one base seed
+# Include seed in the filename - changing BASE_SEED points to a different file
 spec = MyContext(
     raw_data=metalab.FilePath("./data/raw.csv"),
-    processed_data=metalab.FilePath("./cache/processed.h5ad"),
-    base_seed=BASE_SEED,
+    processed_data=metalab.FilePath(f"./cache/processed_seed{BASE_SEED}.h5ad"),
 )
 
-# Preprocess with seeded RNG
-preprocess(str(spec.raw_data), str(spec.processed_data), BASE_SEED)
+# Preprocess with seeded RNG (only runs if file doesn't exist)
+if not Path(str(spec.processed_data)).exists():
+    preprocess(str(spec.raw_data), str(spec.processed_data), BASE_SEED)
 
-# Experiment uses same base seed - all randomness shares one hierarchy
+# Experiment uses same base seed
 exp = metalab.Experiment(
     name="my_exp",
     version="0.1",
@@ -471,7 +471,8 @@ exp = metalab.Experiment(
 **Key points:**
 - One base seed controls everything: preprocessing and experiment runs
 - `SeedBundle.for_preprocessing(base_seed)` derives a preprocessing-specific seed that won't collide with replicate seeds
-- Include `base_seed` in your context spec so changing it changes the context fingerprint (triggering re-runs)
+- **Include the seed in the filename** (e.g., `processed_seed{BASE_SEED}.h5ad`) so changing the seed points to a different file, naturally triggering preprocessing if it doesn't exist
+- Changing `base_seed` in `metalab.seeds()` automatically triggers new experiment runs (via `seed_fingerprint`), independent of the preprocessing cache
 - The preprocessing bundle supports the same interface as operation bundles: `.numpy()`, `.rng()`, `.derive()`
 
 ### Parallel Execution
