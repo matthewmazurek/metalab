@@ -5,6 +5,7 @@ The Store abstraction covers:
 - Run records (append/query)
 - Artifacts (write/read)
 - Logs (optional)
+- Experiment manifests
 
 Backend implementations can be:
 - Filesystem (FileStore)
@@ -16,7 +17,7 @@ Backend implementations can be:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from metalab.types import ArtifactDescriptor, Metric, RunRecord
 
@@ -187,5 +188,25 @@ class Store(Protocol):
 
         Returns:
             The log content, or None if not found.
+        """
+        ...
+
+    # Experiment manifest operations
+
+    def get_experiment_manifest(self, experiment_id: str) -> dict[str, Any] | None:
+        """
+        Retrieve the experiment manifest by ID.
+
+        Returns the most recent manifest for the given experiment_id.
+        The manifest contains experiment-level metadata including:
+        - name, version, description, tags
+        - metadata dict (user-defined)
+        - operation info, params, seeds config
+
+        Args:
+            experiment_id: The experiment identifier (name:version).
+
+        Returns:
+            The experiment manifest dict, or None if not found.
         """
         ...

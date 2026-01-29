@@ -36,7 +36,7 @@ import shutil
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 from metalab.schema import (
     SCHEMA_VERSION,
@@ -455,6 +455,40 @@ class FileStore:
                 log_names.add(log_file.stem)
 
         return sorted(log_names)
+
+    # Experiment manifest operations
+
+    def get_experiment_manifest(self, experiment_id: str) -> dict[str, Any] | None:
+        """
+        Retrieve experiment manifest by ID (most recent version).
+
+        Args:
+            experiment_id: The experiment identifier (name:version).
+
+        Returns:
+            The experiment manifest dict, or None if not found.
+        """
+        exp_dir = self._root / self.EXPERIMENTS_DIR
+        if not exp_dir.exists():
+            return None
+
+        # Find manifest files matching this experiment_id
+        # Manifests are named: {safe_id}_{timestamp}.json
+        safe_id = experiment_id.replace(":", "_")
+        matching = sorted(
+            exp_dir.glob(f"{safe_id}_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,  # Most recent first
+        )
+
+        if not matching:
+            return None
+
+        try:
+            return json.loads(matching[0].read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to load experiment manifest {matching[0]}: {e}")
+            return None
 
     # Utility methods
 

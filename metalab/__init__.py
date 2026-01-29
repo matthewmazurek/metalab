@@ -124,7 +124,7 @@ from metalab.progress import (
 from metalab.progress.display import display_results
 
 # Result
-from metalab.result import Results, Run
+from metalab.result import ExperimentInfo, Results, Run
 
 # High-level run facade
 from metalab.runner import load_results, reconnect, run
@@ -189,6 +189,7 @@ __all__ = [
     # Experiment
     "Experiment",
     # Result
+    "ExperimentInfo",
     "Results",
     "Run",
     # Run
