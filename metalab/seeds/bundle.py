@@ -143,8 +143,8 @@ class SeedBundle:
         is derived from the base seed using a "preprocessing" namespace,
         ensuring it doesn't collide with replicate seeds.
 
-        To ensure reproducibility, include the same base_seed in your
-        ContextSpec so it becomes part of the context fingerprint.
+        Include the seed in the preprocessed filename so changing it
+        automatically triggers new preprocessing (cache miss).
 
         Args:
             base_seed: The experiment's base seed (same value you pass to
@@ -162,9 +162,12 @@ class SeedBundle:
             rng = seeds.numpy("train_test_split")
             train, test = my_split(data, rng=rng)
 
+            # Include seed in filename for automatic cache invalidation
+            output_path = f"./cache/processed_seed{BASE_SEED}.h5ad"
+
             # Same base seed for experiment
             exp = metalab.Experiment(
-                context=MyContext(data=..., base_seed=BASE_SEED),
+                context=MyContext(data=metalab.FilePath(output_path)),
                 seeds=metalab.seeds(base=BASE_SEED, replicates=5),
                 ...
             )
