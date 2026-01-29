@@ -76,7 +76,9 @@ class RunPayload:
             seed_bundle=SeedBundle.from_dict(data["seed_bundle"]),
             store_locator=data["store_locator"],
             fingerprints=data.get("fingerprints", {}),
-            metadata=data.get("metadata", data.get("runtime_hints", {})),  # BC: accept old name
+            metadata=data.get(
+                "metadata", data.get("runtime_hints", {})
+            ),  # BC: accept old name
             operation_ref=data.get("operation_ref", ""),
             derived_metric_refs=data.get("derived_metric_refs"),
         )

@@ -4,6 +4,7 @@ Results: Query interface for experiment results.
 Provides:
 - Run class for single run access (metrics, artifacts)
 - Results class for collections of runs
+- ExperimentInfo for experiment-level metadata
 - Tabular view of results
 - Artifact loading
 - Filtering capabilities
@@ -12,6 +13,7 @@ Provides:
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, overload
@@ -21,6 +23,76 @@ if TYPE_CHECKING:
     from metalab.store.base import Store
 
 from metalab.types import ArtifactDescriptor, RunRecord, Status
+
+
+@dataclass
+class ExperimentInfo:
+    """
+    Experiment-level information accessible from a Run.
+
+    This provides access to experiment metadata without needing
+    to load the full experiment manifest repeatedly.
+
+    Attributes:
+        experiment_id: The experiment identifier (name:version).
+        name: The experiment name.
+        version: The experiment version.
+        description: Human-readable description.
+        metadata: User-defined metadata dict.
+        tags: List of tags for categorization.
+    """
+
+    experiment_id: str
+    name: str = ""
+    version: str = ""
+    description: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_manifest(cls, manifest: dict[str, Any]) -> ExperimentInfo:
+        """
+        Create ExperimentInfo from an experiment manifest dict.
+
+        Args:
+            manifest: The experiment manifest dictionary.
+
+        Returns:
+            ExperimentInfo populated from the manifest.
+        """
+        return cls(
+            experiment_id=manifest.get("experiment_id", ""),
+            name=manifest.get("name", ""),
+            version=manifest.get("version", ""),
+            description=manifest.get("description", ""),
+            metadata=manifest.get("metadata", {}),
+            tags=manifest.get("tags", []),
+        )
+
+    @classmethod
+    def from_experiment_id(cls, experiment_id: str) -> ExperimentInfo:
+        """
+        Create minimal ExperimentInfo from just an experiment_id.
+
+        Used as a fallback when the manifest is not available.
+
+        Args:
+            experiment_id: The experiment identifier (name:version).
+
+        Returns:
+            ExperimentInfo with minimal data extracted from the ID.
+        """
+        if ":" in experiment_id:
+            name, version = experiment_id.split(":", 1)
+        else:
+            name, version = experiment_id, ""
+
+        return cls(
+            experiment_id=experiment_id,
+            name=name,
+            version=version,
+        )
+
 
 # Type aliases for artifact reducers
 ArtifactReducer = Callable[[Any], dict[str, Any]]
@@ -35,6 +107,7 @@ class Run:
     - Run metadata (run_id, status, timestamps)
     - Metrics captured during the run
     - Artifacts stored for the run
+    - Experiment-level metadata via the `experiment` property
 
     Example:
         result = metalab.run(experiment)
@@ -43,6 +116,9 @@ class Run:
         # Access metrics
         print(run.metrics)
         print(run.status)
+
+        # Access experiment metadata
+        print(run.experiment.metadata)
 
         # Load artifacts
         summary = run.artifact("summary")
@@ -60,6 +136,7 @@ class Run:
         """
         self._record = record
         self._store = store
+        self._experiment_info: ExperimentInfo | None = None
 
     # Delegate properties to record
     @property
@@ -131,6 +208,34 @@ class Run:
     def record(self) -> RunRecord:
         """Access the underlying RunRecord."""
         return self._record
+
+    @property
+    def experiment(self) -> ExperimentInfo:
+        """
+        Experiment-level information including metadata.
+
+        Lazily loads from the experiment manifest on first access.
+        If the manifest is not found, returns minimal info extracted
+        from the experiment_id.
+
+        Returns:
+            ExperimentInfo with experiment metadata.
+
+        Example:
+            # Access user-defined metadata
+            group_labels = run.experiment.metadata.get("group_labels")
+            markov_iter = run.experiment.metadata.get("markov_iter", 3)
+        """
+        if self._experiment_info is None:
+            manifest = self._store.get_experiment_manifest(self.experiment_id)
+            if manifest:
+                self._experiment_info = ExperimentInfo.from_manifest(manifest)
+            else:
+                # Fallback with minimal info if manifest not found
+                self._experiment_info = ExperimentInfo.from_experiment_id(
+                    self.experiment_id
+                )
+        return self._experiment_info
 
     def artifact(self, name: str) -> Any:
         """

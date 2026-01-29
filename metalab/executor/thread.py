@@ -191,7 +191,9 @@ class ThreadExecutor:
 
             # Compute derived metrics if configured (post-hoc, doesn't affect fingerprint)
             if payload.derived_metric_refs:
-                self._compute_derived_metrics(result, store, payload.derived_metric_refs)
+                self._compute_derived_metrics(
+                    result, store, payload.derived_metric_refs
+                )
 
             return result
 
@@ -236,10 +238,10 @@ class ThreadExecutor:
             store: The store for persisting derived metrics.
             metric_refs: List of function references ('module:func' format).
         """
+        import logging
+
         from metalab.derived import compute_derived_for_run, import_derived_metric
         from metalab.result import Run
-
-        import logging
 
         logger = logging.getLogger(__name__)
 

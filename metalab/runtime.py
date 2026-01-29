@@ -74,8 +74,12 @@ class Runtime:
         event_callback: Optional callback for runtime events.
     """
 
-    logger: logging.Logger = field(default_factory=lambda: logging.getLogger("metalab.operation"))
-    scratch_dir: Path = field(default_factory=lambda: Path(tempfile.mkdtemp(prefix="metalab_")))
+    logger: logging.Logger = field(
+        default_factory=lambda: logging.getLogger("metalab.operation")
+    )
+    scratch_dir: Path = field(
+        default_factory=lambda: Path(tempfile.mkdtemp(prefix="metalab_"))
+    )
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     metadata: dict[str, Any] = field(default_factory=dict)
     event_callback: EventCallback | None = None

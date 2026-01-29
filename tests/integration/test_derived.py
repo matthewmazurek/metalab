@@ -187,7 +187,9 @@ class TestToDataframeWithDerived:
     ):
         """include_derived=True adds derived columns."""
         store.put_run_record(sample_record)
-        store.put_derived(sample_record.run_id, {"final_loss": 0.001, "converged": True})
+        store.put_derived(
+            sample_record.run_id, {"final_loss": 0.001, "converged": True}
+        )
 
         results = Results(store, [sample_record])
         df = results.to_dataframe(include_derived=True)
@@ -212,9 +214,7 @@ class TestToDataframeWithDerived:
         assert "accuracy_pct" in df.columns
         assert df["accuracy_pct"].iloc[0] == 95.0
 
-    def test_on_the_fly_not_persisted(
-        self, store: FileStore, sample_record: RunRecord
-    ):
+    def test_on_the_fly_not_persisted(self, store: FileStore, sample_record: RunRecord):
         """On-the-fly derived_metrics are NOT persisted to store."""
         store.put_run_record(sample_record)
         results = Results(store, [sample_record])
