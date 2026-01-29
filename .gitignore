@@ -13,5 +13,8 @@ wheels/
 # Run output (generated experiment data)
 runs/
 
+# Data files
+data/
+
 # Nested projects (separate git repos)
 # metalab-atlas/
