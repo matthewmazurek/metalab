@@ -60,6 +60,7 @@ class SlurmConfig:
         max_concurrent: Maximum concurrent jobs (maps to --array=%N).
         modules: Shell modules to load before execution.
         conda_env: Conda environment to activate.
+        setup: List of bash commands to run before each task.
         extra_sbatch: Additional sbatch directives as key-value pairs.
     """
 
@@ -71,6 +72,7 @@ class SlurmConfig:
     max_concurrent: int | None = None
     modules: list[str] = field(default_factory=list)
     conda_env: str | None = None
+    setup: list[str] = field(default_factory=list)
     extra_sbatch: dict[str, str] = field(default_factory=dict)
 
     def to_submitit_params(self) -> dict[str, Any]:
@@ -93,6 +95,17 @@ class SlurmConfig:
 
         if self.max_concurrent is not None:
             params["slurm_array_parallelism"] = self.max_concurrent
+
+        # Build setup commands from modules, conda_env, and custom setup
+        setup_commands: list[str] = []
+        for module in self.modules:
+            setup_commands.append(f"module load {module}")
+        if self.conda_env:
+            setup_commands.append(f"conda activate {self.conda_env}")
+        setup_commands.extend(self.setup)
+
+        if setup_commands:
+            params["slurm_setup"] = setup_commands
 
         # Add extra sbatch directives
         for key, value in self.extra_sbatch.items():
