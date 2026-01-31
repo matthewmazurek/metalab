@@ -120,7 +120,7 @@ def train(params, seeds, capture):
     capture.metric("loss", 0.05)
     
     # Multiple metrics at once
-    capture.metrics({"precision": 0.92, "recall": 0.89})
+    capture.log_metrics({"precision": 0.92, "recall": 0.89})
     
     # Time-series metrics
     for epoch, loss in enumerate(losses):

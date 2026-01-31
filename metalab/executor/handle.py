@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from metalab.events import EventCallback
     from metalab.result import Results
     from metalab.store.base import Store
-    from metalab.types import RunRecord, Status
+    from metalab.types import RunRecord
 
 logger = logging.getLogger(__name__)
 

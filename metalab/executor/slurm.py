@@ -30,17 +30,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from metalab.executor.handle import RunHandle, RunStatus
+from metalab.executor.handle import RunStatus
 from metalab.executor.payload import RunPayload
 from metalab.result import Results
-from metalab.types import Status
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
     from metalab.experiment import Experiment
     from metalab.operation import OperationWrapper
     from metalab.store.base import Store
-    from metalab.types import RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +428,7 @@ def _generate_sbatch_script(
     lines.append("")
 
     # Set shard offset environment variable
-    lines.append(f"# Shard offset for global task index computation")
+    lines.append("# Shard offset for global task index computation")
     lines.append(f"export METALAB_SHARD_OFFSET={shard_offset}")
     lines.append("")
 

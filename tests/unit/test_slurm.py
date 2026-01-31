@@ -7,6 +7,18 @@ import pytest
 from metalab.executor.slurm import SlurmConfig, SlurmExecutor
 
 
+class TestSlurmImports:
+    """Smoke tests to ensure SLURM code paths have valid imports."""
+
+    def test_runner_slurm_indexed_imports(self):
+        """Ensure _run_slurm_indexed has valid imports."""
+        from metalab.runner import _run_slurm_indexed  # noqa: F401
+
+    def test_slurm_array_worker_imports(self):
+        """Ensure slurm_array_worker module has valid imports."""
+        from metalab.executor import slurm_array_worker  # noqa: F401
+
+
 class TestSlurmConfigDefaults:
     """Test SlurmConfig default values."""
 

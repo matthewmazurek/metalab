@@ -46,7 +46,7 @@ class Capture:
 
             # Capture scalar metrics
             capture.metric("accuracy", 0.95)
-            capture.metrics({"loss": 0.05, "epoch": 10})
+            capture.log_metrics({"loss": 0.05, "epoch": 10})
 
             # Capture artifacts (serialized automatically)
             capture.artifact("predictions", predictions_array, kind="numpy")
@@ -276,7 +276,7 @@ class Capture:
                 }
             )
 
-    def metrics(self, values: dict[str, Any], step: int | None = None) -> None:
+    def log_metrics(self, values: dict[str, Any], step: int | None = None) -> None:
         """
         Capture multiple metrics at once.
 

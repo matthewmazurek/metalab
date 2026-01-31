@@ -129,12 +129,12 @@ def run_array_task(store_root: str) -> int:
     )
 
     # Load shared resources once
+    from metalab._ids import compute_run_id, fingerprint_params, fingerprint_seeds
     from metalab.executor.core import execute_payload
     from metalab.manifest import deserialize_param_source, deserialize_seed_plan
     from metalab.operation import import_operation
     from metalab.store.file import FileStore
     from metalab.types import Status
-    from metalab._ids import compute_run_id, fingerprint_params, fingerprint_seeds
 
     store = FileStore(store_root)
     params_source = deserialize_param_source(spec["params"])
