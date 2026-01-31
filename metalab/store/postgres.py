@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Generator
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from metalab.schema import dump_run_record, load_run_record
 from metalab.types import ArtifactDescriptor, Metric, Provenance, RunRecord, Status
@@ -45,13 +45,30 @@ DEFAULT_BLOB_THRESHOLD = 1024 * 1024  # 1MB
 
 
 def _parse_connection_string(conn_str: str) -> dict[str, Any]:
-    """Parse PostgreSQL connection string."""
+    """Parse PostgreSQL connection string.
+    
+    Extracts standard PostgreSQL connection parameters and custom metalab
+    parameters (schema, artifact_root). Returns both the parsed config and
+    a clean connection string suitable for psycopg.
+    """
     parsed = urlparse(conn_str)
     
+    # Parse query parameters
     params = {}
     if parsed.query:
         for key, values in parse_qs(parsed.query).items():
             params[key] = values[0] if values else ""
+    
+    # Custom metalab params (not passed to psycopg)
+    custom_params = {"schema", "artifact_root"}
+    
+    # Build clean query string for psycopg (only standard postgres params)
+    clean_params = {k: v for k, v in params.items() if k not in custom_params}
+    clean_query = urlencode(clean_params) if clean_params else ""
+    
+    # Rebuild connection string without custom params
+    clean_parsed = parsed._replace(query=clean_query)
+    clean_conn_str = urlunparse(clean_parsed)
     
     return {
         "host": parsed.hostname or "localhost",
@@ -61,6 +78,7 @@ def _parse_connection_string(conn_str: str) -> dict[str, Any]:
         "dbname": parsed.path.lstrip("/") if parsed.path else "metalab",
         "schema": params.get("schema", "public"),
         "artifact_root": params.get("artifact_root"),
+        "clean_connection_string": clean_conn_str,
     }
 
 
@@ -107,16 +125,17 @@ class PostgresStore:
         self._connect_timeout = connect_timeout
         self._blob_threshold = blob_threshold
         
-        # Parse config
+        # Parse config (extracts custom params and builds clean connection string)
         config = _parse_connection_string(connection_string)
         self._schema = config["schema"]
         self._artifact_root = Path(artifact_root) if artifact_root else (
             Path(config["artifact_root"]) if config.get("artifact_root") else None
         )
         
-        # Initialize connection pool
+        # Initialize connection pool with clean connection string
+        # (psycopg doesn't accept custom params like 'schema' or 'artifact_root')
         self._pool = ConnectionPool(
-            connection_string,
+            config["clean_connection_string"],
             min_size=1,
             max_size=10,
             timeout=connect_timeout,
