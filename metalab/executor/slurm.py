@@ -469,6 +469,9 @@ def _write_array_spec(
     """
     Write the array spec file that workers use to reconstruct runs.
 
+    The context spec is pickled separately to handle arbitrary Python objects
+    (dataclasses, custom types, etc.) without manual serialization logic.
+
     Args:
         store_root: Path to the store root.
         experiment: The experiment being run.
@@ -476,15 +479,21 @@ def _write_array_spec(
         shards: List of shard info dicts with job_id, start_idx, end_idx.
         chunk_size: Number of runs per array task.
     """
+    import pickle
+
     from metalab.manifest import serialize
 
     total_runs = len(experiment.params) * len(experiment.seeds)  # type: ignore[arg-type]
+
+    # Pickle context spec separately - handles any Python object automatically
+    context_pkl_path = store_root / "context_spec.pkl"
+    with open(context_pkl_path, "wb") as f:
+        pickle.dump(experiment.context, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     spec = {
         "experiment_id": experiment.experiment_id,
         "operation_ref": experiment.operation.ref,
         "operation_code_hash": experiment.operation.code_hash,
-        "context_spec": _serialize_context_spec(experiment.context),
         "context_fingerprint": context_fingerprint,
         "params": serialize(experiment.params),
         "seeds": serialize(experiment.seeds),
@@ -501,33 +510,6 @@ def _write_array_spec(
     spec_path = store_root / "slurm_array_spec.json"
     with open(spec_path, "w") as f:
         json.dump(spec, f, indent=2, default=str)
-
-
-def _serialize_context_spec(context: Any) -> dict[str, Any]:
-    """Serialize context spec to JSON-friendly dict."""
-    import dataclasses
-
-    if context is None:
-        return {}
-
-    if dataclasses.is_dataclass(context) and not isinstance(context, type):
-        result = {}
-        for fld in dataclasses.fields(context):
-            value = getattr(context, fld.name)
-            # Handle FilePath/DirPath by extracting path string
-            if hasattr(value, "path"):
-                result[fld.name] = {"_type": type(value).__name__, "path": value.path}
-            elif dataclasses.is_dataclass(value) and not isinstance(value, type):
-                result[fld.name] = _serialize_context_spec(value)
-            else:
-                result[fld.name] = value
-        return result
-
-    if isinstance(context, dict):
-        return context
-
-    # Fallback
-    return {"_raw": str(context)}
 
 
 # ---------------------------------------------------------------------------

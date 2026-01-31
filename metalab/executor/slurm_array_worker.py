@@ -140,7 +140,7 @@ def run_array_task(store_root: str) -> int:
     params_source = deserialize_param_source(spec["params"])
     seed_plan = deserialize_seed_plan(spec["seeds"])
     operation = import_operation(spec["operation_ref"])
-    context_spec = _reconstruct_context_spec(spec.get("context_spec", {}))
+    context_spec = _load_context_spec(store_path)
     ctx_fp = spec["context_fingerprint"]
     worker_id = f"slurm:{job_id}"
 
@@ -279,45 +279,34 @@ def _write_done_marker(store_path: Path, run_id: str) -> None:
         raise
 
 
-def _reconstruct_context_spec(context_dict: dict[str, Any]) -> Any:
+def _load_context_spec(store_path: Path) -> Any:
     """
-    Reconstruct context spec from serialized dict.
+    Load context spec from pickled file.
 
-    Handles FilePath/DirPath reconstruction.
+    The context is pickled during experiment submission, so any Python object
+    (dataclasses, custom types, etc.) is handled automatically without manual
+    serialization logic.
 
     Args:
-        context_dict: Serialized context dict.
+        store_path: Path to the store root directory.
 
     Returns:
-        Reconstructed context object or dict.
+        The unpickled context spec object, or None if not found.
     """
-    if not context_dict:
+    import pickle
+
+    context_pkl_path = store_path / "context_spec.pkl"
+
+    if not context_pkl_path.exists():
+        logger.warning(f"Context spec pickle not found: {context_pkl_path}")
         return None
 
-    # Check for raw fallback
-    if "_raw" in context_dict:
-        return context_dict["_raw"]
-
-    # Reconstruct any FilePath/DirPath entries
-    from metalab._ids import DirPath, FilePath
-
-    result = {}
-    for key, value in context_dict.items():
-        if isinstance(value, dict) and "_type" in value:
-            type_name = value["_type"]
-            if type_name == "FilePath":
-                result[key] = FilePath(value["path"])
-            elif type_name == "DirPath":
-                result[key] = DirPath(value["path"])
-            else:
-                result[key] = value
-        elif isinstance(value, dict):
-            # Recursively reconstruct nested dicts
-            result[key] = _reconstruct_context_spec(value)
-        else:
-            result[key] = value
-
-    return result
+    try:
+        with open(context_pkl_path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load context spec: {e}")
+        raise
 
 
 if __name__ == "__main__":
