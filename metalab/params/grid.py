@@ -56,6 +56,52 @@ class GridSource:
             total *= len(values)
         return total
 
+    def __getitem__(self, index: int) -> ParamCase:
+        """
+        Get parameter case by index without enumerating all cases.
+
+        Uses modular arithmetic to compute the combination for a given index.
+        The ordering matches __iter__ (sorted keys, Cartesian product order).
+
+        Args:
+            index: The index of the parameter case (0-based).
+
+        Returns:
+            The ParamCase at the given index.
+
+        Raises:
+            IndexError: If index is out of range.
+        """
+        if not self._keys:
+            if index == 0:
+                return ParamCase(params={}, case_id="empty")
+            raise IndexError(f"Index {index} out of range for empty GridSource")
+
+        # Handle negative indices
+        total = len(self)
+        if index < 0:
+            index = total + index
+        if index < 0 or index >= total:
+            raise IndexError(f"Index {index} out of range [0, {total})")
+
+        # Get values in sorted key order (same as __iter__)
+        values_lists = [self._params[k] for k in self._keys]
+        sizes = [len(v) for v in values_lists]
+
+        # Convert linear index to multi-dimensional indices using modular arithmetic
+        # itertools.product iterates rightmost index fastest, so we decode accordingly
+        indices = []
+        remaining = index
+        for size in reversed(sizes):
+            indices.append(remaining % size)
+            remaining //= size
+        indices.reverse()
+
+        # Build params dict
+        params = {self._keys[i]: values_lists[i][indices[i]] for i in range(len(self._keys))}
+        case_id = fingerprint_params(params)
+        return ParamCase(params=params, case_id=case_id)
+
     def __repr__(self) -> str:
         params_str = ", ".join(f"{k}={v}" for k, v in sorted(self._params.items()))
         return f"GridSource({params_str})"
@@ -67,6 +113,19 @@ class GridSource:
             "spec": self._params,
             "total_cases": len(self),
         }
+
+    @classmethod
+    def from_manifest_dict(cls, manifest: dict[str, Any]) -> "GridSource":
+        """
+        Reconstruct GridSource from manifest dict.
+
+        Args:
+            manifest: Dict with "spec" containing parameter name -> values mapping.
+
+        Returns:
+            A GridSource with the same configuration.
+        """
+        return cls(**manifest["spec"])
 
 
 def grid(**kwargs: list[Any]) -> GridSource:

@@ -7,6 +7,7 @@ import pytest
 from metalab.params import (
     choice,
     grid,
+    loguniform,
     loguniform_int,
     manual,
     random,
@@ -108,6 +109,179 @@ class TestRandom:
         assert len(source) == 20
 
 
+class TestRandomIndexing:
+    """Tests for RandomSource indexing (SLURM array support)."""
+
+    def test_random_getitem_matches_iteration(self):
+        """source[i] should equal list(source)[i] for all indices."""
+        space = {"x": uniform(0, 1), "y": choice(["a", "b", "c"])}
+        source = random(space, n_trials=20, seed=42)
+        cases_list = list(source)
+
+        for i in range(len(source)):
+            indexed = source[i]
+            iterated = cases_list[i]
+            assert indexed.params == iterated.params
+            assert indexed.case_id == iterated.case_id
+            assert indexed.tags == iterated.tags
+
+    def test_random_getitem_deterministic(self):
+        """Accessing same index multiple times returns identical results."""
+        source = random({"x": uniform(0, 100)}, n_trials=10, seed=42)
+
+        # Access indices in random order, multiple times
+        for _ in range(3):
+            val_5 = source[5].params["x"]
+            val_2 = source[2].params["x"]
+            val_9 = source[9].params["x"]
+
+            # All accesses to same index should be identical
+            assert source[5].params["x"] == val_5
+            assert source[2].params["x"] == val_2
+            assert source[9].params["x"] == val_9
+
+    def test_random_getitem_independence(self):
+        """Accessing one index doesn't affect other indices."""
+        source = random({"x": uniform(0, 1)}, n_trials=10, seed=42)
+
+        # Get value at index 5 without accessing anything else
+        val_5_first = source[5].params["x"]
+
+        # Access many other indices
+        for i in [0, 1, 2, 3, 4, 6, 7, 8, 9]:
+            _ = source[i]
+
+        # Index 5 should still return the same value
+        val_5_after = source[5].params["x"]
+        assert val_5_first == val_5_after
+
+    def test_random_getitem_negative_index(self):
+        """Negative indexing should work."""
+        source = random({"x": uniform(0, 1)}, n_trials=5, seed=42)
+        assert source[-1].params == source[4].params
+        assert source[-2].params == source[3].params
+        assert source[-5].params == source[0].params
+
+    def test_random_getitem_out_of_bounds(self):
+        """Out of bounds should raise IndexError."""
+        source = random({"x": uniform(0, 1)}, n_trials=5, seed=42)
+        with pytest.raises(IndexError):
+            source[5]
+        with pytest.raises(IndexError):
+            source[-6]
+
+    def test_random_different_seeds_different_values(self):
+        """Different seeds should produce different indexed values."""
+        space = {"x": uniform(0, 1)}
+        source1 = random(space, n_trials=10, seed=42)
+        source2 = random(space, n_trials=10, seed=123)
+
+        # Very unlikely to have same value at same index with different seeds
+        assert source1[0].params["x"] != source2[0].params["x"]
+        assert source1[5].params["x"] != source2[5].params["x"]
+
+    def test_random_manifest_roundtrip_preserves_ordering(self):
+        """Serialization and deserialization preserves indexing order."""
+        from metalab.manifest import deserialize_param_source
+
+        space = {
+            "lr": loguniform_int(1, 1000),
+            "dropout": uniform(0.1, 0.5),
+            "opt": choice(["adam", "sgd", "rmsprop"]),
+        }
+        source = random(space, n_trials=50, seed=42)
+        manifest = source.to_manifest_dict()
+        restored = deserialize_param_source(manifest)
+
+        # Verify same length
+        assert len(restored) == len(source)
+
+        # Verify all indices match (check a sample of indices for speed)
+        for i in [0, 1, 10, 25, 49]:
+            assert restored[i].params == source[i].params
+            assert restored[i].case_id == source[i].case_id
+
+    def test_random_all_distributions_roundtrip(self):
+        """All distribution types should serialize/deserialize correctly."""
+        from metalab.params.random import randint
+        from metalab.manifest import deserialize_param_source
+
+        space = {
+            "a": uniform(0.0, 1.0),
+            "b": loguniform(0.001, 1.0),
+            "c": loguniform_int(1, 100),
+            "d": randint(0, 10),
+            "e": choice([True, False, None]),
+        }
+        source = random(space, n_trials=20, seed=99)
+        manifest = source.to_manifest_dict()
+        restored = deserialize_param_source(manifest)
+
+        # Check that restored source produces same results
+        for i in range(len(source)):
+            assert restored[i].params == source[i].params
+
+
+class TestGridIndexing:
+    """Tests for GridSource indexing (SLURM array support)."""
+
+    def test_grid_getitem_matches_iteration(self):
+        """source[i] should equal list(source)[i] for all indices."""
+        source = grid(a=[1, 2, 3], b=["x", "y"], c=[True, False])
+        cases_list = list(source)
+
+        for i in range(len(source)):
+            indexed = source[i]
+            iterated = cases_list[i]
+            assert indexed.params == iterated.params
+            assert indexed.case_id == iterated.case_id
+
+    def test_grid_getitem_single_param(self):
+        """Single parameter grid indexing."""
+        source = grid(x=[10, 20, 30])
+        assert source[0].params == {"x": 10}
+        assert source[1].params == {"x": 20}
+        assert source[2].params == {"x": 30}
+
+    def test_grid_getitem_empty(self):
+        """Empty grid indexing."""
+        source = grid()
+        assert source[0].params == {}
+        with pytest.raises(IndexError):
+            source[1]
+
+    def test_grid_getitem_negative_index(self):
+        """Negative indexing should work."""
+        source = grid(x=[1, 2, 3])
+        assert source[-1].params == {"x": 3}
+        assert source[-2].params == {"x": 2}
+        assert source[-3].params == {"x": 1}
+
+    def test_grid_getitem_out_of_bounds(self):
+        """Out of bounds should raise IndexError."""
+        source = grid(x=[1, 2])
+        with pytest.raises(IndexError):
+            source[2]
+        with pytest.raises(IndexError):
+            source[-3]
+
+    def test_grid_manifest_roundtrip_preserves_ordering(self):
+        """Serialization and deserialization preserves indexing order."""
+        from metalab.manifest import deserialize_param_source
+
+        source = grid(alpha=[0.1, 0.01], beta=[1, 2, 3], gamma=["a", "b"])
+        manifest = source.to_manifest_dict()
+        restored = deserialize_param_source(manifest)
+
+        # Verify same length
+        assert len(restored) == len(source)
+
+        # Verify all indices match
+        for i in range(len(source)):
+            assert restored[i].params == source[i].params
+            assert restored[i].case_id == source[i].case_id
+
+
 class TestManual:
     """Tests for ManualSource."""
 
@@ -133,6 +307,56 @@ class TestManual:
         """len() should return number of cases."""
         source = manual([{"a": i} for i in range(5)])
         assert len(source) == 5
+
+
+class TestManualIndexing:
+    """Tests for ManualSource indexing (SLURM array support)."""
+
+    def test_manual_getitem_matches_iteration(self):
+        """source[i] should equal list(source)[i] for all indices."""
+        cases_input = [
+            {"a": 1, "b": "x"},
+            {"a": 2, "b": "y"},
+            {"a": 3, "b": "z"},
+        ]
+        source = manual(cases_input)
+        cases_list = list(source)
+
+        for i in range(len(source)):
+            indexed = source[i]
+            iterated = cases_list[i]
+            assert indexed.params == iterated.params
+            assert indexed.case_id == iterated.case_id
+
+    def test_manual_getitem_negative_index(self):
+        """Negative indexing should work."""
+        source = manual([{"x": 1}, {"x": 2}, {"x": 3}])
+        assert source[-1].params == {"x": 3}
+        assert source[-2].params == {"x": 2}
+
+    def test_manual_getitem_out_of_bounds(self):
+        """Out of bounds should raise IndexError."""
+        source = manual([{"x": 1}])
+        with pytest.raises(IndexError):
+            source[1]
+
+    def test_manual_manifest_roundtrip_preserves_ordering(self):
+        """Serialization and deserialization preserves indexing order."""
+        from metalab.manifest import deserialize_param_source
+
+        cases_input = [
+            {"lr": 0.01, "batch": 32},
+            {"lr": 0.1, "batch": 64},
+            {"lr": 0.001, "batch": 128},
+        ]
+        source = manual(cases_input, tags=["test"])
+        manifest = source.to_manifest_dict()
+        restored = deserialize_param_source(manifest)
+
+        assert len(restored) == len(source)
+        for i in range(len(source)):
+            assert restored[i].params == source[i].params
+            assert restored[i].case_id == source[i].case_id
 
 
 class TestResolver:

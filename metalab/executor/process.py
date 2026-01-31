@@ -7,15 +7,12 @@ Workers import operation from string reference (no pickled callables).
 
 from __future__ import annotations
 
-import os
-import traceback
 from concurrent.futures import Future, ProcessPoolExecutor
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from metalab.executor.handle import LocalRunHandle, RunHandle
 from metalab.executor.payload import RunPayload
-from metalab.types import Provenance, RunRecord
+from metalab.types import RunRecord
 
 if TYPE_CHECKING:
     from metalab.operation import OperationWrapper
@@ -36,147 +33,36 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
     Returns:
         Serialized RunRecord as dict.
     """
-    import io
-    import logging
-
-    from metalab.capture import Capture
+    from metalab.executor.core import execute_payload
     from metalab.executor.payload import RunPayload
     from metalab.operation import import_operation
-    from metalab.runtime import create_runtime
     from metalab.schema import dump_run_record
     from metalab.store.file import FileStore
 
     # Deserialize payload
     payload = RunPayload.from_dict(payload_dict)
 
-    started_at = datetime.now()
-
     # Resolve operation from reference
     operation = import_operation(payload.operation_ref)
-
-    # Context is the spec itself - operations receive it directly
-    context = payload.context_spec
 
     # Create store
     store = FileStore(payload.store_locator)
 
-    # Create runtime
-    runtime = create_runtime(
-        run_id=payload.run_id,
-        metadata=payload.metadata,
-    )
-
-    # Create capture with worker ID for logging
-    worker_id = f"process:{worker_num}"
-    capture = Capture(
-        store=store,
-        run_id=payload.run_id,
-        artifact_dir=runtime.scratch_dir / "artifacts",
-        worker_id=worker_id,
-    )
-
-    # Set up logging capture for third-party library output
-    log_buffer = io.StringIO()
-    log_handler = logging.StreamHandler(log_buffer)
-    log_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-    root_logger = logging.getLogger()
-    old_handlers = root_logger.handlers[:]
-    old_level = root_logger.level
-    root_logger.handlers = [log_handler]
-    root_logger.setLevel(logging.DEBUG)
-
-    # Write RUNNING record before execution
-    running_record = RunRecord.running(
+    # Execute using shared logic
+    result = execute_payload(
         run_id=payload.run_id,
         experiment_id=payload.experiment_id,
-        context_fingerprint=payload.fingerprints.get("context", ""),
-        params_fingerprint=payload.fingerprints.get("params", ""),
-        seed_fingerprint=payload.fingerprints.get("seed", ""),
-        started_at=started_at,
+        context_spec=payload.context_spec,
         params_resolved=payload.params_resolved,
-        provenance=Provenance(
-            code_hash=operation.code_hash,
-            executor_id="process",
-        ),
+        seed_bundle=payload.seed_bundle,
+        fingerprints=payload.fingerprints,
+        metadata=payload.metadata,
+        operation=operation,
+        store=store,
+        worker_id=f"process:{worker_num}",
+        derived_metric_refs=payload.derived_metric_refs,
+        capture_third_party_logs=True,
     )
-    store.put_run_record(running_record)
-
-    try:
-        # Execute
-        record = operation.run(
-            context=context,
-            params=payload.params_resolved,
-            seeds=payload.seed_bundle,
-            runtime=runtime,
-            capture=capture,
-        )
-
-        # Handle None return as success (no return needed from operations)
-        if record is None:
-            record = RunRecord.success()
-
-        # Finalize capture (flushes logs)
-        capture_data = capture.finalize()
-
-        finished_at = datetime.now()
-        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
-
-        result = RunRecord(
-            run_id=payload.run_id,
-            experiment_id=payload.experiment_id,
-            status=record.status,
-            context_fingerprint=payload.fingerprints.get("context", ""),
-            params_fingerprint=payload.fingerprints.get("params", ""),
-            seed_fingerprint=payload.fingerprints.get("seed", ""),
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-            metrics={**record.metrics, **capture_data["metrics"]},
-            provenance=Provenance(
-                code_hash=operation.code_hash,
-                executor_id="process",
-            ),
-            params_resolved=payload.params_resolved,
-            tags=record.tags,
-            artifacts=capture_data["artifacts"],
-        )
-
-    except Exception as e:
-        capture_data = capture.finalize()
-        finished_at = datetime.now()
-        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
-
-        result = RunRecord.failed(
-            run_id=payload.run_id,
-            experiment_id=payload.experiment_id,
-            context_fingerprint=payload.fingerprints.get("context", ""),
-            params_fingerprint=payload.fingerprints.get("params", ""),
-            seed_fingerprint=payload.fingerprints.get("seed", ""),
-            started_at=started_at,
-            finished_at=finished_at,
-            error_type=type(e).__name__,
-            error_message=str(e),
-            error_traceback=traceback.format_exc(),
-            metrics=capture_data["metrics"],
-            provenance=Provenance(
-                code_hash=operation.code_hash,
-                executor_id="process",
-            ),
-            params_resolved=payload.params_resolved,
-            artifacts=capture_data["artifacts"],
-        )
-
-    finally:
-        # Restore logging handlers
-        root_logger.handlers = old_handlers
-        root_logger.setLevel(old_level)
-
-        # Save third-party logging output if any
-        log_content = log_buffer.getvalue()
-        if log_content:
-            store.put_log(payload.run_id, "logging", log_content)
 
     # Serialize result for return (avoid pickle issues with complex objects)
     return dump_run_record(result)

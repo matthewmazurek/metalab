@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from metalab.events import EventCallback
     from metalab.executor.base import Executor
     from metalab.executor.handle import RunHandle as RunHandleProtocol
+    from metalab.executor.slurm import SlurmExecutor
     from metalab.experiment import Experiment
     from metalab.progress import Progress, ProgressTracker
     from metalab.store.base import Store
@@ -271,6 +272,85 @@ def generate_payloads(
     return payloads, all_run_ids
 
 
+def _run_slurm_indexed(
+    experiment: "Experiment",
+    store: "Store",
+    executor: "SlurmExecutor",
+    resume: bool = True,
+    derived_metric_refs: list[str] | None = None,
+) -> "RunHandle":
+    """
+    Submit experiment via index-addressed SLURM array.
+
+    This avoids the per-task pickle overhead of submitit by:
+    1. Writing a single array spec file with experiment configuration
+    2. Submitting SLURM array job(s) via sbatch
+    3. Each task reconstructs its parameters from SLURM_ARRAY_TASK_ID
+
+    Args:
+        experiment: The experiment to run.
+        store: Store for persisting results.
+        executor: The SLURM executor.
+        resume: Skip existing successful runs.
+        derived_metric_refs: Optional derived metric function references.
+
+    Returns:
+        SlurmRunHandle for tracking and awaiting results.
+    """
+    from metalab._ids import resolve_context
+    from metalab.fingerprint import fingerprint
+
+    # Resolve context - computes lazy hashes for FilePath/DirPath
+    resolved_context, manifest = resolve_context(experiment.context)
+    ctx_fp = fingerprint(resolved_context)
+
+    # Compute total runs
+    total_runs = len(experiment.params) * len(experiment.seeds)
+
+    # Count existing successful runs if resuming
+    skipped_count = 0
+    if resume:
+        # For SLURM indexed, we can't easily pre-scan all run_ids without
+        # enumerating them (which defeats the purpose). Instead, we let
+        # the worker skip at runtime. We could optionally do a store scan
+        # here for existing runs.
+        # For now, we set skipped_count to 0 and let workers skip.
+        pass
+
+    # Optionally persist the resolved manifest for auditability
+    if manifest and hasattr(store, "root"):
+        import json
+        from pathlib import Path
+
+        manifest_path = (
+            Path(store.root) / f"{experiment.experiment_id}_context_manifest.json"
+        )
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("w") as f:
+            json.dump(
+                {
+                    "experiment_id": experiment.experiment_id,
+                    "context_fingerprint": ctx_fp,
+                    "resolved_fields": manifest,
+                },
+                f,
+                indent=2,
+            )
+        logger.debug(f"Saved context manifest to {manifest_path}")
+
+    # Submit via indexed array
+    handle = executor.submit_indexed(
+        experiment=experiment,
+        store=store,
+        context_fingerprint=ctx_fp,
+        total_runs=total_runs,
+        skipped_count=skipped_count,
+        derived_metric_refs=derived_metric_refs,
+    )
+
+    return handle
+
+
 def run(
     experiment: Experiment,
     store: str | Store | None = None,
@@ -374,18 +454,33 @@ def run(
                 # Convert callable to reference
                 derived_metric_refs.append(get_func_ref(metric))
 
-    # Generate payloads
-    payloads, all_run_ids = generate_payloads(
-        experiment, store, resume, derived_metric_refs=derived_metric_refs
-    )
+    # Check if using SLURM executor with index-addressed arrays
+    from metalab.executor.slurm import SlurmExecutor
 
-    # Submit to executor
-    handle = executor.submit(
-        payloads=payloads,
-        store=store,
-        operation=experiment.operation,
-        run_ids=all_run_ids,
-    )
+    if isinstance(executor, SlurmExecutor):
+        # Use index-addressed SLURM array submission
+        handle = _run_slurm_indexed(
+            experiment=experiment,
+            store=store,
+            executor=executor,
+            resume=resume,
+            derived_metric_refs=derived_metric_refs,
+        )
+        all_run_ids_count = len(experiment.params) * len(experiment.seeds)
+    else:
+        # Standard payload-based submission for other executors
+        payloads, all_run_ids = generate_payloads(
+            experiment, store, resume, derived_metric_refs=derived_metric_refs
+        )
+        all_run_ids_count = len(all_run_ids)
+
+        # Submit to executor
+        handle = executor.submit(
+            payloads=payloads,
+            store=store,
+            operation=experiment.operation,
+            run_ids=all_run_ids,
+        )
 
     # Wire up on_event callback if provided (and no progress)
     if on_event is not None and progress is None:
@@ -408,7 +503,7 @@ def run(
 
         # Create progress tracker
         tracker = create_progress_tracker(
-            total=len(all_run_ids),
+            total=all_run_ids_count,
             title=progress_config.title or experiment.name,
             style=progress_config.style,
             display_metrics=progress_config.display_metrics,

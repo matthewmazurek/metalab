@@ -13,9 +13,10 @@ uv add metalab
 uv add metalab[numpy]   # NumPy array serialization
 uv add metalab[pandas]  # DataFrame export
 uv add metalab[rich]    # Progress bars
-uv add metalab[slurm]   # SLURM cluster execution
 uv add metalab[full]    # All of the above
 ```
+
+SLURM execution works out of the box with no additional dependencies.
 
 ## Minimal Working Example
 
@@ -488,7 +489,7 @@ results = handle.result()
 
 ### SLURM Cluster Execution
 
-Submit experiments to a SLURM cluster (requires `submitit`):
+Submit experiments to a SLURM cluster using index-addressed job arrays:
 
 ```python
 handle = metalab.run(
@@ -501,6 +502,7 @@ handle = metalab.run(
             cpus=4,
             memory="16G",
             gpus=1,
+            max_concurrent=100,  # Limit concurrent tasks
         )
     ),
     progress=True,  # Watch job progress
@@ -509,6 +511,53 @@ handle = metalab.run(
 # Block until all jobs complete (shows live progress)
 results = handle.result()
 ```
+
+**Scaling to large experiments**: The SLURM executor uses index-addressed job arrays, where each task computes its parameters from `SLURM_ARRAY_TASK_ID`. This avoids per-task serialization overhead, enabling experiments with hundreds of thousands of runs:
+
+```python
+# This works efficiently even with 300,000+ runs
+exp = metalab.Experiment(
+    name="large_sweep",
+    version="0.1",
+    context=my_context,
+    operation=my_operation,
+    params=metalab.grid(
+        gene=list(range(2000)),      # 2000 genes
+        expr_val=list(range(50)),    # 50 expression values
+    ),
+    seeds=metalab.seeds(base=42, replicates=3),  # 3 replicates
+)  # 300,000 total runs
+
+handle = metalab.run(
+    exp,
+    store="/scratch/runs/large_sweep",
+    executor=metalab.SlurmExecutor(
+        metalab.SlurmConfig(
+            partition="cpu",
+            time="1:00:00",
+            max_array_size=10000,  # Auto-shard into chunks of 10k
+            max_concurrent=500,    # Run up to 500 tasks at once
+        )
+    ),
+)
+```
+
+**Configuration options**:
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `partition` | SLURM partition name | `"default"` |
+| `time` | Maximum walltime (HH:MM:SS) | `"1:00:00"` |
+| `cpus` | CPUs per task | `1` |
+| `memory` | Memory per task (e.g., "4G", "16GB") | `"4G"` |
+| `gpus` | GPUs per task | `0` |
+| `max_concurrent` | Max simultaneous tasks | `None` (no limit) |
+| `max_array_size` | Max tasks per array job (for sharding) | `10000` |
+| `modules` | Shell modules to load | `[]` |
+| `conda_env` | Conda environment to activate | `None` |
+| `setup` | Additional setup commands | `[]` |
+
+**Note**: All parameter sources (`grid()`, `manual()`, and `random()`) support O(1) index-based access for SLURM array submission. Each `random()` trial derives its own deterministic seed from the index, ensuring reproducibility without pre-generating all samples.
 
 **Reconnecting to SLURM jobs**: If you disconnect (e.g., close your terminal), you can reconnect later:
 
@@ -522,7 +571,9 @@ handle = metalab.reconnect("/scratch/runs/my_exp")
 print(handle.status)  # RunStatus(total=100, completed=45, ...)
 ```
 
-The `SlurmExecutor` uses `submitit` under the hood to handle job array submission, serialization, and result collection. Results are written directly to the shared filesystem store.
+**Robust completion**: Each task writes a `.done` marker file after successfully persisting its run record, ensuring reliable skip detection on resume. Tasks that crash before completion are automatically retried on the next submission.
+
+Results are written directly to the shared filesystem store.
 
 ### Custom Storage
 

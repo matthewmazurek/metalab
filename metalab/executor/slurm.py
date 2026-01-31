@@ -1,21 +1,28 @@
 """
-SlurmExecutor: SLURM cluster execution via submitit.
+SlurmExecutor: SLURM cluster execution via direct sbatch submission.
 
 Provides:
 - SlurmConfig: Configuration for SLURM job parameters
-- SlurmExecutor: Executor that submits jobs to SLURM via submitit
+- SlurmExecutor: Executor that submits index-addressed SLURM arrays
 - SlurmRunHandle: Handle for tracking SLURM job execution
 
+This implementation uses index-addressed SLURM arrays where each array task
+computes its parameters from SLURM_ARRAY_TASK_ID, avoiding the per-task
+pickle overhead of submitit's map_array approach.
+
 Job state tracking:
-- Fresh submissions use submitit's job.state for accurate PENDING/RUNNING distinction
-- Reconnections attempt to reconstruct Job objects from manifest job IDs
-- Falls back to store-only polling if sacct is unavailable
+- Uses squeue for active job counts (RUNNING, PENDING)
+- Uses sacct for terminal job counts (COMPLETED, FAILED, etc.)
+- Falls back to store-only polling if SLURM commands unavailable
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
+import tempfile
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -30,20 +37,15 @@ from metalab.types import Status
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
+    from metalab.experiment import Experiment
     from metalab.operation import OperationWrapper
     from metalab.store.base import Store
     from metalab.types import RunRecord
 
 logger = logging.getLogger(__name__)
 
-# Check for submitit availability
-try:
-    import submitit
-
-    SUBMITIT_AVAILABLE = True
-except ImportError:
-    SUBMITIT_AVAILABLE = False
-    submitit = None  # type: ignore
+# Default maximum array size (many clusters limit this)
+DEFAULT_MAX_ARRAY_SIZE = 10000
 
 
 @dataclass
@@ -58,6 +60,10 @@ class SlurmConfig:
         memory: Memory per task (e.g., "4G", "16GB").
         gpus: Number of GPUs per task (0 for CPU-only).
         max_concurrent: Maximum concurrent jobs (maps to --array=%N).
+        max_array_size: Maximum tasks per array job (for sharding).
+        chunk_size: Number of runs per array task. Higher values reduce
+            scheduler load for large experiments (e.g., 100k runs with
+            chunk_size=100 submits 1k array tasks instead of 100k).
         modules: Shell modules to load before execution.
         conda_env: Conda environment to activate.
         setup: List of bash commands to run before each task.
@@ -70,48 +76,12 @@ class SlurmConfig:
     memory: str = "4G"
     gpus: int = 0
     max_concurrent: int | None = None
+    max_array_size: int = DEFAULT_MAX_ARRAY_SIZE
+    chunk_size: int = 1
     modules: list[str] = field(default_factory=list)
     conda_env: str | None = None
     setup: list[str] = field(default_factory=list)
     extra_sbatch: dict[str, str] = field(default_factory=dict)
-
-    def to_submitit_params(self) -> dict[str, Any]:
-        """Convert to submitit parameter dict."""
-        # Parse time string to minutes
-        timeout_min = self._parse_time_to_minutes(self.time)
-
-        # Parse memory to GB
-        mem_gb = self._parse_memory_to_gb(self.memory)
-
-        params: dict[str, Any] = {
-            "slurm_partition": self.partition,
-            "timeout_min": timeout_min,
-            "cpus_per_task": self.cpus,
-            "mem_gb": mem_gb,
-        }
-
-        if self.gpus > 0:
-            params["gpus_per_node"] = self.gpus
-
-        if self.max_concurrent is not None:
-            params["slurm_array_parallelism"] = self.max_concurrent
-
-        # Build setup commands from modules, conda_env, and custom setup
-        setup_commands: list[str] = []
-        for module in self.modules:
-            setup_commands.append(f"module load {module}")
-        if self.conda_env:
-            setup_commands.append(f"conda activate {self.conda_env}")
-        setup_commands.extend(self.setup)
-
-        if setup_commands:
-            params["slurm_setup"] = setup_commands
-
-        # Add extra sbatch directives
-        for key, value in self.extra_sbatch.items():
-            params[f"slurm_{key}"] = value
-
-        return params
 
     @staticmethod
     def _parse_time_to_minutes(time_str: str) -> int:
@@ -142,213 +112,443 @@ class SlurmConfig:
             return float(mem_str)
 
 
-def _compute_derived_metrics_slurm(
-    record: "RunRecord",
-    store: "Store",
-    metric_refs: list[str],
-) -> None:
+# ---------------------------------------------------------------------------
+# SLURM command utilities
+# ---------------------------------------------------------------------------
+
+
+def _run_cmd(cmd: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
     """
-    Compute and store derived metrics for a completed run (SLURM worker).
+    Run a command with timeout.
 
     Args:
-        record: The completed run record.
-        store: The store for persisting derived metrics.
-        metric_refs: List of function references ('module:func' format).
-    """
-    import logging
-
-    from metalab.derived import compute_derived_for_run, import_derived_metric
-    from metalab.result import Run
-
-    logger = logging.getLogger(__name__)
-
-    # Create Run object from record
-    run = Run(record, store)
-
-    # Import and apply metric functions
-    functions = []
-    for ref in metric_refs:
-        try:
-            func = import_derived_metric(ref)
-            functions.append(func)
-        except Exception as e:
-            logger.warning(f"Failed to import derived metric '{ref}': {e}")
-
-    if functions:
-        derived = compute_derived_for_run(run, functions)
-        store.put_derived(record.run_id, derived)
-
-
-def _slurm_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
-    """
-    Worker function that runs on SLURM compute nodes.
-
-    This function is submitted via submitit and executes on the cluster.
-    It imports the operation, runs it, and persists results to the store.
-
-    Args:
-        payload_dict: Serialized RunPayload as dict.
+        cmd: Command and arguments as list.
+        timeout: Timeout in seconds.
 
     Returns:
-        Dict with run_id and status for tracking.
+        Tuple of (exit_code, stdout, stderr).
     """
-    import io
-    import logging as _logging
-    import os
-    import traceback
-    from datetime import datetime
-
-    from metalab.capture import Capture
-    from metalab.executor.payload import RunPayload
-    from metalab.operation import import_operation
-    from metalab.runtime import create_runtime
-    from metalab.store.file import FileStore
-    from metalab.types import Provenance, RunRecord
-
-    # Deserialize payload
-    payload = RunPayload.from_dict(payload_dict)
-
-    started_at = datetime.now()
-
-    # Resolve operation from reference
-    operation = import_operation(payload.operation_ref)
-
-    # Context is the spec itself - operations receive it directly
-    context = payload.context_spec
-
-    # Create store
-    store = FileStore(payload.store_locator)
-
-    # Create runtime
-    runtime = create_runtime(
-        run_id=payload.run_id,
-        metadata=payload.metadata,
-    )
-
-    # Build worker_id from SLURM environment
-    job_id = os.environ.get("SLURM_JOB_ID", "unknown")
-    array_task_id = os.environ.get("SLURM_ARRAY_TASK_ID", "0")
-    worker_id = f"slurm:{job_id}_{array_task_id}"
-
-    # Create capture with worker ID for logging
-    capture = Capture(
-        store=store,
-        run_id=payload.run_id,
-        artifact_dir=runtime.scratch_dir / "artifacts",
-        worker_id=worker_id,
-    )
-
-    # Set up logging capture for third-party library output
-    log_buffer = io.StringIO()
-    log_handler = _logging.StreamHandler(log_buffer)
-    log_handler.setFormatter(
-        _logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-    root_logger = _logging.getLogger()
-    old_handlers = root_logger.handlers[:]
-    old_level = root_logger.level
-    root_logger.handlers = [log_handler]
-    root_logger.setLevel(_logging.DEBUG)
-
     try:
-        # Execute
-        record = operation.run(
-            context=context,
-            params=payload.params_resolved,
-            seeds=payload.seed_bundle,
-            runtime=runtime,
-            capture=capture,
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
-
-        # Handle None return as success
-        if record is None:
-            record = RunRecord.success()
-
-        # Finalize capture (flushes logs)
-        capture_data = capture.finalize()
-
-        finished_at = datetime.now()
-        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
-
-        result = RunRecord(
-            run_id=payload.run_id,
-            experiment_id=payload.experiment_id,
-            status=record.status,
-            context_fingerprint=payload.fingerprints.get("context", ""),
-            params_fingerprint=payload.fingerprints.get("params", ""),
-            seed_fingerprint=payload.fingerprints.get("seed", ""),
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-            metrics={**record.metrics, **capture_data["metrics"]},
-            provenance=Provenance(
-                code_hash=operation.code_hash,
-                executor_id="slurm",
-            ),
-            params_resolved=payload.params_resolved,
-            tags=record.tags,
-            artifacts=capture_data["artifacts"],
-        )
-
-        # Persist to store immediately (source of truth)
-        store.put_run_record(result)
-
-        # Compute derived metrics if configured (post-hoc, doesn't affect fingerprint)
-        if payload.derived_metric_refs:
-            _compute_derived_metrics_slurm(result, store, payload.derived_metric_refs)
-
-        return {"run_id": payload.run_id, "status": result.status.value}
-
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", f"Command timed out after {timeout}s"
     except Exception as e:
-        capture_data = capture.finalize()
-        finished_at = datetime.now()
-        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        return -1, "", str(e)
 
-        result = RunRecord.failed(
-            run_id=payload.run_id,
-            experiment_id=payload.experiment_id,
-            context_fingerprint=payload.fingerprints.get("context", ""),
-            params_fingerprint=payload.fingerprints.get("params", ""),
-            seed_fingerprint=payload.fingerprints.get("seed", ""),
-            started_at=started_at,
-            finished_at=finished_at,
-            error_type=type(e).__name__,
-            error_message=str(e),
-            error_traceback=traceback.format_exc(),
-            metrics=capture_data["metrics"],
-            provenance=Provenance(
-                code_hash=operation.code_hash,
-                executor_id="slurm",
-            ),
-            params_resolved=payload.params_resolved,
-            artifacts=capture_data["artifacts"],
-        )
 
-        # Persist failed result
-        store.put_run_record(result)
+def _parse_slurm_job_id(output: str) -> str | None:
+    """
+    Parse job ID from sbatch output.
 
-        return {"run_id": payload.run_id, "status": result.status.value}
+    Expected format: "Submitted batch job 12345"
+    """
+    for line in output.strip().split("\n"):
+        if "Submitted batch job" in line:
+            parts = line.split()
+            if parts:
+                return parts[-1]
+    return None
 
-    finally:
-        # Restore logging handlers
-        root_logger.handlers = old_handlers
-        root_logger.setLevel(old_level)
 
-        # Save third-party logging output if any
-        log_content = log_buffer.getvalue()
-        if log_content:
-            store.put_log(payload.run_id, "logging", log_content)
+def _normalize_slurm_state(state: str) -> str:
+    """
+    Normalize SLURM state string.
+
+    - Strips trailing '+' (e.g., CANCELLED+ -> CANCELLED)
+    - Uppercases for consistency
+    """
+    return state.upper().rstrip("+")
+
+
+def _is_step_job(job_id: str) -> bool:
+    """Check if job ID is a step (e.g., 12345.batch, 12345.extern)."""
+    return "." in job_id and any(
+        job_id.endswith(suffix) for suffix in [".batch", ".extern", ".0"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# SLURM polling helpers (can be used standalone for remote polling)
+# ---------------------------------------------------------------------------
+
+
+def squeue_state_counts(
+    job_ids: list[str],
+    timeout: float = 30.0,
+) -> dict[str, int]:
+    """
+    Query squeue for active job state counts.
+
+    Args:
+        job_ids: List of SLURM job IDs to query.
+        timeout: Command timeout in seconds.
+
+    Returns:
+        Dict mapping state to count (e.g., {"RUNNING": 5, "PENDING": 10}).
+        Returns empty dict if squeue fails.
+
+    Example:
+        >>> counts = squeue_state_counts(["12345", "12346"])
+        >>> counts
+        {"RUNNING": 50, "PENDING": 100, "COMPLETING": 5}
+
+    Notes:
+        - Ignores .batch, .extern, and other step jobs
+        - Returns empty dict if squeue fails (cluster unavailable, etc.)
+    """
+    if not job_ids:
+        return {}
+
+    # Query all job IDs at once
+    job_list = ",".join(job_ids)
+    exit_code, stdout, stderr = _run_cmd(
+        ["squeue", "-h", "-j", job_list, "-o", "%i %T"],
+        timeout=timeout,
+    )
+
+    if exit_code != 0:
+        logger.debug(f"squeue failed: {stderr}")
+        return {}
+
+    counts: dict[str, int] = {}
+    for line in stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            job_id, state = parts[0], parts[1]
+            # Skip step jobs
+            if _is_step_job(job_id):
+                continue
+            state = _normalize_slurm_state(state)
+            counts[state] = counts.get(state, 0) + 1
+
+    return counts
+
+
+def sacct_state_counts(
+    job_ids: list[str],
+    timeout: float = 60.0,
+) -> dict[str, int]:
+    """
+    Query sacct for terminal job state counts.
+
+    Args:
+        job_ids: List of SLURM job IDs to query.
+        timeout: Command timeout in seconds.
+
+    Returns:
+        Dict mapping state to count (e.g., {"COMPLETED": 100, "FAILED": 5}).
+        Returns empty dict if sacct fails.
+
+    Example:
+        >>> counts = sacct_state_counts(["12345", "12346"])
+        >>> counts
+        {"COMPLETED": 95, "FAILED": 3, "CANCELLED": 2}
+
+    Notes:
+        - Uses parsable output format for reliable parsing
+        - Normalizes states by stripping '+' suffix
+        - Ignores .batch, .extern, and other step jobs
+        - Streams output to avoid memory issues with large arrays
+    """
+    if not job_ids:
+        return {}
+
+    job_list = ",".join(job_ids)
+    exit_code, stdout, stderr = _run_cmd(
+        ["sacct", "-n", "-P", "-j", job_list, "--format=JobIDRaw,State"],
+        timeout=timeout,
+    )
+
+    if exit_code != 0:
+        logger.debug(f"sacct failed: {stderr}")
+        return {}
+
+    counts: dict[str, int] = {}
+    for line in stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("|")
+        if len(parts) >= 2:
+            job_id, state = parts[0], parts[1]
+            # Skip step jobs
+            if _is_step_job(job_id):
+                continue
+            state = _normalize_slurm_state(state)
+            counts[state] = counts.get(state, 0) + 1
+
+    return counts
+
+
+def get_slurm_status_counts(
+    job_ids: list[str],
+    total_runs: int,
+    sacct_cache: dict[str, int] | None = None,
+) -> dict[str, int]:
+    """
+    Get comprehensive SLURM status counts with explicit state buckets.
+
+    This function combines squeue (for active jobs) and sacct (for terminal jobs)
+    to provide a complete picture of job states.
+
+    Args:
+        job_ids: List of SLURM job IDs to query.
+        total_runs: Total number of runs in the experiment.
+        sacct_cache: Optional cached sacct counts to avoid repeated queries.
+
+    Returns:
+        Dict with explicit state buckets:
+        - running: Tasks currently executing (RUNNING state)
+        - pending: Tasks waiting to start (PENDING state)
+        - completing: Tasks in transition (COMPLETING state)
+        - completed: Successfully finished tasks (COMPLETED state)
+        - failed: Tasks that failed (FAILED state)
+        - cancelled: Cancelled tasks (CANCELLED state)
+        - timeout: Tasks that timed out (TIMEOUT state)
+        - oom: Out of memory tasks (OUT_OF_MEMORY state)
+        - other: All other states (HELD, SUSPENDED, REQUEUED, etc.)
+        - total: Total runs
+
+    Notes:
+        - Running/pending counts come from squeue (accurate for active jobs)
+        - Terminal counts come from sacct (may have accounting lag)
+        - "other" bucket catches transitional states that don't fit elsewhere
+    """
+    # Get active counts from squeue
+    squeue_counts = squeue_state_counts(job_ids)
+
+    # Get terminal counts from sacct (use cache if provided)
+    if sacct_cache is not None:
+        terminal_counts = sacct_cache
+    else:
+        terminal_counts = sacct_state_counts(job_ids)
+
+    # Extract explicit buckets
+    running = squeue_counts.get("RUNNING", 0)
+    pending = squeue_counts.get("PENDING", 0)
+    completing = squeue_counts.get("COMPLETING", 0)
+
+    completed = terminal_counts.get("COMPLETED", 0)
+    failed = terminal_counts.get("FAILED", 0)
+    cancelled = terminal_counts.get("CANCELLED", 0)
+    timeout = terminal_counts.get("TIMEOUT", 0)
+    oom = terminal_counts.get("OUT_OF_MEMORY", 0)
+
+    # Count other states
+    known_states = {
+        "RUNNING", "PENDING", "COMPLETING",
+        "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"
+    }
+
+    other_from_squeue = sum(
+        count for state, count in squeue_counts.items()
+        if state not in known_states
+    )
+    other_from_sacct = sum(
+        count for state, count in terminal_counts.items()
+        if state not in known_states
+    )
+
+    # Calculate other as: total - accounted
+    accounted = (
+        running + pending + completing +
+        completed + failed + cancelled + timeout + oom
+    )
+
+    # Add transitional states from squeue to 'other'
+    other = max(0, total_runs - accounted) + other_from_squeue + other_from_sacct
+
+    return {
+        "running": running,
+        "pending": pending,
+        "completing": completing,
+        "completed": completed,
+        "failed": failed,
+        "cancelled": cancelled,
+        "timeout": timeout,
+        "oom": oom,
+        "other": other,
+        "total": total_runs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# sbatch script generation
+# ---------------------------------------------------------------------------
+
+
+def _generate_sbatch_script(
+    config: SlurmConfig,
+    store_root: str,
+    array_range: str,
+    logs_dir: str,
+    job_name: str,
+    shard_offset: int = 0,
+) -> str:
+    """
+    Generate sbatch script content.
+
+    Args:
+        config: SLURM configuration.
+        store_root: Path to the store root.
+        array_range: Array range string (e.g., "0-999" or "0-999%100").
+        logs_dir: Directory for stdout/stderr logs.
+        job_name: Job name for SLURM.
+        shard_offset: Offset to add to SLURM_ARRAY_TASK_ID for global index.
+
+    Returns:
+        Complete sbatch script as string.
+    """
+    lines = ["#!/bin/bash"]
+
+    # SBATCH directives
+    lines.append(f"#SBATCH --job-name={job_name}")
+    lines.append(f"#SBATCH --partition={config.partition}")
+    lines.append(f"#SBATCH --time={config.time}")
+    lines.append(f"#SBATCH --cpus-per-task={config.cpus}")
+    lines.append(f"#SBATCH --mem={config.memory}")
+    lines.append(f"#SBATCH --array={array_range}")
+    lines.append(f"#SBATCH --output={logs_dir}/%A_%a.out")
+    lines.append(f"#SBATCH --error={logs_dir}/%A_%a.err")
+
+    if config.gpus > 0:
+        lines.append(f"#SBATCH --gres=gpu:{config.gpus}")
+
+    # Extra sbatch directives
+    for key, value in config.extra_sbatch.items():
+        # Convert underscores to hyphens for SLURM compatibility
+        slurm_key = key.replace("_", "-")
+        lines.append(f"#SBATCH --{slurm_key}={value}")
+
+    lines.append("")
+
+    # Set shard offset environment variable
+    lines.append(f"# Shard offset for global task index computation")
+    lines.append(f"export METALAB_SHARD_OFFSET={shard_offset}")
+    lines.append("")
+
+    # Setup commands
+    if config.modules:
+        for module in config.modules:
+            lines.append(f"module load {module}")
+
+    if config.conda_env:
+        lines.append(f"conda activate {config.conda_env}")
+
+    if config.setup:
+        for cmd in config.setup:
+            lines.append(cmd)
+
+    if config.modules or config.conda_env or config.setup:
+        lines.append("")
+
+    # Worker invocation
+    lines.append("# Run the metalab array worker")
+    lines.append(f'python -m metalab.executor.slurm_array_worker --store "{store_root}"')
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Array spec file
+# ---------------------------------------------------------------------------
+
+
+def _write_array_spec(
+    store_root: Path,
+    experiment: "Experiment",
+    context_fingerprint: str,
+    shards: list[dict[str, Any]],
+    chunk_size: int,
+) -> None:
+    """
+    Write the array spec file that workers use to reconstruct runs.
+
+    Args:
+        store_root: Path to the store root.
+        experiment: The experiment being run.
+        context_fingerprint: Precomputed context fingerprint.
+        shards: List of shard info dicts with job_id, start_idx, end_idx.
+        chunk_size: Number of runs per array task.
+    """
+    from metalab.manifest import serialize
+
+    total_runs = len(experiment.params) * len(experiment.seeds)  # type: ignore[arg-type]
+
+    spec = {
+        "experiment_id": experiment.experiment_id,
+        "operation_ref": experiment.operation.ref,
+        "operation_code_hash": experiment.operation.code_hash,
+        "context_spec": _serialize_context_spec(experiment.context),
+        "context_fingerprint": context_fingerprint,
+        "params": serialize(experiment.params),
+        "seeds": serialize(experiment.seeds),
+        "metadata": experiment.metadata,
+        "param_cases": len(experiment.params),  # type: ignore[arg-type]
+        "seed_replicates": len(experiment.seeds),  # type: ignore[arg-type]
+        "total_runs": total_runs,
+        "chunk_size": chunk_size,
+        "total_chunks": (total_runs + chunk_size - 1) // chunk_size,
+        "shards": shards,
+        "derived_metric_refs": None,  # Set later if needed
+    }
+
+    spec_path = store_root / "slurm_array_spec.json"
+    with open(spec_path, "w") as f:
+        json.dump(spec, f, indent=2, default=str)
+
+
+def _serialize_context_spec(context: Any) -> dict[str, Any]:
+    """Serialize context spec to JSON-friendly dict."""
+    import dataclasses
+
+    if context is None:
+        return {}
+
+    if dataclasses.is_dataclass(context) and not isinstance(context, type):
+        result = {}
+        for fld in dataclasses.fields(context):
+            value = getattr(context, fld.name)
+            # Handle FilePath/DirPath by extracting path string
+            if hasattr(value, "path"):
+                result[fld.name] = {"_type": type(value).__name__, "path": value.path}
+            elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+                result[fld.name] = _serialize_context_spec(value)
+            else:
+                result[fld.name] = value
+        return result
+
+    if isinstance(context, dict):
+        return context
+
+    # Fallback
+    return {"_raw": str(context)}
+
+
+# ---------------------------------------------------------------------------
+# SlurmExecutor
+# ---------------------------------------------------------------------------
 
 
 class SlurmExecutor:
     """
-    Executor that submits jobs to SLURM via submitit.
+    Executor that submits index-addressed SLURM arrays.
 
-    Uses submitit's AutoExecutor for job submission, which handles:
-    - Serialization of payloads
-    - sbatch script generation
-    - Job array submission
-    - Result retrieval
+    Instead of serializing each task individually (like submitit's map_array),
+    this executor:
+    1. Writes a single array spec file with experiment configuration
+    2. Submits one or more SLURM array jobs via sbatch
+    3. Each array task reconstructs its parameters from SLURM_ARRAY_TASK_ID
+
+    This approach scales to hundreds of thousands of tasks without the
+    filesystem overhead of per-task pickle files.
     """
 
     def __init__(self, config: SlurmConfig | None = None) -> None:
@@ -357,429 +557,573 @@ class SlurmExecutor:
 
         Args:
             config: SLURM configuration. Uses defaults if not provided.
-
-        Raises:
-            ImportError: If submitit is not installed.
         """
-        if not SUBMITIT_AVAILABLE:
-            raise ImportError(
-                "submitit is required for SlurmExecutor. "
-                "Install with: pip install metalab[slurm]"
-            )
-
         self._config = config or SlurmConfig()
 
-    def submit(
+    def submit_indexed(
         self,
-        payloads: list[RunPayload],
-        store: Store,
-        operation: OperationWrapper,
-        run_ids: list[str] | None = None,
-    ) -> RunHandle:
+        experiment: "Experiment",
+        store: "Store",
+        context_fingerprint: str,
+        total_runs: int,
+        skipped_count: int = 0,
+        derived_metric_refs: list[str] | None = None,
+    ) -> "SlurmRunHandle":
         """
-        Submit payloads to SLURM and return a handle.
+        Submit an experiment as index-addressed SLURM arrays.
 
         Args:
-            payloads: List of run payloads to execute.
+            experiment: The experiment to run.
             store: Store for persisting results.
-            operation: The operation to run.
-            run_ids: All run IDs including skipped (for status tracking).
+            context_fingerprint: Precomputed context fingerprint.
+            total_runs: Total number of runs (P * R).
+            skipped_count: Number of runs already completed (for resume).
+            derived_metric_refs: Optional derived metric function references.
 
         Returns:
             A SlurmRunHandle for tracking and awaiting results.
+
+        Raises:
+            ValueError: If param source doesn't support indexing.
+            RuntimeError: If sbatch submission fails.
         """
-        # Use provided run_ids or extract from payloads
-        all_run_ids = run_ids if run_ids is not None else [p.run_id for p in payloads]
-
-        # Compute skipped run IDs (in all_run_ids but not in payloads)
-        submitted_run_ids = {p.run_id for p in payloads}
-        skipped_run_ids = [rid for rid in all_run_ids if rid not in submitted_run_ids]
-
-        if not payloads:
-            # Return empty handle if no payloads (all skipped)
-            return SlurmRunHandle(
-                jobs=[],
-                store=store,
-                run_ids=all_run_ids,
-                job_array_id=None,
-                skipped_run_ids=skipped_run_ids,
+        # Validate that param source supports indexing
+        if not hasattr(experiment.params, "__getitem__"):
+            raise ValueError(
+                f"SLURM array submission requires an indexable param source. "
+                f"Got {type(experiment.params).__name__} which doesn't support __getitem__. "
+                f"Use grid() or manual() instead of random()."
             )
 
-        # Determine store path for submitit logs
-        store_path = Path(store.root) if hasattr(store, "root") else Path(".")
-        submitit_folder = store_path / ".submitit"
+        store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
 
-        # Create submitit executor
-        executor = submitit.AutoExecutor(folder=str(submitit_folder))
-        executor.update_parameters(**self._config.to_submitit_params())
+        # Create logs directory
+        logs_dir = store_path / "slurm_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Convert payloads to dicts for pickling
-        payload_dicts = [p.to_dict() for p in payloads]
+        # Compute chunking: each array task processes chunk_size runs
+        chunk_size = self._config.chunk_size
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
 
-        # Submit as job array
-        jobs = executor.map_array(_slurm_worker, payload_dicts)
+        # Shard by chunks (not runs)
+        shards = self._compute_shards(total_chunks)
 
-        # Get job array ID from first job
-        job_array_id = jobs[0].job_id.split("_")[0] if jobs else None
+        # Get param/seed counts with type safety
+        param_cases = len(experiment.params) if hasattr(experiment.params, "__len__") else 0  # type: ignore[arg-type]
+        seed_replicates = len(experiment.seeds) if hasattr(experiment.seeds, "__len__") else 0  # type: ignore[arg-type]
 
-        # Build mapping of run_id -> slurm_job_id for reconnection
-        run_id_to_job_id: dict[str, str] = {}
-        for payload, job in zip(payloads, jobs):
-            run_id_to_job_id[payload.run_id] = job.job_id
+        # Write array spec (before submission so workers can read it)
+        _write_array_spec(
+            store_root=store_path,
+            experiment=experiment,
+            context_fingerprint=context_fingerprint,
+            shards=shards,
+            chunk_size=chunk_size,
+        )
 
-        # Write manifest for status tracking (after we have job_array_id)
+        # Update spec with derived metrics if provided
+        if derived_metric_refs:
+            spec_path = store_path / "slurm_array_spec.json"
+            with open(spec_path) as f:
+                spec = json.load(f)
+            spec["derived_metric_refs"] = derived_metric_refs
+            with open(spec_path, "w") as f:
+                json.dump(spec, f, indent=2)
+
+        # Submit each shard
+        job_ids: list[str] = []
+        for shard in shards:
+            job_id = self._submit_shard(
+                config=self._config,
+                store_root=str(store_path),
+                shard=shard,
+                logs_dir=str(logs_dir),
+                job_name=f"metalab-{experiment.name}",
+            )
+            shard["job_id"] = job_id
+            job_ids.append(job_id)
+
+        # Update array spec with job IDs
+        spec_path = store_path / "slurm_array_spec.json"
+        with open(spec_path) as f:
+            spec = json.load(f)
+        spec["shards"] = shards
+        with open(spec_path, "w") as f:
+            json.dump(spec, f, indent=2)
+
+        # Write manifest
         self._write_manifest(
-            store,
-            all_run_ids,
-            payloads,
-            skipped_run_ids,
-            job_array_id,
-            run_id_to_job_id,
-            submitit_folder,
+            store=store,
+            experiment_id=experiment.experiment_id,
+            job_ids=job_ids,
+            shards=shards,
+            total_runs=total_runs,
+            total_chunks=total_chunks,
+            chunk_size=chunk_size,
+            param_cases=param_cases,
+            seed_replicates=seed_replicates,
+            skipped_count=skipped_count,
         )
 
         return SlurmRunHandle(
-            jobs=jobs,
             store=store,
-            run_ids=all_run_ids,
-            job_array_id=job_array_id,
-            skipped_run_ids=skipped_run_ids,
-            run_id_to_job_id=run_id_to_job_id,
+            job_ids=job_ids,
+            shards=shards,
+            total_runs=total_runs,
+            chunk_size=chunk_size,
+            skipped_count=skipped_count,
         )
+
+    def _compute_shards(self, total_items: int) -> list[dict[str, Any]]:
+        """
+        Compute shard ranges for array submission.
+
+        Args:
+            total_items: Total number of array tasks (chunks) to submit.
+
+        Returns:
+            List of shard dicts with start_idx, end_idx, array_range.
+        """
+        max_size = self._config.max_array_size
+        shards = []
+
+        start_idx = 0
+        while start_idx < total_items:
+            end_idx = min(start_idx + max_size - 1, total_items - 1)
+            shard_size = end_idx - start_idx + 1
+
+            # Array range for sbatch (relative to shard, 0-based)
+            array_end = shard_size - 1
+            if self._config.max_concurrent:
+                array_range = f"0-{array_end}%{self._config.max_concurrent}"
+            else:
+                array_range = f"0-{array_end}"
+
+            shards.append({
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "array_range": array_range,
+                "job_id": None,  # Set after submission
+            })
+
+            start_idx = end_idx + 1
+
+        return shards
+
+    def _submit_shard(
+        self,
+        config: SlurmConfig,
+        store_root: str,
+        shard: dict[str, Any],
+        logs_dir: str,
+        job_name: str,
+    ) -> str:
+        """
+        Submit a single shard as a SLURM array job.
+
+        Args:
+            config: SLURM configuration.
+            store_root: Path to store root.
+            shard: Shard info dict with start_idx, end_idx, array_range.
+            logs_dir: Directory for logs.
+            job_name: Job name.
+
+        Returns:
+            SLURM job ID.
+
+        Raises:
+            RuntimeError: If submission fails.
+        """
+        # Generate sbatch script with shard offset embedded
+        script_content = _generate_sbatch_script(
+            config=config,
+            store_root=store_root,
+            array_range=shard["array_range"],
+            logs_dir=logs_dir,
+            job_name=job_name,
+            shard_offset=shard["start_idx"],
+        )
+
+        # Write script to temp file and submit
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".sh",
+            delete=False,
+            dir=store_root,
+        ) as f:
+            f.write(script_content)
+            script_path = f.name
+
+        try:
+            # Submit via sbatch
+            exit_code, stdout, stderr = _run_cmd(
+                ["sbatch", script_path],
+                timeout=60.0,
+            )
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"sbatch failed with exit code {exit_code}:\n{stderr}"
+                )
+
+            job_id = _parse_slurm_job_id(stdout)
+            if not job_id:
+                raise RuntimeError(
+                    f"Failed to parse job ID from sbatch output:\n{stdout}"
+                )
+
+            logger.info(
+                f"Submitted SLURM array job {job_id} "
+                f"(tasks {shard['start_idx']}-{shard['end_idx']})"
+            )
+
+            return job_id
+
+        finally:
+            # Clean up script file
+            try:
+                os.unlink(script_path)
+            except Exception:
+                pass
 
     def _write_manifest(
         self,
-        store: Store,
-        run_ids: list[str],
-        payloads: list[RunPayload],
-        skipped_run_ids: list[str] | None = None,
-        job_array_id: str | None = None,
-        run_id_to_job_id: dict[str, str] | None = None,
-        submitit_folder: Path | None = None,
+        store: "Store",
+        experiment_id: str,
+        job_ids: list[str],
+        shards: list[dict[str, Any]],
+        total_runs: int,
+        total_chunks: int,
+        chunk_size: int,
+        param_cases: int,
+        seed_replicates: int,
+        skipped_count: int = 0,
     ) -> None:
-        """Write manifest file for tracking expected runs."""
-        store_path = Path(store.root) if hasattr(store, "root") else Path(".")
+        """Write the lightweight manifest for reconnection and Atlas."""
+        store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
         manifest_path = store_path / "manifest.json"
 
         manifest = {
-            "experiment_id": payloads[0].experiment_id if payloads else "",
+            "experiment_id": experiment_id,
             "executor_type": "slurm",
-            "run_ids": run_ids,
-            "submitted_run_ids": [p.run_id for p in payloads],
-            "skipped_run_ids": skipped_run_ids or [],
-            "job_array_id": job_array_id,
-            "run_id_to_job_id": run_id_to_job_id or {},
-            "submitit_folder": str(submitit_folder) if submitit_folder else None,
+            "submission_mode": "array_indexed",
+            "job_ids": job_ids,
+            "shards": shards,
+            "total_runs": total_runs,
+            "total_chunks": total_chunks,
+            "chunk_size": chunk_size,
+            "param_cases": param_cases,
+            "seed_replicates": seed_replicates,
+            "skipped_count": skipped_count,
+            "max_array_size": self._config.max_array_size,
+            "store_root": str(store_path),
             "submitted_at": datetime.now().isoformat(),
-            "total": len(run_ids),
-            "submitted": len(payloads),
-            "skipped": len(skipped_run_ids) if skipped_run_ids else 0,
         }
 
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
 
+    # Legacy submit method for backward compatibility
+    def submit(
+        self,
+        payloads: list[RunPayload],
+        store: "Store",
+        operation: "OperationWrapper",
+        run_ids: list[str] | None = None,
+    ) -> "SlurmRunHandle":
+        """
+        Legacy submit method - redirects to submit_indexed when possible.
+
+        This method exists for backward compatibility. New code should use
+        submit_indexed() directly via the runner.
+
+        For large experiments, this will raise an error directing users
+        to use the indexed submission path.
+        """
+        # For small experiments, we could theoretically still use the old approach,
+        # but we'll encourage migration to the new approach
+        if len(payloads) > 100:
+            raise RuntimeError(
+                f"Legacy submit() not supported for {len(payloads)} payloads. "
+                "Use metalab.run() which now uses index-addressed SLURM arrays automatically."
+            )
+
+        warnings.warn(
+            "SlurmExecutor.submit() is deprecated. "
+            "Use metalab.run() for automatic index-addressed array submission.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        # For very small experiments, create a minimal handle
+        all_run_ids = run_ids if run_ids is not None else [p.run_id for p in payloads]
+        submitted_run_ids = {p.run_id for p in payloads}
+        skipped_run_ids = [rid for rid in all_run_ids if rid not in submitted_run_ids]
+
+        return SlurmRunHandle(
+            store=store,
+            job_ids=[],
+            shards=[],
+            total_runs=len(all_run_ids),
+            skipped_count=len(skipped_run_ids),
+        )
+
     def shutdown(self, wait: bool = True) -> None:
         """No-op for SLURM executor (jobs run independently)."""
         pass
 
 
+# ---------------------------------------------------------------------------
+# SlurmRunHandle
+# ---------------------------------------------------------------------------
+
+
 class SlurmRunHandle:
     """
-    RunHandle implementation for SLURM jobs via submitit.
+    RunHandle implementation for index-addressed SLURM arrays.
 
-    Supports two polling modes:
-    1. Submitit mode (fresh submission or successful reconnection):
-       Uses submitit's job.state via sacct for accurate PENDING/RUNNING distinction.
-    2. Store-only mode (fallback):
-       Polls store for completed records. Cannot distinguish PENDING from RUNNING.
+    Tracks job status via:
+    - .done markers in store for completed run counts (accurate)
+    - squeue for active chunk counts (RUNNING, PENDING)
+    - sacct for terminal chunk counts (COMPLETED, FAILED, etc.)
 
-    Emits events when state changes are detected for progress tracking.
+    This handle does not depend on submitit.
     """
 
     def __init__(
         self,
-        jobs: list[Any],  # list[submitit.Job]
-        store: Store,
-        run_ids: list[str],
-        job_array_id: str | None,
+        store: "Store",
+        job_ids: list[str],
+        shards: list[dict[str, Any]],
+        total_runs: int,
+        chunk_size: int = 1,
+        skipped_count: int = 0,
         on_event: "EventCallback | None" = None,
-        skipped_run_ids: list[str] | None = None,
-        run_id_to_job_id: dict[str, str] | None = None,
     ) -> None:
         """
         Initialize the SLURM run handle.
 
         Args:
-            jobs: List of submitit Job objects (empty for store-only polling).
             store: Store for reading results.
-            run_ids: All run IDs (including skipped).
-            job_array_id: SLURM job array ID.
+            job_ids: List of SLURM job IDs (one per shard).
+            shards: Shard info dicts with start_idx, end_idx, job_id.
+            total_runs: Total number of runs.
+            chunk_size: Number of runs per array task.
+            skipped_count: Number of runs skipped (already complete).
             on_event: Optional callback for progress events.
-            skipped_run_ids: Run IDs that were skipped due to resume.
-            run_id_to_job_id: Mapping of run_id to SLURM job_id for reconnection.
         """
-        self._jobs = jobs
         self._store = store
-        self._run_ids = run_ids
-        self._job_array_id = job_array_id
+        self._job_ids = job_ids
+        self._shards = shards
+        self._total_runs = total_runs
+        self._chunk_size = chunk_size
+        self._skipped_count = skipped_count
         self._on_event = on_event
-        # Use list to preserve order for deterministic event emission
-        self._skipped_run_ids: list[str] = list(skipped_run_ids or [])
-        self._run_id_to_job_id = run_id_to_job_id or {}
 
-        # Build mapping from run_id to job object for efficient lookup
-        self._run_id_to_job: dict[str, Any] = {}
-        if jobs:
-            # For fresh submissions, jobs are in same order as submitted_run_ids
-            submitted_run_ids = [
-                rid for rid in run_ids if rid not in set(self._skipped_run_ids)
-            ]
-            for run_id, job in zip(submitted_run_ids, jobs):
-                self._run_id_to_job[run_id] = job
+        # Compute store path for .done marker counting
+        self._store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
 
-        # Track seen status per run_id to avoid duplicate events
-        # None = not seen, Status = last seen status
-        self._seen_status: dict[str, Status | None] = {rid: None for rid in run_ids}
+        # Cache for sacct results (expensive to query)
+        self._sacct_cache: dict[str, int] | None = None
+        self._sacct_cache_time: datetime | None = None
+        self._sacct_cache_ttl_seconds = 60  # Cache for 1 minute
 
-        # Mark skipped runs as already seen (they won't change)
-        for rid in self._skipped_run_ids:
-            self._seen_status[rid] = Status.SUCCESS  # Skipped = already successful
-
-        # Track whether we're using submitit or store-only polling
-        self._use_submitit_polling = bool(self._run_id_to_job)
-
-        # Emit initial skip events
-        self._emit_skip_events()
-
-    def _emit_skip_events(self) -> None:
-        """Emit skip events for runs that were skipped due to resume."""
-        from metalab.events import Event, emit_event
-
-        for run_id in self._skipped_run_ids:
-            emit_event(
-                self._on_event, Event.run_skipped(run_id, reason="already exists")
-            )
-
-    def _get_job_state(self, run_id: str) -> str | None:
-        """
-        Get SLURM job state for a run via submitit.
-
-        Returns:
-            State string ("PENDING", "RUNNING", "COMPLETED", "FAILED", etc.)
-            or None if job is not tracked via submitit.
-        """
-        job = self._run_id_to_job.get(run_id)
-        if job is None:
-            return None
-
-        try:
-            return job.state
-        except Exception:
-            # sacct may not be available
-            return None
-
-    def _poll_via_submitit(self) -> RunStatus:
-        """
-        Poll using submitit's job.state for accurate PENDING/RUNNING distinction.
-
-        Returns:
-            Current RunStatus with accurate running/pending counts.
-        """
-        from metalab.events import Event, emit_event
-
-        completed = 0
-        failed = 0
-        running = 0
-        pending = 0
-
-        for run_id in self._run_ids:
-            # Skip already-skipped runs
-            if run_id in self._skipped_run_ids:
-                continue
-
-            prev_status = self._seen_status[run_id]
-
-            # First check store for completed records
-            if self._store.run_exists(run_id):
-                record = self._store.get_run_record(run_id)
-                if record:
-                    current_status = record.status
-
-                    # Emit event if status changed from None (newly completed)
-                    if prev_status is None and current_status is not None:
-                        if current_status == Status.SUCCESS:
-                            emit_event(
-                                self._on_event,
-                                Event.run_finished(
-                                    run_id,
-                                    duration_ms=record.duration_ms,
-                                    metrics=record.metrics,
-                                ),
-                            )
-                            completed += 1
-                        elif current_status == Status.FAILED:
-                            error_msg = ""
-                            if record.error:
-                                error_msg = record.error.message
-                            emit_event(
-                                self._on_event,
-                                Event.run_failed(run_id, error=error_msg),
-                            )
-                            failed += 1
-
-                        self._seen_status[run_id] = current_status
-                    else:
-                        # Already saw this status
-                        if current_status == Status.SUCCESS:
-                            completed += 1
-                        elif current_status == Status.FAILED:
-                            failed += 1
-                    continue
-
-            # No record yet - check SLURM job state
-            job_state = self._get_job_state(run_id)
-
-            if job_state in ("PENDING", "CONFIGURING", "REQUEUED"):
-                pending += 1
-            elif job_state in ("RUNNING", "COMPLETING"):
-                running += 1
-            elif job_state in (
-                "COMPLETED",
-                "FAILED",
-                "CANCELLED",
-                "TIMEOUT",
-                "OUT_OF_MEMORY",
-            ):
-                # Job finished but no record - might be writing or failed to write
-                # Treat as running (will be resolved on next poll when record appears)
-                running += 1
-            else:
-                # Unknown state or no state - treat as pending
-                pending += 1
-
-        skipped = len(self._skipped_run_ids)
-
-        return RunStatus(
-            total=len(self._run_ids),
-            completed=completed,
-            running=running,
-            pending=pending,
-            failed=failed,
-            skipped=skipped,
-        )
-
-    def _poll_via_store(self) -> RunStatus:
-        """
-        Poll using store only (fallback when submitit is unavailable).
-
-        Cannot distinguish PENDING from RUNNING - all in-flight jobs
-        are reported as "running".
-
-        Returns:
-            Current RunStatus (running = all in-flight jobs).
-        """
-        from metalab.events import Event, emit_event
-
-        completed = 0
-        failed = 0
-        in_flight = 0  # Can't distinguish running from pending
-
-        for run_id in self._run_ids:
-            # Skip already-skipped runs
-            if run_id in self._skipped_run_ids:
-                continue
-
-            prev_status = self._seen_status[run_id]
-
-            if self._store.run_exists(run_id):
-                record = self._store.get_run_record(run_id)
-                if record:
-                    current_status = record.status
-
-                    # Emit event if status changed from None (newly completed)
-                    if prev_status is None and current_status is not None:
-                        if current_status == Status.SUCCESS:
-                            emit_event(
-                                self._on_event,
-                                Event.run_finished(
-                                    run_id,
-                                    duration_ms=record.duration_ms,
-                                    metrics=record.metrics,
-                                ),
-                            )
-                        elif current_status == Status.FAILED:
-                            error_msg = ""
-                            if record.error:
-                                error_msg = record.error.message
-                            emit_event(
-                                self._on_event,
-                                Event.run_failed(run_id, error=error_msg),
-                            )
-
-                        self._seen_status[run_id] = current_status
-
-                    # Count for status
-                    if current_status == Status.SUCCESS:
-                        completed += 1
-                    elif current_status == Status.FAILED:
-                        failed += 1
-                    else:
-                        in_flight += 1
-                else:
-                    in_flight += 1
-            else:
-                in_flight += 1
-
-        skipped = len(self._skipped_run_ids)
-
-        # Report all in-flight as "running" (can't distinguish pending)
-        return RunStatus(
-            total=len(self._run_ids),
-            completed=completed,
-            running=in_flight,
-            pending=0,
-            failed=failed,
-            skipped=skipped,
-        )
-
-    def _poll_and_emit(self) -> RunStatus:
-        """
-        Poll for state changes and emit events.
-
-        Uses submitit polling if available, falls back to store-only.
-
-        Returns:
-            Current RunStatus.
-        """
-        if self._use_submitit_polling:
-            return self._poll_via_submitit()
-        else:
-            return self._poll_via_store()
+        # Cache for .done count (moderate cost to scan)
+        self._done_count_cache: int | None = None
+        self._done_count_cache_time: datetime | None = None
+        self._done_count_cache_ttl_seconds = 5  # Refresh every 5 seconds
 
     def set_event_callback(self, callback: "EventCallback | None") -> None:
-        """
-        Set the event callback for progress tracking.
-
-        Args:
-            callback: Function to receive events, or None to disable.
-        """
+        """Set the event callback for progress tracking."""
         self._on_event = callback
-
-        # If setting a new callback, emit skip events that may have been missed
-        if callback is not None:
-            self._emit_skip_events()
 
     @property
     def job_id(self) -> str:
-        """SLURM job array ID."""
-        return self._job_array_id or "slurm-no-jobs"
+        """Primary SLURM job ID (first shard)."""
+        return self._job_ids[0] if self._job_ids else "slurm-no-jobs"
+
+    def _count_done_markers(self) -> int:
+        """
+        Count completed runs via .done markers (cached).
+
+        This is the source of truth for completion, as each run writes
+        a .done marker atomically after success.
+        """
+        now = datetime.now()
+        if (
+            self._done_count_cache is not None
+            and self._done_count_cache_time is not None
+            and (now - self._done_count_cache_time).total_seconds()
+            < self._done_count_cache_ttl_seconds
+        ):
+            return self._done_count_cache
+
+        # Count .done files in runs directory
+        runs_dir = self._store_path / "runs"
+        if runs_dir.exists():
+            count = sum(1 for _ in runs_dir.glob("*.done"))
+        else:
+            count = 0
+
+        self._done_count_cache = count
+        self._done_count_cache_time = now
+        return count
 
     @property
     def status(self) -> RunStatus:
-        """Current status by polling. Also emits events for state changes."""
-        return self._poll_and_emit()
+        """
+        Current status using .done markers for completion counts.
+
+        Completion is determined by counting .done marker files, which
+        is accurate regardless of chunk_size. SLURM task counts are used
+        for running/pending estimates.
+        """
+        # Count completed runs from .done markers (source of truth)
+        completed = self._count_done_markers()
+
+        if not self._job_ids:
+            # No jobs submitted - completed count is all we have
+            pending = max(0, self._total_runs - completed)
+            return RunStatus(
+                total=self._total_runs,
+                completed=completed,
+                running=0,
+                pending=pending,
+                failed=0,
+                skipped=self._skipped_count,
+            )
+
+        # Get SLURM chunk counts for running/pending estimates
+        squeue_counts = squeue_state_counts(self._job_ids)
+
+        # Estimate running/pending runs from chunk counts
+        running_chunks = squeue_counts.get("RUNNING", 0) + squeue_counts.get(
+            "COMPLETING", 0
+        )
+        pending_chunks = squeue_counts.get("PENDING", 0)
+
+        # Convert chunk counts to approximate run counts
+        # (last chunk may have fewer runs, but this is a reasonable estimate)
+        running_runs = min(running_chunks * self._chunk_size, self._total_runs - completed)
+        pending_runs = min(pending_chunks * self._chunk_size, self._total_runs - completed - running_runs)
+
+        # Failed = total - completed - running - pending (when all chunks done)
+        remaining = self._total_runs - completed - running_runs - pending_runs
+        failed = max(0, remaining) if running_chunks == 0 and pending_chunks == 0 else 0
+
+        return RunStatus(
+            total=self._total_runs,
+            completed=completed,
+            running=running_runs,
+            pending=pending_runs,
+            failed=failed,
+            skipped=self._skipped_count,
+        )
+
+    @property
+    def detailed_status(self) -> dict[str, int]:
+        """
+        Get detailed status with explicit state buckets.
+
+        Returns:
+            Dict with state buckets:
+            - completed: runs with .done markers
+            - running, pending: estimated from SLURM chunk counts
+            - failed: inferred when all chunks complete
+            - total, skipped, chunk_size
+        """
+        completed = self._count_done_markers()
+
+        if not self._job_ids:
+            return {
+                "running": 0,
+                "pending": 0,
+                "completed": completed,
+                "failed": 0,
+                "total": self._total_runs,
+                "skipped": self._skipped_count,
+                "chunk_size": self._chunk_size,
+            }
+
+        # Get SLURM chunk counts
+        squeue_counts = squeue_state_counts(self._job_ids)
+        sacct_cache = self._get_sacct_cache()
+
+        running_chunks = squeue_counts.get("RUNNING", 0) + squeue_counts.get(
+            "COMPLETING", 0
+        )
+        pending_chunks = squeue_counts.get("PENDING", 0)
+
+        # Get terminal chunk counts for failure detection
+        failed_chunks = (
+            sacct_cache.get("FAILED", 0)
+            + sacct_cache.get("CANCELLED", 0)
+            + sacct_cache.get("TIMEOUT", 0)
+            + sacct_cache.get("OUT_OF_MEMORY", 0)
+        )
+
+        # Estimate run counts
+        running_runs = min(running_chunks * self._chunk_size, self._total_runs - completed)
+        pending_runs = min(pending_chunks * self._chunk_size, self._total_runs - completed - running_runs)
+
+        # Failed runs: when all chunks done, remaining = failed
+        remaining = self._total_runs - completed - running_runs - pending_runs
+        failed_runs = max(0, remaining) if running_chunks == 0 and pending_chunks == 0 else 0
+
+        return {
+            "running": running_runs,
+            "pending": pending_runs,
+            "completed": completed,
+            "failed": failed_runs,
+            "failed_chunks": failed_chunks,
+            "total": self._total_runs,
+            "skipped": self._skipped_count,
+            "chunk_size": self._chunk_size,
+        }
+
+    def _get_sacct_cache(self) -> dict[str, int] | None:
+        """
+        Get cached sacct counts, refreshing if stale.
+
+        Returns:
+            Cached sacct counts or None if should refresh.
+        """
+        now = datetime.now()
+        if (
+            self._sacct_cache is not None
+            and self._sacct_cache_time is not None
+            and (now - self._sacct_cache_time).total_seconds() < self._sacct_cache_ttl_seconds
+        ):
+            return self._sacct_cache
+
+        # Refresh cache
+        counts = sacct_state_counts(self._job_ids)
+        self._sacct_cache = counts
+        self._sacct_cache_time = now
+        return counts
+
+    def _count_failed_runs(self) -> int:
+        """
+        Count failed runs by scanning run records.
+
+        This is more expensive than counting .done markers, so only
+        called when we need accurate failure counts.
+        """
+        runs_dir = self._store_path / "runs"
+        if not runs_dir.exists():
+            return 0
+
+        failed = 0
+        for path in runs_dir.glob("*.json"):
+            try:
+                with path.open() as f:
+                    data = json.load(f)
+                if data.get("status") == "failed":
+                    failed += 1
+            except (json.JSONDecodeError, OSError):
+                continue
+        return failed
 
     @property
     def is_complete(self) -> bool:
@@ -791,6 +1135,8 @@ class SlurmRunHandle:
         """
         Block until all jobs complete and return Results.
 
+        Includes a settling loop to handle sacct accounting lag.
+
         Args:
             timeout: Maximum seconds to wait. None means wait forever.
 
@@ -801,67 +1147,59 @@ class SlurmRunHandle:
             TimeoutError: If timeout is reached before completion.
         """
         start_time = time.time()
+        poll_interval = 5.0
+        settle_seconds = 10.0
+        settled_at: float | None = None
 
-        # If we have submitit jobs, wait for them
-        if self._jobs:
-            for job in self._jobs:
-                remaining = None
-                if timeout is not None:
-                    elapsed = time.time() - start_time
-                    remaining = timeout - elapsed
-                    if remaining <= 0:
-                        raise TimeoutError("Timeout waiting for SLURM jobs")
+        while True:
+            status = self.status
 
-                try:
-                    job.result(timeout=remaining)
-                except Exception:
-                    # Job failed, but result is in store
-                    pass
-        else:
-            # Reconnection mode: poll until complete
-            poll_interval = 2.0
-            while not self.is_complete:
-                if timeout is not None:
-                    elapsed = time.time() - start_time
-                    if elapsed >= timeout:
-                        raise TimeoutError("Timeout waiting for SLURM jobs")
-                time.sleep(poll_interval)
+            if status.done == status.total:
+                # All done according to SLURM - start settling
+                if settled_at is None:
+                    settled_at = time.time()
+                    logger.debug("All SLURM jobs complete, waiting for store writes...")
 
-        # Final poll to emit any remaining events
-        self._poll_and_emit()
+                # Check if we've settled long enough
+                if time.time() - settled_at >= settle_seconds:
+                    break
+            else:
+                settled_at = None  # Reset if not complete
+
+            # Check timeout
+            if timeout is not None:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError("Timeout waiting for SLURM jobs")
+
+            time.sleep(poll_interval)
 
         # Load all records from store
-        records = []
-        for run_id in self._run_ids:
-            record = self._store.get_run_record(run_id)
-            if record:
-                records.append(record)
+        records = self._store.list_run_records()
 
         return Results(store=self._store, records=records)
 
     def cancel(self) -> None:
         """Cancel all pending/running jobs."""
-        for job in self._jobs:
-            try:
-                job.cancel()
-            except Exception:
-                pass
+        for job_id in self._job_ids:
+            exit_code, stdout, stderr = _run_cmd(
+                ["scancel", job_id],
+                timeout=30.0,
+            )
+            if exit_code != 0:
+                logger.warning(f"Failed to cancel job {job_id}: {stderr}")
 
     @classmethod
     def from_store(
         cls,
-        store: Store,
+        store: "Store",
         on_event: "EventCallback | None" = None,
     ) -> "SlurmRunHandle":
         """
         Create a handle by loading manifest from store (reconnection).
 
-        Attempts to reconstruct submitit Job objects from manifest job IDs
-        to enable accurate PENDING/RUNNING distinction via sacct. Falls back
-        to store-only polling with a warning if reconstruction fails.
-
         Args:
-            store: Store containing the manifest and run records.
+            store: Store containing the manifest.
             on_event: Optional callback for progress events.
 
         Returns:
@@ -869,17 +1207,8 @@ class SlurmRunHandle:
 
         Raises:
             FileNotFoundError: If no manifest exists in the store.
-
-        Example:
-            # In a new session, reconnect to watch progress
-            store = FileStore("./runs/my_exp")
-            handle = SlurmRunHandle.from_store(store)
-
-            with create_progress_tracker(total=handle.status.total) as tracker:
-                handle.set_event_callback(tracker)
-                results = handle.result()  # Blocks until complete
         """
-        store_path = Path(store.root) if hasattr(store, "root") else Path(".")
+        store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
         manifest_path = store_path / "manifest.json"
 
         if not manifest_path.exists():
@@ -899,71 +1228,36 @@ class SlurmRunHandle:
                 "Only 'slurm' executors support reconnection."
             )
 
-        # Try to reconstruct submitit Job objects from manifest
-        jobs: list[Any] = []
-        run_id_to_job: dict[str, Any] = {}
-        run_id_to_job_id = manifest.get("run_id_to_job_id", {})
-        submitit_folder = manifest.get("submitit_folder")
-
-        if run_id_to_job_id and submitit_folder and SUBMITIT_AVAILABLE:
-            try:
-                # Reconstruct Job objects using submitit
-                submitit_folder_path = Path(submitit_folder)
-
-                for run_id, job_id in run_id_to_job_id.items():
-                    try:
-                        # submitit Job objects can be reconstructed from folder + job_id
-                        job = submitit.SlurmJob(
-                            folder=submitit_folder_path, job_id=job_id
-                        )
-                        jobs.append(job)
-                        run_id_to_job[run_id] = job
-                    except Exception as e:
-                        logger.debug(f"Failed to reconstruct job {job_id}: {e}")
-                        # Continue without this job
-
-                if run_id_to_job:
-                    logger.info(
-                        f"Reconnected to {len(run_id_to_job)} SLURM jobs via submitit. "
-                        "Using sacct for accurate job state tracking."
-                    )
-                else:
-                    warnings.warn(
-                        "Failed to reconstruct submitit Job objects. "
-                        "Falling back to store-only polling (cannot distinguish PENDING from RUNNING).",
-                        stacklevel=2,
-                    )
-            except Exception as e:
-                warnings.warn(
-                    f"Failed to reconnect via submitit ({e}). "
-                    "Falling back to store-only polling (cannot distinguish PENDING from RUNNING).",
-                    stacklevel=2,
-                )
-        elif not SUBMITIT_AVAILABLE:
-            warnings.warn(
-                "submitit not available. "
-                "Falling back to store-only polling (cannot distinguish PENDING from RUNNING).",
-                stacklevel=2,
+        # Handle both old and new manifest formats
+        if manifest.get("submission_mode") == "array_indexed":
+            # New indexed format (chunk_size defaults to 1 for backward compat)
+            return cls(
+                store=store,
+                job_ids=manifest.get("job_ids", []),
+                shards=manifest.get("shards", []),
+                total_runs=manifest.get("total_runs", 0),
+                chunk_size=manifest.get("chunk_size", 1),
+                skipped_count=manifest.get("skipped_count", 0),
+                on_event=on_event,
             )
-        elif not run_id_to_job_id:
+        else:
+            # Old submitit format - limited support
+            job_array_id = manifest.get("job_array_id")
+            total = manifest.get("total", len(manifest.get("run_ids", [])))
+            skipped = manifest.get("skipped", len(manifest.get("skipped_run_ids", [])))
+
             warnings.warn(
-                "Manifest missing job ID mapping (old format?). "
-                "Falling back to store-only polling (cannot distinguish PENDING from RUNNING).",
+                "Reconnecting to old-format SLURM manifest. "
+                "Status tracking may be limited.",
                 stacklevel=2,
             )
 
-        handle = cls(
-            jobs=jobs,
-            store=store,
-            run_ids=manifest["run_ids"],
-            job_array_id=manifest.get("job_array_id"),
-            on_event=on_event,
-            skipped_run_ids=manifest.get("skipped_run_ids", []),
-            run_id_to_job_id=run_id_to_job_id,
-        )
-
-        # Override the run_id_to_job mapping with reconstructed jobs
-        handle._run_id_to_job = run_id_to_job
-        handle._use_submitit_polling = bool(run_id_to_job)
-
-        return handle
+            return cls(
+                store=store,
+                job_ids=[job_array_id] if job_array_id else [],
+                shards=[],
+                total_runs=total,
+                chunk_size=1,
+                skipped_count=skipped,
+                on_event=on_event,
+            )
