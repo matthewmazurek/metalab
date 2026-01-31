@@ -587,6 +587,124 @@ results = handle.result()
 results = metalab.load_results("./my_experiments/run_001")
 ```
 
+### Storage Backends
+
+metalab supports multiple storage backends through **store locators** (URI-style strings):
+
+```python
+# FileStore (default) - stores runs as JSON files
+handle = metalab.run(exp, store="./runs/my_exp")
+handle = metalab.run(exp, store="file:///absolute/path/to/store")
+
+# PostgresStore - stores runs in PostgreSQL (requires psycopg)
+handle = metalab.run(exp, store="postgresql://user@localhost:5432/metalab")
+
+# With query parameters
+handle = metalab.run(exp, store="postgresql://localhost/db?schema=myschema&artifact_root=/data")
+```
+
+Install PostgreSQL support:
+
+```bash
+uv add metalab[postgres]
+```
+
+**Why PostgreSQL?** For large experiments (100k+ runs), the file-based storage can become slow for queries. PostgreSQL provides:
+- Efficient querying without loading all JSON files
+- Concurrent writes from SLURM array jobs
+- SQL-based aggregation for Atlas dashboards
+
+### Store Factory
+
+The `create_store()` function creates stores from locator strings:
+
+```python
+from metalab.store import create_store, to_locator
+
+# Create from locator
+store = create_store("./runs/exp")
+store = create_store("postgresql://localhost/db")
+
+# Convert store to locator (for serialization)
+locator = to_locator(store)  # "file:///absolute/path/to/runs/exp"
+```
+
+### Fallback Storage
+
+Use `FallbackStore` to write to a primary store with automatic fallback:
+
+```python
+from metalab.store import FallbackStore, create_store
+
+primary = create_store("postgresql://localhost/db")
+fallback = create_store("./runs/backup")
+
+# Writes go to primary, falls back to file store if Postgres unavailable
+store = FallbackStore(primary, fallback, write_to_both=True)
+handle = metalab.run(exp, store=store)
+```
+
+### Store Transfer
+
+Export/import data between storage backends:
+
+```bash
+# Export from Postgres to FileStore
+metalab store export --from postgresql://localhost/db --to ./runs/export
+
+# Import FileStore into Postgres
+metalab store import --from ./runs/my_exp --to postgresql://localhost/db
+```
+
+Or programmatically:
+
+```python
+from metalab.store import export_store, import_from_filestore
+
+# Export Postgres → FileStore
+export_store(
+    "postgresql://localhost/db",
+    "./runs/export",
+    experiment_id="my_exp:v1",  # Optional filter
+)
+
+# Import FileStore → Postgres
+import_from_filestore(
+    "./runs/my_exp",
+    "postgresql://localhost/db",
+)
+```
+
+### PostgreSQL Service (Local & SLURM)
+
+metalab includes utilities for managing PostgreSQL services:
+
+```bash
+# Start local PostgreSQL (uses Docker if available)
+metalab postgres start
+
+# Check status
+metalab postgres status
+
+# Stop service
+metalab postgres stop
+```
+
+For HPC/SLURM environments:
+
+```bash
+# Submit PostgreSQL as a SLURM job
+metalab postgres start --store /scratch/runs/my_exp --slurm
+
+# Workers discover the service automatically via {store}/services/postgres/service.json
+```
+
+The service manager handles:
+- Docker/Podman containers for local development
+- Native PostgreSQL binaries
+- SLURM job submission with service discovery
+- Automatic password generation and secure file permissions
+
 ### Experiment Manifests
 
 When you run an experiment, metalab automatically saves an experiment manifest capturing the full configuration:

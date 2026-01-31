@@ -101,6 +101,11 @@ class FileStore:
         """The root directory of this store."""
         return self._root
 
+    @property
+    def locator(self) -> str:
+        """The store locator URI."""
+        return f"file://{self._root}"
+
     # Atomic write utilities
 
     def _atomic_write(self, path: Path, data: bytes) -> None:
