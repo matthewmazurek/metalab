@@ -2,9 +2,50 @@
 Unit tests for SLURM executor chunking and sharding logic.
 """
 
+import dataclasses
+import pickle
+from pathlib import Path
+
 import pytest
 
+from metalab._ids import DirPath, FilePath
 from metalab.executor.slurm import SlurmConfig, SlurmExecutor
+from metalab.executor.slurm_array_worker import _load_context_spec
+
+
+# Module-level context specs for serialization tests
+@dataclasses.dataclass(frozen=True)
+class _TestContextSpec:
+    """Test context spec for serialization roundtrip."""
+
+    adata_file: FilePath
+    n_neighbors: int = 30
+
+
+@dataclasses.dataclass(frozen=True)
+class _InnerContext:
+    """Inner context for nested tests."""
+
+    output_dir: DirPath
+    format: str = "csv"
+
+
+@dataclasses.dataclass(frozen=True)
+class _OuterContext:
+    """Outer context for nested tests."""
+
+    name: str
+    inner: _InnerContext
+
+
+@dataclasses.dataclass
+class _CustomContextWithMethod:
+    """Custom context with methods for testing pickle."""
+
+    value: int
+
+    def double(self) -> int:
+        return self.value * 2
 
 
 class TestSlurmImports:
@@ -221,3 +262,93 @@ class TestWorkerChunkRange:
 
             assert param_idx == expected_param, f"global_idx={global_idx}"
             assert seed_idx == expected_seed, f"global_idx={global_idx}"
+
+
+class TestContextSpecSerialization:
+    """Test context spec pickle serialization and loading."""
+
+    def test_dataclass_context_roundtrip(self, tmp_path: Path):
+        """Dataclass context specs should survive pickle roundtrip."""
+        original = _TestContextSpec(
+            adata_file=FilePath("/path/to/data.h5ad"),
+            n_neighbors=15,
+        )
+
+        # Write pickle (simulating what _write_array_spec does)
+        pkl_path = tmp_path / "context_spec.pkl"
+        with open(pkl_path, "wb") as f:
+            pickle.dump(original, f)
+
+        # Load (simulating what worker does)
+        loaded = _load_context_spec(tmp_path)
+
+        # Verify loaded object is identical
+        assert type(loaded) == type(original)
+        assert hasattr(loaded, "adata_file")
+        assert hasattr(loaded, "n_neighbors")
+        assert loaded.adata_file.path == "/path/to/data.h5ad"
+        assert loaded.n_neighbors == 15
+
+    def test_dict_context_roundtrip(self, tmp_path: Path):
+        """Plain dict context specs should survive pickle roundtrip."""
+        original = {"dataset": "/path/to/data.csv", "version": "1.0"}
+
+        pkl_path = tmp_path / "context_spec.pkl"
+        with open(pkl_path, "wb") as f:
+            pickle.dump(original, f)
+
+        loaded = _load_context_spec(tmp_path)
+
+        assert isinstance(loaded, dict)
+        assert loaded["dataset"] == "/path/to/data.csv"
+        assert loaded["version"] == "1.0"
+
+    def test_none_context_roundtrip(self, tmp_path: Path):
+        """None context should survive pickle roundtrip."""
+        pkl_path = tmp_path / "context_spec.pkl"
+        with open(pkl_path, "wb") as f:
+            pickle.dump(None, f)
+
+        loaded = _load_context_spec(tmp_path)
+        assert loaded is None
+
+    def test_missing_pickle_returns_none(self, tmp_path: Path):
+        """Missing pickle file should return None with warning."""
+        loaded = _load_context_spec(tmp_path)
+        assert loaded is None
+
+    def test_nested_dataclass_context_roundtrip(self, tmp_path: Path):
+        """Nested dataclass context specs should survive pickle roundtrip."""
+        original = _OuterContext(
+            name="test",
+            inner=_InnerContext(output_dir=DirPath("/output"), format="parquet"),
+        )
+
+        pkl_path = tmp_path / "context_spec.pkl"
+        with open(pkl_path, "wb") as f:
+            pickle.dump(original, f)
+
+        loaded = _load_context_spec(tmp_path)
+
+        assert type(loaded) == type(original)
+        assert hasattr(loaded, "name")
+        assert hasattr(loaded, "inner")
+        assert loaded.name == "test"
+        assert type(loaded.inner) == _InnerContext
+        assert loaded.inner.output_dir.path == "/output"
+        assert loaded.inner.format == "parquet"
+
+    def test_custom_class_with_methods(self, tmp_path: Path):
+        """Custom classes with methods should pickle correctly."""
+        # This test demonstrates why pickle is better than manual JSON serialization -
+        # it handles arbitrary Python objects automatically
+        original = _CustomContextWithMethod(value=21)
+
+        pkl_path = tmp_path / "context_spec.pkl"
+        with open(pkl_path, "wb") as f:
+            pickle.dump(original, f)
+
+        loaded = _load_context_spec(tmp_path)
+
+        assert loaded.value == 21
+        assert loaded.double() == 42  # Methods work!
