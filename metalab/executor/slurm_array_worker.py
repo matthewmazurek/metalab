@@ -133,10 +133,10 @@ def run_array_task(store_root: str) -> int:
     from metalab.executor.core import execute_payload
     from metalab.manifest import deserialize_param_source, deserialize_seed_plan
     from metalab.operation import import_operation
-    from metalab.store.file import FileStore
+    from metalab.store import create_store
     from metalab.types import Status
 
-    store = FileStore(store_root)
+    store = create_store(store_root)
     params_source = deserialize_param_source(spec["params"])
     seed_plan = deserialize_seed_plan(spec["seeds"])
     operation = import_operation(spec["operation_ref"])

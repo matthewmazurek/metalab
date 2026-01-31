@@ -10,11 +10,14 @@ dependencies = []
 numpy = ["numpy>=1.24"]
 pandas = ["pandas>=2.0"]
 rich = ["rich>=13.0"]
+postgres = ["psycopg[binary]>=3.0", "psycopg-pool>=3.0"]
 atlas = ["metalab-atlas @ git+https://github.com/matthewmazurek/metalab-atlas.git"]
 full = [
     "numpy>=1.24",
     "pandas>=2.0",
     "rich>=13.0",
+    "psycopg[binary]>=3.0",
+    "psycopg-pool>=3.0",
     "metalab-atlas @ git+https://github.com/matthewmazurek/metalab-atlas.git",
 ]
 dev = [
@@ -26,6 +29,9 @@ dev = [
     "ruff>=0.4",
     "pyright>=1.1",
 ]
+
+[project.scripts]
+metalab = "metalab.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -39,6 +39,7 @@ from metalab.executor.handle import RunHandle, RunStatus
 from metalab.executor.payload import RunPayload
 from metalab.executor.thread import ThreadExecutor
 from metalab.result import Results
+from metalab.store import create_store, to_locator
 from metalab.store.file import FileStore
 from metalab.types import Status
 
@@ -256,7 +257,7 @@ def generate_payloads(
             context_spec=experiment.context,
             params_resolved=resolved_params,
             seed_bundle=seed_bundle,
-            store_locator=str(store.root) if hasattr(store, "root") else "",
+            store_locator=to_locator(store),
             fingerprints={
                 "context": ctx_fp,
                 "params": params_fp,
@@ -437,7 +438,7 @@ def run(
     if store is None:
         store = f"./runs/{experiment.name}"
     if isinstance(store, str):
-        store = FileStore(store)
+        store = create_store(store)
 
     # Resolve executor (default: sequential execution)
     if executor is None:
