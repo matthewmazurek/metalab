@@ -1,0 +1,211 @@
+"""
+Unit tests for SLURM executor chunking and sharding logic.
+"""
+
+import pytest
+
+from metalab.executor.slurm import SlurmConfig, SlurmExecutor
+
+
+class TestSlurmConfigDefaults:
+    """Test SlurmConfig default values."""
+
+    def test_default_chunk_size_is_one(self):
+        """Default chunk_size should be 1 (no chunking)."""
+        config = SlurmConfig()
+        assert config.chunk_size == 1
+
+    def test_custom_chunk_size(self):
+        """chunk_size can be customized."""
+        config = SlurmConfig(chunk_size=100)
+        assert config.chunk_size == 100
+
+
+class TestComputeShards:
+    """Test the _compute_shards method."""
+
+    def test_single_shard_small_count(self):
+        """Small item count fits in one shard."""
+        config = SlurmConfig(max_array_size=10000)
+        executor = SlurmExecutor(config)
+
+        shards = executor._compute_shards(total_items=100)
+
+        assert len(shards) == 1
+        assert shards[0]["start_idx"] == 0
+        assert shards[0]["end_idx"] == 99
+        assert shards[0]["array_range"] == "0-99"
+
+    def test_multiple_shards_large_count(self):
+        """Large item count requires multiple shards."""
+        config = SlurmConfig(max_array_size=100)
+        executor = SlurmExecutor(config)
+
+        shards = executor._compute_shards(total_items=250)
+
+        assert len(shards) == 3
+        # First shard: 0-99
+        assert shards[0]["start_idx"] == 0
+        assert shards[0]["end_idx"] == 99
+        assert shards[0]["array_range"] == "0-99"
+        # Second shard: 100-199
+        assert shards[1]["start_idx"] == 100
+        assert shards[1]["end_idx"] == 199
+        assert shards[1]["array_range"] == "0-99"
+        # Third shard: 200-249
+        assert shards[2]["start_idx"] == 200
+        assert shards[2]["end_idx"] == 249
+        assert shards[2]["array_range"] == "0-49"
+
+    def test_max_concurrent_in_array_range(self):
+        """max_concurrent adds throttle to array range."""
+        config = SlurmConfig(max_array_size=10000, max_concurrent=50)
+        executor = SlurmExecutor(config)
+
+        shards = executor._compute_shards(total_items=100)
+
+        assert len(shards) == 1
+        assert shards[0]["array_range"] == "0-99%50"
+
+    def test_exact_boundary_no_extra_shard(self):
+        """Exact boundary doesn't create empty shard."""
+        config = SlurmConfig(max_array_size=100)
+        executor = SlurmExecutor(config)
+
+        shards = executor._compute_shards(total_items=200)
+
+        assert len(shards) == 2
+        assert shards[0]["end_idx"] == 99
+        assert shards[1]["start_idx"] == 100
+        assert shards[1]["end_idx"] == 199
+
+
+class TestChunkingMath:
+    """Test chunking calculations."""
+
+    def test_chunk_size_reduces_array_tasks(self):
+        """chunk_size > 1 reduces total array tasks."""
+        config = SlurmConfig(max_array_size=10000, chunk_size=10)
+        executor = SlurmExecutor(config)
+
+        # 1000 runs with chunk_size=10 = 100 chunks
+        total_runs = 1000
+        chunk_size = config.chunk_size
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
+
+        assert total_chunks == 100
+
+        shards = executor._compute_shards(total_items=total_chunks)
+        assert len(shards) == 1
+        assert shards[0]["end_idx"] == 99
+
+    def test_chunk_size_with_remainder(self):
+        """Remainder runs handled correctly."""
+        config = SlurmConfig(max_array_size=10000, chunk_size=7)
+        executor = SlurmExecutor(config)
+
+        # 100 runs with chunk_size=7 = ceil(100/7) = 15 chunks
+        total_runs = 100
+        chunk_size = config.chunk_size
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
+
+        assert total_chunks == 15
+
+        shards = executor._compute_shards(total_items=total_chunks)
+        assert len(shards) == 1
+        assert shards[0]["end_idx"] == 14
+
+    def test_large_experiment_with_chunking(self):
+        """100k runs with chunk_size=100 = 1000 array tasks."""
+        config = SlurmConfig(max_array_size=10000, chunk_size=100)
+        executor = SlurmExecutor(config)
+
+        total_runs = 100_000
+        chunk_size = config.chunk_size
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
+
+        assert total_chunks == 1000
+
+        shards = executor._compute_shards(total_items=total_chunks)
+        # 1000 chunks fits in one shard (max_array_size=10000)
+        assert len(shards) == 1
+        assert shards[0]["end_idx"] == 999
+
+    def test_very_large_chunked_experiment_shards(self):
+        """1M runs with chunk_size=100, max_array_size=5000 = 2 shards."""
+        config = SlurmConfig(max_array_size=5000, chunk_size=100)
+        executor = SlurmExecutor(config)
+
+        total_runs = 1_000_000
+        chunk_size = config.chunk_size
+        total_chunks = (total_runs + chunk_size - 1) // chunk_size
+
+        assert total_chunks == 10_000
+
+        shards = executor._compute_shards(total_items=total_chunks)
+        # 10k chunks with max_array_size=5000 = 2 shards
+        assert len(shards) == 2
+        assert shards[0]["start_idx"] == 0
+        assert shards[0]["end_idx"] == 4999
+        assert shards[1]["start_idx"] == 5000
+        assert shards[1]["end_idx"] == 9999
+
+
+class TestWorkerChunkRange:
+    """Test the chunk range calculation used in the worker."""
+
+    def test_chunk_range_first_chunk(self):
+        """First chunk covers [0, chunk_size)."""
+        chunk_size = 10
+        total_runs = 100
+        chunk_id = 0
+
+        start_run = chunk_id * chunk_size
+        end_run = min(start_run + chunk_size, total_runs)
+
+        assert start_run == 0
+        assert end_run == 10
+
+    def test_chunk_range_middle_chunk(self):
+        """Middle chunk covers correct range."""
+        chunk_size = 10
+        total_runs = 100
+        chunk_id = 5
+
+        start_run = chunk_id * chunk_size
+        end_run = min(start_run + chunk_size, total_runs)
+
+        assert start_run == 50
+        assert end_run == 60
+
+    def test_chunk_range_last_chunk_partial(self):
+        """Last chunk may have fewer runs."""
+        chunk_size = 10
+        total_runs = 95
+        chunk_id = 9  # Last chunk
+
+        start_run = chunk_id * chunk_size
+        end_run = min(start_run + chunk_size, total_runs)
+
+        assert start_run == 90
+        assert end_run == 95  # Only 5 runs in last chunk
+
+    def test_global_index_to_param_seed_mapping(self):
+        """Global run index maps to (param_idx, seed_idx) correctly."""
+        seed_replicates = 5
+        param_cases = 10
+
+        # Test a few indices
+        test_cases = [
+            (0, 0, 0),   # First run
+            (4, 0, 4),   # Last seed of first param
+            (5, 1, 0),   # First seed of second param
+            (49, 9, 4),  # Last run
+        ]
+
+        for global_idx, expected_param, expected_seed in test_cases:
+            seed_idx = global_idx % seed_replicates
+            param_idx = global_idx // seed_replicates
+
+            assert param_idx == expected_param, f"global_idx={global_idx}"
+            assert seed_idx == expected_seed, f"global_idx={global_idx}"

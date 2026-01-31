@@ -52,6 +52,36 @@ class ManualSource:
         """Return the number of cases."""
         return len(self._cases)
 
+    def __getitem__(self, index: int) -> ParamCase:
+        """
+        Get parameter case by index.
+
+        Args:
+            index: The index of the parameter case (0-based, supports negative).
+
+        Returns:
+            The ParamCase at the given index.
+
+        Raises:
+            IndexError: If index is out of range.
+        """
+        # Handle negative indices and bounds checking via list indexing
+        try:
+            params = self._cases[index]
+        except IndexError:
+            raise IndexError(f"Index {index} out of range for ManualSource with {len(self._cases)} cases")
+
+        # Normalize index for tag (handle negative)
+        if index < 0:
+            index = len(self._cases) + index
+
+        case_id = fingerprint_params(params)
+        return ParamCase(
+            params=params,
+            case_id=case_id,
+            tags=self._tags + [f"manual_{index}"],
+        )
+
     def __repr__(self) -> str:
         return f"ManualSource({len(self._cases)} cases)"
 
@@ -63,6 +93,22 @@ class ManualSource:
             "tags": self._tags,
             "total_cases": len(self._cases),
         }
+
+    @classmethod
+    def from_manifest_dict(cls, manifest: dict[str, Any]) -> "ManualSource":
+        """
+        Reconstruct ManualSource from manifest dict.
+
+        Args:
+            manifest: Dict with "cases" list and optional "tags".
+
+        Returns:
+            A ManualSource with the same configuration.
+        """
+        return cls(
+            cases=manifest["cases"],
+            tags=manifest.get("tags"),
+        )
 
 
 def manual(

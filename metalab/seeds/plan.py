@@ -76,6 +76,22 @@ class SeedPlan:
             "replicates": self._replicates,
         }
 
+    @classmethod
+    def from_manifest_dict(cls, manifest: dict[str, Any]) -> "SeedPlan":
+        """
+        Reconstruct SeedPlan from manifest dict.
+
+        Args:
+            manifest: Dict with "base" and "replicates" fields.
+
+        Returns:
+            A SeedPlan with the same configuration.
+        """
+        return cls(
+            base=manifest["base"],
+            replicates=manifest["replicates"],
+        )
+
 
 def seeds(base: int, replicates: int = 1) -> SeedPlan:
     """

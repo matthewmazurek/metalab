@@ -10,13 +10,11 @@ dependencies = []
 numpy = ["numpy>=1.24"]
 pandas = ["pandas>=2.0"]
 rich = ["rich>=13.0"]
-slurm = ["submitit>=1.5"]
 atlas = ["metalab-atlas @ git+https://github.com/matthewmazurek/metalab-atlas.git"]
 full = [
     "numpy>=1.24",
     "pandas>=2.0",
     "rich>=13.0",
-    "submitit>=1.5",
     "metalab-atlas @ git+https://github.com/matthewmazurek/metalab-atlas.git",
 ]
 dev = [
@@ -25,7 +23,6 @@ dev = [
     "numpy>=1.24",
     "pandas>=2.0",
     "rich>=13.0",
-    "submitit>=1.5",
 ]
 
 [build-system]

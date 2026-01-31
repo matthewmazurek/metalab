@@ -176,3 +176,29 @@ class TestSeedPlan:
         bundles = list(plan)
         assert len(bundles) == 1
         assert bundles[0].replicate_index == 0
+
+    def test_getitem_matches_iteration(self):
+        """plan[i] should equal list(plan)[i] for all indices."""
+        plan = seeds(base=42, replicates=5)
+        bundles_list = list(plan)
+
+        for i in range(len(plan)):
+            indexed = plan[i]
+            iterated = bundles_list[i]
+            assert indexed.root_seed == iterated.root_seed
+            assert indexed.replicate_index == iterated.replicate_index
+
+    def test_manifest_roundtrip_preserves_indexing(self):
+        """Serialization and deserialization preserves indexing."""
+        from metalab.manifest import deserialize_seed_plan
+
+        plan = seeds(base=123, replicates=7)
+        manifest = plan.to_manifest_dict()
+        restored = deserialize_seed_plan(manifest)
+
+        assert len(restored) == len(plan)
+        for i in range(len(plan)):
+            orig = plan[i]
+            rest = restored[i]
+            assert orig.root_seed == rest.root_seed
+            assert orig.replicate_index == rest.replicate_index

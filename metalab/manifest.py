@@ -1,9 +1,14 @@
 """
-Experiment manifest serialization.
+Experiment manifest serialization and deserialization.
 
 This module provides utilities for building experiment manifests that capture
 the full configuration of an experiment (params, seeds, operation, etc.) for
 documentation and reproducibility purposes.
+
+It also provides deserialization helpers for reconstructing param sources
+and seed plans from manifest dicts, enabling index-based SLURM array workers
+to reconstruct exactly the same parameter/seed configuration as the original
+experiment without enumerating all cases.
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from metalab._serializable import ManifestSerializable
 
 if TYPE_CHECKING:
     from metalab.experiment import Experiment
+    from metalab.params.source import ParamSource
+    from metalab.seeds.plan import SeedPlan
 
 
 def serialize(obj: Any) -> Any:
@@ -80,3 +87,71 @@ def build_experiment_manifest(
         "run_ids": run_ids,
         "submitted_at": datetime.now().isoformat(),
     }
+
+
+def deserialize_param_source(manifest: dict[str, Any]) -> "ParamSource":
+    """
+    Deserialize a ParamSource from a manifest dict.
+
+    Supports GridSource, ManualSource, and RandomSource. All support
+    O(1) index-based access for SLURM array submission.
+
+    Args:
+        manifest: Dict with "type" field indicating the source type,
+                  plus type-specific fields (e.g., "spec" for GridSource).
+
+    Returns:
+        A ParamSource instance that can be indexed or iterated.
+
+    Raises:
+        ValueError: If the source type is unknown or not supported.
+
+    Example:
+        manifest = {"type": "GridSource", "spec": {"lr": [0.01, 0.1]}}
+        source = deserialize_param_source(manifest)
+        case = source[0]  # Get first param case by index
+    """
+    from metalab.params.grid import GridSource
+    from metalab.params.manual import ManualSource
+    from metalab.params.random import RandomSource
+
+    source_type = manifest.get("type")
+
+    if source_type == "GridSource":
+        return GridSource.from_manifest_dict(manifest)
+    elif source_type == "ManualSource":
+        return ManualSource.from_manifest_dict(manifest)
+    elif source_type == "RandomSource":
+        return RandomSource.from_manifest_dict(manifest)
+    else:
+        raise ValueError(
+            f"Unknown or unsupported ParamSource type: {source_type}. "
+            f"Supported types: GridSource, ManualSource, RandomSource"
+        )
+
+
+def deserialize_seed_plan(manifest: dict[str, Any]) -> "SeedPlan":
+    """
+    Deserialize a SeedPlan from a manifest dict.
+
+    Args:
+        manifest: Dict with "base" and "replicates" fields.
+
+    Returns:
+        A SeedPlan instance that can be indexed or iterated.
+
+    Raises:
+        ValueError: If the manifest type is not SeedPlan.
+
+    Example:
+        manifest = {"type": "SeedPlan", "base": 42, "replicates": 3}
+        plan = deserialize_seed_plan(manifest)
+        bundle = plan[0]  # Get first seed bundle by index
+    """
+    from metalab.seeds.plan import SeedPlan
+
+    source_type = manifest.get("type")
+    if source_type != "SeedPlan":
+        raise ValueError(f"Expected SeedPlan manifest, got: {source_type}")
+
+    return SeedPlan.from_manifest_dict(manifest)
