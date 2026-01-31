@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Avoid importing numpy at module level (optional dependency)
-    import numpy as np
+    pass
 
 
 @dataclass(frozen=True)

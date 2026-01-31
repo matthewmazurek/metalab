@@ -152,9 +152,6 @@ def context_spec(
             # Re-apply with frozen if needed
             cls = dataclasses.dataclass(frozen=frozen)(cls)
 
-        # Store original __init__ if it exists
-        original_init = cls.__init__
-
         # Cache for fingerprint
         _fingerprint_cache: dict[int, str] = {}
 

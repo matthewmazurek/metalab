@@ -297,8 +297,8 @@ def _run_slurm_indexed(
     Returns:
         SlurmRunHandle for tracking and awaiting results.
     """
+    from metalab._canonical import fingerprint
     from metalab._ids import resolve_context
-    from metalab.fingerprint import fingerprint
 
     # Resolve context - computes lazy hashes for FilePath/DirPath
     resolved_context, manifest = resolve_context(experiment.context)

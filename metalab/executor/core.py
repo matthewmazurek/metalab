@@ -11,7 +11,6 @@ import io
 import logging
 import traceback
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from metalab.capture import Capture
