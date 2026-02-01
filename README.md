@@ -802,6 +802,9 @@ metalab postgres start --experiments-root /scratch/experiments --slurm
 # Workers discover the service automatically via {experiments_root}/services/postgres/service.json
 ```
 
+If PostgreSQL binaries are not in the compute node PATH, load your module or set
+`METALAB_PG_BIN_DIR` to the directory containing `initdb`, `pg_ctl`, etc.
+
 For HPC/SLURM with password auth and a ready-to-use PostgresStore locator:
 
 ```bash

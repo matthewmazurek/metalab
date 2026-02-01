@@ -614,6 +614,37 @@ def start_postgres_slurm(
 HOSTNAME=$(hostname)
 echo "Starting PostgreSQL on $HOSTNAME"
 
+# Ensure PostgreSQL binaries are available
+if ! command -v initdb >/dev/null 2>&1; then
+    if [ -n "$METALAB_PG_BIN_DIR" ] && [ -d "$METALAB_PG_BIN_DIR" ]; then
+        export PATH="$METALAB_PG_BIN_DIR:$PATH"
+    fi
+fi
+if ! command -v initdb >/dev/null 2>&1; then
+    for d in \
+        /usr/lib/postgresql/15/bin \
+        /usr/lib/postgresql/14/bin \
+        /usr/lib/postgresql/13/bin \
+        /usr/local/pgsql/bin \
+        /usr/local/opt/postgresql/bin \
+        /opt/homebrew/opt/postgresql/bin; do
+        if [ -x "$d/initdb" ]; then
+            export PATH="$d:$PATH"
+            break
+        fi
+    done
+fi
+missing_bins=""
+for bin in initdb pg_ctl pg_isready createdb; do
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        missing_bins="$missing_bins $bin"
+    fi
+done
+if [ -n "$missing_bins" ]; then
+    echo "PostgreSQL binaries not found:$missing_bins. Set METALAB_PG_BIN_DIR or load a Postgres module." >&2
+    exit 1
+fi
+
 # Setup PGDATA
 export PGDATA="{data_dir}"
 PASSWORD={json.dumps(password_literal)}
@@ -621,6 +652,7 @@ PASSWORD={json.dumps(password_literal)}
 # Initialize if needed
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "Initializing PostgreSQL data directory..."
+    mkdir -p "$PGDATA"
     if [ -n "$PASSWORD" ]; then
         PWFILE="$PGDATA/.pgpass_init"
         printf "%s" "$PASSWORD" > "$PWFILE"
