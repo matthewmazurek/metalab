@@ -671,8 +671,12 @@ pg_ctl -D "$PGDATA" -l "{service_dir}/postgres.log" start
 # Wait for startup
 sleep 5
 
-# Create database if needed
-createdb -h localhost -p {config.port} {config.database} 2>/dev/null || true
+# Create database if needed (avoid interactive password prompt under scram)
+if [ -n "$PASSWORD" ]; then
+    PGPASSWORD="$PASSWORD" createdb -h localhost -p {config.port} -U "{config.user}" -w "{config.database}" 2>/dev/null || true
+else
+    createdb -h localhost -p {config.port} -U "{config.user}" "{config.database}" 2>/dev/null || true
+fi
 
 # Write service file
 cat > "{service_file}" << EOF
