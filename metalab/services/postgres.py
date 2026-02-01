@@ -616,35 +616,23 @@ HOSTNAME=$(hostname)
 echo "Starting PostgreSQL on $HOSTNAME"
 
 # Ensure PostgreSQL binaries are available
-if ! command -v initdb >/dev/null 2>&1; then
-    if [ -n "$METALAB_PG_BIN_DIR" ] && [ -d "$METALAB_PG_BIN_DIR" ]; then
-        export PATH="$METALAB_PG_BIN_DIR:$PATH"
-    fi
+if [ -n "${{METALAB_PG_BIN_DIR:-}}" ] && [ -d "${{METALAB_PG_BIN_DIR:-}}" ]; then
+    export PATH="$METALAB_PG_BIN_DIR:$PATH"
 fi
 if ! command -v initdb >/dev/null 2>&1; then
-    for d in \
-        /usr/lib/postgresql/15/bin \
-        /usr/lib/postgresql/14/bin \
-        /usr/lib/postgresql/13/bin \
-        /usr/local/pgsql/bin \
-        /usr/local/opt/postgresql/bin \
-        /opt/homebrew/opt/postgresql/bin; do
+    for d in /usr/lib/postgresql/15/bin /usr/lib/postgresql/14/bin /usr/lib/postgresql/13/bin /usr/local/pgsql/bin; do
         if [ -x "$d/initdb" ]; then
             export PATH="$d:$PATH"
             break
         fi
     done
 fi
-missing_bins=""
 for bin in initdb pg_ctl pg_isready createdb; do
     if ! command -v "$bin" >/dev/null 2>&1; then
-        missing_bins="$missing_bins $bin"
+        echo "PostgreSQL binary not found: $bin. Set METALAB_PG_BIN_DIR or load a Postgres module." >&2
+        exit 1
     fi
 done
-if [ -n "$missing_bins" ]; then
-    echo "PostgreSQL binaries not found:$missing_bins. Set METALAB_PG_BIN_DIR or load a Postgres module." >&2
-    exit 1
-fi
 
 # Setup PGDATA
 export PGDATA_BASE="{data_dir}"
@@ -662,7 +650,7 @@ PASSWORD={json.dumps(password_literal)}
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "Initializing PostgreSQL data directory..."
     if [ -n "$PASSWORD" ]; then
-        PWFILE="$PGDATA/.pgpass_init"
+        PWFILE="{service_dir}/.pgpass_init_$SLURM_JOB_ID"
         printf "%s" "$PASSWORD" > "$PWFILE"
         chmod 600 "$PWFILE"
         initdb -D "$PGDATA" -A {config.auth_method} --pwfile="$PWFILE"
