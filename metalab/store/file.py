@@ -30,13 +30,17 @@ Concurrency guarantees:
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import logging
 import shutil
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator
+from typing import TYPE_CHECKING, Any, Generator
+
+if TYPE_CHECKING:
+    from typing import BinaryIO
 
 from metalab.schema import (
     SCHEMA_VERSION,
@@ -99,6 +103,21 @@ class FileStore:
     @property
     def root(self) -> Path:
         """The root directory of this store."""
+        return self._root
+
+    # =========================================================================
+    # Capability: SupportsWorkingDirectory
+    # =========================================================================
+
+    def get_working_directory(self) -> Path:
+        """
+        Return the root directory of this store.
+
+        Implements SupportsWorkingDirectory capability.
+
+        Returns:
+            Path to the store's filesystem root.
+        """
         return self._root
 
     @property
@@ -299,6 +318,30 @@ class FileStore:
             raise FileNotFoundError(f"Artifact not found: {uri}")
         return path.read_bytes()
 
+    # =========================================================================
+    # Capability: SupportsArtifactOpen
+    # =========================================================================
+
+    def open_artifact(self, uri: str) -> "BinaryIO":
+        """
+        Open an artifact for reading.
+
+        Implements SupportsArtifactOpen capability.
+
+        Args:
+            uri: The artifact URI (filesystem path for FileStore).
+
+        Returns:
+            A file-like object in binary read mode.
+
+        Raises:
+            FileNotFoundError: If the artifact doesn't exist.
+        """
+        path = Path(uri)
+        if not path.exists():
+            raise FileNotFoundError(f"Artifact not found: {uri}")
+        return open(path, "rb")  # type: ignore[return-value]
+
     def list_artifacts(self, run_id: str) -> list[ArtifactDescriptor]:
         """List artifacts for a run."""
         artifact_dir = self._root / self.ARTIFACTS_DIR / run_id
@@ -354,6 +397,81 @@ class FileStore:
         """
         path = self._root / self.DERIVED_DIR / f"{run_id}.json"
         return path.exists()
+
+    # Structured results operations
+
+    RESULTS_DIR = "results"
+
+    def put_result(
+        self,
+        run_id: str,
+        name: str,
+        data: Any,
+        dtype: str | None = None,
+        shape: list[int] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Store structured result data for a run.
+
+        Results are stored in JSON format at results/{run_id}/{name}.json.
+
+        Args:
+            run_id: The run identifier.
+            name: The result name.
+            data: The data (must be JSON-serializable).
+            dtype: Optional data type hint (e.g., "float64").
+            shape: Optional shape for arrays.
+            metadata: Optional metadata.
+        """
+        results_dir = self._root / self.RESULTS_DIR / run_id
+        results_dir.mkdir(parents=True, exist_ok=True)
+        path = results_dir / f"{name}.json"
+
+        result_obj = {
+            "data": data,
+            "dtype": dtype,
+            "shape": shape,
+            "metadata": metadata or {},
+        }
+
+        with self._run_lock(run_id):
+            self._atomic_write_json(path, result_obj)
+
+    def get_result(self, run_id: str, name: str) -> dict[str, Any] | None:
+        """
+        Retrieve structured result data.
+
+        Args:
+            run_id: The run identifier.
+            name: The result name.
+
+        Returns:
+            Dict with keys: data, dtype, shape, metadata. Or None if not found.
+        """
+        path = self._root / self.RESULTS_DIR / run_id / f"{name}.json"
+
+        if not path.exists():
+            return None
+
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def list_results(self, run_id: str) -> list[str]:
+        """
+        List result names for a run.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            List of result names.
+        """
+        results_dir = self._root / self.RESULTS_DIR / run_id
+
+        if not results_dir.exists():
+            return []
+
+        return [p.stem for p in results_dir.glob("*.json")]
 
     # Log operations
 
@@ -461,6 +579,40 @@ class FileStore:
 
         return sorted(log_names)
 
+    # =========================================================================
+    # Capability: SupportsExperimentManifests
+    # =========================================================================
+
+    def put_experiment_manifest(
+        self,
+        experiment_id: str,
+        manifest: dict[str, Any],
+        timestamp: str | None = None,
+    ) -> None:
+        """
+        Store an experiment manifest.
+
+        Implements SupportsExperimentManifests capability.
+
+        Args:
+            experiment_id: The experiment identifier.
+            manifest: The manifest data to persist.
+            timestamp: Optional timestamp string (defaults to current time).
+        """
+        from datetime import datetime
+
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        exp_dir = self._root / self.EXPERIMENTS_DIR
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_id = experiment_id.replace(":", "_")
+        exp_manifest_path = exp_dir / f"{safe_id}_{timestamp}.json"
+
+        self._atomic_write_json(exp_manifest_path, manifest)
+        logger.debug(f"Saved experiment manifest to {exp_manifest_path}")
+
     # Experiment manifest operations
 
     def get_experiment_manifest(self, experiment_id: str) -> dict[str, Any] | None:
@@ -498,7 +650,7 @@ class FileStore:
     # Utility methods
 
     def delete_run(self, run_id: str) -> None:
-        """Delete a run and all its artifacts/logs/derived metrics."""
+        """Delete a run and all its artifacts/logs/derived metrics/results."""
         with self._run_lock(run_id):
             # Delete run record
             run_path = self._root / self.RUNS_DIR / f"{run_id}.json"
@@ -509,6 +661,11 @@ class FileStore:
             derived_path = self._root / self.DERIVED_DIR / f"{run_id}.json"
             if derived_path.exists():
                 derived_path.unlink()
+
+            # Delete results
+            results_dir = self._root / self.RESULTS_DIR / run_id
+            if results_dir.exists():
+                shutil.rmtree(results_dir)
 
             # Delete artifacts
             artifact_dir = self._root / self.ARTIFACTS_DIR / run_id

@@ -22,13 +22,14 @@ def main() -> int:
         description="MetaLab: A general experiment runner",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Enable verbose logging",
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
+
     # Postgres commands
     postgres_parser = subparsers.add_parser(
         "postgres",
@@ -38,24 +39,27 @@ def main() -> int:
         dest="postgres_command",
         help="Postgres commands",
     )
-    
+
     # postgres start
     start_parser = postgres_subparsers.add_parser(
         "start",
         help="Start PostgreSQL service",
     )
     start_parser.add_argument(
-        "--store", "-s",
-        help="Store root directory (for SLURM service discovery)",
+        "--store",
+        "-s",
+        help="Store root directory (for SLURM service discovery). Defaults to --experiments-root.",
     )
     start_parser.add_argument(
-        "--port", "-p",
+        "--port",
+        "-p",
         type=int,
         default=5432,
         help="PostgreSQL port (default: 5432)",
     )
     start_parser.add_argument(
-        "--database", "-d",
+        "--database",
+        "-d",
         default="metalab",
         help="Database name (default: metalab)",
     )
@@ -83,15 +87,39 @@ def main() -> int:
         "--data-dir",
         help="PostgreSQL data directory (PGDATA)",
     )
-    
+    start_parser.add_argument(
+        "--auth-method",
+        choices=["trust", "scram-sha-256"],
+        default="trust",
+        help="Authentication method (default: trust)",
+    )
+    start_parser.add_argument(
+        "--password",
+        help="PostgreSQL password (used with scram-sha-256)",
+    )
+    start_parser.add_argument(
+        "--experiments-root",
+        help="Shared experiments root (also used for SLURM service discovery if --store is omitted)",
+    )
+    start_parser.add_argument(
+        "--schema",
+        help="PostgreSQL schema for PostgresStore (default: public)",
+    )
+    start_parser.add_argument(
+        "--print-store-locator",
+        action="store_true",
+        help="Print PostgresStore locator for this service",
+    )
+
     # postgres status
     status_parser = postgres_subparsers.add_parser(
         "status",
         help="Check PostgreSQL service status",
     )
     status_parser.add_argument(
-        "--store", "-s",
-        help="Store root directory",
+        "--store",
+        "-s",
+        help="Store root directory (defaults to --experiments-root)",
     )
     status_parser.add_argument(
         "--json",
@@ -99,17 +127,35 @@ def main() -> int:
         dest="json_output",
         help="Output as JSON",
     )
-    
+    status_parser.add_argument(
+        "--experiments-root",
+        help="Shared experiments root (also used for SLURM service discovery if --store is omitted)",
+    )
+    status_parser.add_argument(
+        "--schema",
+        help="PostgreSQL schema for PostgresStore (default: public)",
+    )
+    status_parser.add_argument(
+        "--store-locator",
+        action="store_true",
+        help="Include PostgresStore locator in output",
+    )
+
     # postgres stop
     stop_parser = postgres_subparsers.add_parser(
         "stop",
         help="Stop PostgreSQL service",
     )
     stop_parser.add_argument(
-        "--store", "-s",
-        help="Store root directory",
+        "--store",
+        "-s",
+        help="Store root directory (defaults to --experiments-root)",
     )
-    
+    stop_parser.add_argument(
+        "--experiments-root",
+        help="Shared experiments root (also used for SLURM service discovery if --store is omitted)",
+    )
+
     # Store commands
     store_parser = subparsers.add_parser(
         "store",
@@ -119,26 +165,29 @@ def main() -> int:
         dest="store_command",
         help="Store commands",
     )
-    
+
     # store export
     export_parser = store_subparsers.add_parser(
         "export",
         help="Export data from source store to destination",
     )
     export_parser.add_argument(
-        "--from", "-f",
+        "--from",
+        "-f",
         required=True,
         dest="source",
         help="Source store locator (e.g., postgresql://localhost/db)",
     )
     export_parser.add_argument(
-        "--to", "-t",
+        "--to",
+        "-t",
         required=True,
         dest="destination",
         help="Destination store locator (e.g., file:///path/to/store)",
     )
     export_parser.add_argument(
-        "--experiment", "-e",
+        "--experiment",
+        "-e",
         help="Filter by experiment ID",
     )
     export_parser.add_argument(
@@ -146,38 +195,41 @@ def main() -> int:
         action="store_true",
         help="Include artifact files (usually skipped)",
     )
-    
+
     # store import
     import_parser = store_subparsers.add_parser(
         "import",
         help="Import data from source store to destination",
     )
     import_parser.add_argument(
-        "--from", "-f",
+        "--from",
+        "-f",
         required=True,
         dest="source",
         help="Source store locator (e.g., file:///path/to/store)",
     )
     import_parser.add_argument(
-        "--to", "-t",
+        "--to",
+        "-t",
         required=True,
         dest="destination",
         help="Destination store locator (e.g., postgresql://localhost/db)",
     )
     import_parser.add_argument(
-        "--experiment", "-e",
+        "--experiment",
+        "-e",
         help="Filter by experiment ID",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    
+
     if args.command == "postgres":
         return handle_postgres(args)
     elif args.command == "store":
@@ -191,35 +243,55 @@ def handle_postgres(args: argparse.Namespace) -> int:
     """Handle postgres subcommands."""
     from metalab.services.postgres import (
         PostgresServiceConfig,
+        build_store_locator,
         get_service_info,
         start_postgres_local,
         start_postgres_slurm,
         stop_postgres,
     )
-    
+
+    def _resolve_experiments_root() -> Path | None:
+        if getattr(args, "experiments_root", None):
+            return Path(args.experiments_root)
+        if getattr(args, "store", None):
+            return Path(args.store)
+        return None
+
+    def _resolve_store_root() -> Path | None:
+        if getattr(args, "store", None):
+            return Path(args.store)
+        if getattr(args, "experiments_root", None):
+            return Path(args.experiments_root)
+        return None
+
     if args.postgres_command == "start":
         config = PostgresServiceConfig(
             port=args.port,
             database=args.database,
             data_dir=Path(args.data_dir) if args.data_dir else None,
+            auth_method=args.auth_method,
+            password=args.password,
         )
-        
+
         try:
             if args.slurm:
-                if not args.store:
-                    print("Error: --store required for SLURM mode", file=sys.stderr)
+                store_root = _resolve_store_root()
+                if store_root is None:
+                    print(
+                        "Error: --experiments-root (or --store) required for SLURM mode",
+                        file=sys.stderr,
+                    )
                     return 1
-                
                 service = start_postgres_slurm(
                     config,
-                    store_root=Path(args.store),
+                    store_root=store_root,
                     slurm_partition=args.slurm_partition,
                     slurm_time=args.slurm_time,
                     slurm_memory=args.slurm_memory,
                 )
             else:
                 service = start_postgres_local(config)
-            
+
             print(f"PostgreSQL started:")
             print(f"  Connection: {service.connection_string}")
             print(f"  Host: {service.host}")
@@ -227,26 +299,53 @@ def handle_postgres(args: argparse.Namespace) -> int:
             print(f"  Database: {service.database}")
             if service.slurm_job_id:
                 print(f"  SLURM Job: {service.slurm_job_id}")
+            if args.print_store_locator:
+                experiments_root = _resolve_experiments_root()
+                if experiments_root is None:
+                    print(
+                        "Error: --experiments-root (or --store in SLURM) required for store locator",
+                        file=sys.stderr,
+                    )
+                    return 1
+                locator = build_store_locator(
+                    service,
+                    experiments_root=experiments_root,
+                    schema=args.schema,
+                )
+                print(f"  Store locator: {locator}")
             return 0
-            
+
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-    
+
     elif args.postgres_command == "status":
-        store_root = Path(args.store) if args.store else None
+        store_root = _resolve_store_root()
         service = get_service_info(store_root=store_root)
-        
+
         if service is None:
             if args.json_output:
                 print(json.dumps({"running": False}))
             else:
                 print("PostgreSQL service is not running")
             return 1
-        
+
         if args.json_output:
             data = service.to_dict()
             data["running"] = True
+            if args.store_locator:
+                experiments_root = _resolve_experiments_root()
+                if experiments_root is None:
+                    print(
+                        "Error: --experiments-root (or --store) required for store locator",
+                        file=sys.stderr,
+                    )
+                    return 1
+                data["store_locator"] = build_store_locator(
+                    service,
+                    experiments_root=experiments_root,
+                    schema=args.schema,
+                )
             print(json.dumps(data, indent=2))
         else:
             print(f"PostgreSQL service is running:")
@@ -258,19 +357,33 @@ def handle_postgres(args: argparse.Namespace) -> int:
                 print(f"  SLURM Job: {service.slurm_job_id}")
             if service.started_at:
                 print(f"  Started: {service.started_at}")
-        
+            if args.store_locator:
+                experiments_root = _resolve_experiments_root()
+                if experiments_root is None:
+                    print(
+                        "Error: --experiments-root (or --store) required for store locator",
+                        file=sys.stderr,
+                    )
+                    return 1
+                locator = build_store_locator(
+                    service,
+                    experiments_root=experiments_root,
+                    schema=args.schema,
+                )
+                print(f"  Store locator: {locator}")
+
         return 0
-    
+
     elif args.postgres_command == "stop":
-        store_root = Path(args.store) if args.store else None
-        
+        store_root = _resolve_store_root()
+
         if stop_postgres(store_root=store_root):
             print("PostgreSQL service stopped")
             return 0
         else:
             print("PostgreSQL service was not running")
             return 0
-    
+
     else:
         print("Usage: metalab postgres {start|status|stop}", file=sys.stderr)
         return 1
@@ -283,12 +396,13 @@ def handle_store(args: argparse.Namespace) -> int:
         export_to_filestore,
         import_from_filestore,
     )
-    
+
     if args.store_command == "export":
         try:
+
             def progress(current: int, total: int) -> None:
                 print(f"\rExporting: {current}/{total}", end="", flush=True)
-            
+
             counts = export_store(
                 args.source,
                 args.destination,
@@ -296,41 +410,42 @@ def handle_store(args: argparse.Namespace) -> int:
                 include_artifacts=args.include_artifacts,
                 progress_callback=progress,
             )
-            
+
             print()  # Newline after progress
             print(f"Export complete:")
             for key, value in counts.items():
                 print(f"  {key}: {value}")
-            
+
             return 0
-            
+
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-    
+
     elif args.store_command == "import":
         try:
+
             def progress(current: int, total: int) -> None:
                 print(f"\rImporting: {current}/{total}", end="", flush=True)
-            
+
             counts = import_from_filestore(
                 args.source,
                 args.destination,
                 experiment_id=args.experiment,
                 progress_callback=progress,
             )
-            
+
             print()  # Newline after progress
             print(f"Import complete:")
             for key, value in counts.items():
                 print(f"  {key}: {value}")
-            
+
             return 0
-            
+
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-    
+
     else:
         print("Usage: metalab store {export|import}", file=sys.stderr)
         return 1

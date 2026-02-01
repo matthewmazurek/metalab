@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     pass
 
 
+def _normalize_seed(seed: int) -> int:
+    """Normalize seed to numpy-compatible range."""
+    return abs(seed) % (2**32)
+
+
 @dataclass(frozen=True)
 class SeedBundle:
     """
@@ -102,8 +107,20 @@ class SeedBundle:
                 "Install it with: pip install metalab[numpy]"
             ) from e
 
-        seed = self.derive(name)
+        seed = self.numpy_seed(name)
         return np.random.default_rng(seed)
+
+    def numpy_seed(self, name: str = "default") -> int:
+        """
+        Return a NumPy-safe integer seed derived from this bundle.
+
+        Args:
+            name: Name for the derived seed (default: "default").
+
+        Returns:
+            A 32-bit non-negative integer seed suitable for NumPy.
+        """
+        return _normalize_seed(self.derive(name))
 
     def to_dict(self) -> dict[str, Any]:
         """

@@ -39,8 +39,12 @@ from metalab.executor.handle import RunHandle, RunStatus
 from metalab.executor.payload import RunPayload
 from metalab.executor.thread import ThreadExecutor
 from metalab.result import Results
-from metalab.store import create_store, to_locator
-from metalab.store.file import FileStore
+from metalab.store import (
+    SupportsExperimentManifests,
+    SupportsWorkingDirectory,
+    create_store,
+    to_locator,
+)
 from metalab.types import Status
 
 logger = logging.getLogger(__name__)
@@ -129,8 +133,12 @@ class ProgressRunHandle:
 
         self._handle.set_event_callback(combined_callback)
 
-    def __del__(self) -> None:
-        """Ensure tracker is stopped on garbage collection."""
+    def __enter__(self) -> "ProgressRunHandle":
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Exit context manager, ensuring tracker is stopped."""
         self._stop_tracker()
 
 
@@ -160,12 +168,13 @@ def generate_payloads(
     ctx_fp = fingerprint(resolved_context)
 
     # Optionally persist the resolved manifest for auditability
-    if persist_manifest and manifest and hasattr(store, "root"):
+    if persist_manifest and manifest and isinstance(store, SupportsWorkingDirectory):
         import json
         from pathlib import Path
 
         manifest_path = (
-            Path(store.root) / f"{experiment.experiment_id}_context_manifest.json"
+            store.get_working_directory()
+            / f"{experiment.experiment_id}_context_manifest.json"
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with manifest_path.open("w") as f:
@@ -215,10 +224,8 @@ def generate_payloads(
             run_data.append((run_id, resolved_params, seed_bundle, params_fp, seed_fp))
 
     # Write experiment manifest (versioned by timestamp) - now includes run_ids
-    if persist_manifest and hasattr(store, "root"):
-        import json
+    if persist_manifest:
         from datetime import datetime
-        from pathlib import Path
 
         from metalab.manifest import build_experiment_manifest
 
@@ -229,17 +236,18 @@ def generate_payloads(
             run_ids=all_run_ids,
         )
 
-        exp_dir = Path(store.root) / "experiments"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_id = experiment.experiment_id.replace(":", "_")
-        exp_manifest_path = exp_dir / f"{safe_id}_{timestamp}.json"
 
-        with exp_manifest_path.open("w") as f:
-            json.dump(exp_manifest, f, indent=2, default=str)
-
-        logger.debug(f"Saved experiment manifest to {exp_manifest_path}")
+        # Write to store if it supports experiment manifests
+        if isinstance(store, SupportsExperimentManifests):
+            store.put_experiment_manifest(
+                experiment.experiment_id,
+                exp_manifest,
+                timestamp=timestamp,
+            )
+            logger.debug(
+                f"Saved experiment manifest to store: {experiment.experiment_id}"
+            )
 
     # Second pass: create payloads, skipping successful runs if resume=True
     payloads = []
@@ -319,12 +327,13 @@ def _run_slurm_indexed(
         pass
 
     # Optionally persist the resolved manifest for auditability
-    if manifest and hasattr(store, "root"):
+    if manifest and isinstance(store, SupportsWorkingDirectory):
         import json
         from pathlib import Path
 
         manifest_path = (
-            Path(store.root) / f"{experiment.experiment_id}_context_manifest.json"
+            store.get_working_directory()
+            / f"{experiment.experiment_id}_context_manifest.json"
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with manifest_path.open("w") as f:
@@ -360,6 +369,9 @@ def run(
     progress: "bool | Progress | None" = None,
     on_event: "EventCallback | None" = None,
     derived_metrics: "list[str | DerivedMetricFn] | None" = None,
+    fallback: bool = False,
+    fallback_root: str = "./runs",
+    write_to_both: bool = True,
 ) -> RunHandle:
     """
     Run an experiment and return a handle for tracking/awaiting results.
@@ -390,6 +402,15 @@ def run(
             Functions must be importable (not lambdas). Can be specified as:
             - Function references: "myproject.metrics:final_loss"
             - Callable functions: final_loss (must have __module__ and __name__)
+        fallback: If True, wrap the store in a FallbackStore with a FileStore
+            fallback. This provides runtime resilience: if the primary store
+            (e.g., PostgreSQL) becomes unavailable, writes automatically fall
+            back to the local FileStore. Default: False.
+        fallback_root: Root directory for fallback FileStore. The actual fallback
+            path will be "{fallback_root}/{experiment.name}". Default: "./runs".
+        write_to_both: When fallback=True, whether to write to both primary and
+            fallback stores (for redundancy) or only to primary with fallback
+            on failure. Default: False.
 
     Returns:
         RunHandle for tracking and awaiting results.
@@ -427,18 +448,32 @@ def run(
         handle = metalab.run(exp, derived_metrics=[final_loss, convergence_stats])
         results = handle.result()  # Derived metrics computed and stored per-run
 
+        # With runtime fallback (PostgreSQL primary, FileStore backup)
+        handle = metalab.run(
+            exp,
+            store="postgresql://localhost/db",
+            fallback=True,  # Auto-creates FileStore at ./runs/{exp.name}
+        )
+
         # Cancel if needed
         handle.cancel()
     """
     from metalab.derived import get_func_ref
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
+    from metalab.store import FallbackStore, FileStore
 
     # Resolve store
     if store is None:
         store = f"./runs/{experiment.name}"
     if isinstance(store, str):
-        store = create_store(store)
+        store = create_store(store, experiment_id=experiment.experiment_id)
+
+    # Wrap in FallbackStore if requested
+    if fallback and not isinstance(store, FallbackStore):
+        fallback_path = f"{fallback_root}/{experiment.name}"
+        fallback_store = FileStore(fallback_path)
+        store = FallbackStore(store, fallback_store, write_to_both=write_to_both)
 
     # Resolve executor (default: sequential execution)
     if executor is None:
@@ -550,7 +585,7 @@ def load_results(
         # Filter and export
         results.successful.to_csv("./successful_runs.csv")
     """
-    store = FileStore(path)
+    store = create_store(path)
     return Results.from_store(store, experiment_id=experiment_id)
 
 
@@ -601,6 +636,7 @@ def reconnect(
     from metalab.executor.slurm import SlurmRunHandle
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
+    from metalab.store import FileStore
 
     store = FileStore(path)
     handle: RunHandle = SlurmRunHandle.from_store(

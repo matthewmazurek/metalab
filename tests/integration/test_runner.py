@@ -63,6 +63,32 @@ def operation_with_artifact(
     capture.metric("threshold", params.get("threshold", 0.5))
 
 
+@metalab.operation
+def operation_with_data(
+    context: Any,
+    params: dict[str, Any],
+    seeds: metalab.SeedBundle,
+    runtime: metalab.Runtime,
+    capture: metalab.Capture,
+) -> None:
+    """Operation that captures structured data via capture.data()."""
+    import numpy as np
+
+    # Capture scalar metrics
+    capture.metric("accuracy", params["x"] * 0.1)
+
+    # Capture structured data (for derived metrics)
+    matrix = np.array([[i * j for j in range(params["x"])] for i in range(params["x"])])
+    capture.data("transition_matrix", matrix)
+
+    # Capture dict data
+    capture.data("scores", {"gene_a": 0.8, "gene_b": 0.6})
+
+    # Capture stepped metrics (will be converted to data at finalize)
+    for step in range(5):
+        capture.metric("loss", 1.0 / (step + 1), step=step)
+
+
 @pytest.fixture
 def store_path(tmp_path: Path) -> Path:
     """Get a temporary store path."""
@@ -955,3 +981,281 @@ class TestRunningStatusRecords:
         assert len(records) == 1
         # Final status should be SUCCESS, not RUNNING
         assert records[0].status == Status.SUCCESS
+
+
+class TestFallbackStore:
+    """Tests for the fallback=True functionality."""
+
+    def test_fallback_wraps_filestore(self, tmp_path: Path):
+        """fallback=True wraps a FileStore with FallbackStore."""
+        from metalab.store import FileStore
+
+        exp = metalab.Experiment(
+            name="fallback_test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        primary_path = tmp_path / "primary"
+        fallback_root = tmp_path / "fallback"
+
+        # Run with fallback=True
+        handle = metalab.run(
+            exp,
+            store=str(primary_path),
+            fallback=True,
+            fallback_root=str(fallback_root),
+            write_to_both=True,
+        )
+        result = handle.result()
+
+        # Should succeed
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+
+        # With write_to_both=True, records should be in both stores
+        primary_store = FileStore(primary_path)
+        fallback_store = FileStore(fallback_root / "fallback_test")
+
+        primary_records = primary_store.list_run_records()
+        fallback_records = fallback_store.list_run_records()
+
+        assert len(primary_records) == 1
+        assert len(fallback_records) == 1
+        assert primary_records[0].run_id == fallback_records[0].run_id
+
+    def test_fallback_default_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """fallback_root defaults to ./runs."""
+        from metalab.store import FileStore
+
+        # Change to tmp_path so ./runs is created there
+        # Use resolve() to handle macOS /var vs /private/var symlink
+        tmp_path = tmp_path.resolve()
+        monkeypatch.chdir(tmp_path)
+
+        exp = metalab.Experiment(
+            name="default_fallback",
+            version="1.0",
+            context=SimpleContext(),
+            operation=simple_operation,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        primary_path = tmp_path / "primary"
+
+        # Run with fallback=True (default fallback_root)
+        handle = metalab.run(
+            exp,
+            store=str(primary_path),
+            fallback=True,
+        )
+        result = handle.result()
+
+        # Should succeed
+        assert len(result) == 1
+
+        # Default fallback should be at ./runs/{exp.name}
+        # The FileStore resolves the path, so use the resolved form
+        expected_fallback = (tmp_path / "runs" / "default_fallback").resolve()
+        fallback_store = FileStore(expected_fallback)
+        fallback_records = fallback_store.list_run_records()
+        assert len(fallback_records) == 1
+
+
+class TestDataCapture:
+    """Tests for capture.data() structured results feature."""
+
+    def test_data_capture_with_numpy(self, store_path: Path):
+        """Test that capture.data() works with numpy arrays."""
+        exp = metalab.Experiment(
+            name="data_capture_test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_data,
+            params=metalab.grid(x=[3]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+
+        # Check that scalar metrics were captured
+        assert "accuracy" in result[0].metrics
+        assert result[0].metrics["accuracy"] == pytest.approx(0.3)  # 3 * 0.1
+
+    def test_stepped_metrics_captured(self, store_path: Path):
+        """Test that stepped metrics are captured and converted to data."""
+        exp = metalab.Experiment(
+            name="stepped_metrics_test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_data,
+            params=metalab.grid(x=[2]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+
+        # Scalar metrics should be present
+        assert "accuracy" in result[0].metrics
+
+    def test_data_capture_with_logging(self, store_path: Path):
+        """Test that data capture works alongside logging."""
+
+        @metalab.operation
+        def operation_with_logging_and_data(
+            context: Any,
+            params: dict[str, Any],
+            seeds: metalab.SeedBundle,
+            runtime: metalab.Runtime,
+            capture: metalab.Capture,
+        ) -> None:
+            """Operation that logs and captures data."""
+            capture.log("Starting operation")
+            capture.data("config", {"learning_rate": 0.01, "batch_size": 32})
+            capture.log("Data captured")
+            capture.metric("final_loss", 0.05)
+
+        exp = metalab.Experiment(
+            name="logging_data_test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_logging_and_data,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+        assert result[0].metrics["final_loss"] == 0.05
+
+        # Check that logs were written
+        from metalab.store.file import FileStore
+
+        store = FileStore(store_path)
+        log_content = store.get_log(result[0].run_id, "run")
+        assert log_content is not None
+        assert "Starting operation" in log_content
+        assert "Data captured" in log_content
+
+    def test_derived_metrics_can_access_data(self, store_path: Path):
+        """Test that derived metrics can access data captured via capture.data()."""
+        import numpy as np
+        from metalab.types import Metric
+
+        @metalab.operation
+        def operation_with_matrix(
+            context: Any,
+            params: dict[str, Any],
+            seeds: metalab.SeedBundle,
+            runtime: metalab.Runtime,
+            capture: metalab.Capture,
+        ) -> None:
+            """Operation that captures a matrix."""
+            size = params["size"]
+            matrix = np.eye(size)  # Identity matrix
+            capture.data("test_matrix", matrix)
+            capture.metric("size", size)
+
+        exp = metalab.Experiment(
+            name="derived_data_test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_matrix,
+            params=metalab.grid(size=[3]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+
+        # Compute derived metrics post-hoc (can use local functions)
+        from metalab.store.file import FileStore
+        from metalab.result import Run
+
+        store = FileStore(store_path)
+        run = Run(result[0], store)
+
+        # Access captured data via run.data()
+        matrix = run.data("test_matrix")
+
+        # Verify data is correctly reconstructed as numpy array
+        assert isinstance(matrix, np.ndarray)
+        assert matrix.shape == (3, 3)
+        assert np.allclose(matrix, np.eye(3))
+
+        # Compute derived metrics manually
+        trace = float(np.trace(matrix))
+        total = float(matrix.sum())
+        assert trace == 3.0  # Trace of 3x3 identity matrix
+        assert total == 3.0  # Sum of 3x3 identity matrix
+
+    def test_data_accessible_via_run_object(self, store_path: Path):
+        """Test that run.data() works correctly."""
+        import numpy as np
+
+        @metalab.operation
+        def operation_with_dict_data(
+            context: Any,
+            params: dict[str, Any],
+            seeds: metalab.SeedBundle,
+            runtime: metalab.Runtime,
+            capture: metalab.Capture,
+        ) -> None:
+            """Operation that captures dict data."""
+            capture.data("config", {"lr": 0.01, "batch_size": 32})
+            capture.data("scores", [0.8, 0.9, 0.95])
+
+        exp = metalab.Experiment(
+            name="data_access_test",
+            version="1.0",
+            context=SimpleContext(),
+            operation=operation_with_dict_data,
+            params=metalab.grid(x=[1]),
+            seeds=metalab.seeds(base=42, replicates=1),
+        )
+
+        handle = metalab.run(exp, store=str(store_path))
+        result = handle.result()
+
+        assert len(result) == 1
+        assert result[0].status == Status.SUCCESS
+
+        # Load results and access data via run.data()
+        from metalab.store.file import FileStore
+
+        store = FileStore(store_path)
+        from metalab.result import Run
+
+        run = Run(result[0], store)
+
+        # Access dict data
+        config = run.data("config")
+        assert config == {"lr": 0.01, "batch_size": 32}
+
+        # Access list data
+        scores = run.data("scores")
+        assert scores == [0.8, 0.9, 0.95]
+
+        # Check list_data works
+        data_names = run.list_data()
+        assert set(data_names) == {"config", "scores"}

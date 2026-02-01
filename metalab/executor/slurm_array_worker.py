@@ -281,32 +281,73 @@ def _write_done_marker(store_path: Path, run_id: str) -> None:
 
 def _load_context_spec(store_path: Path) -> Any:
     """
-    Load context spec from pickled file.
+    Load context spec from JSON file.
 
-    The context is pickled during experiment submission, so any Python object
-    (dataclasses, custom types, etc.) is handled automatically without manual
-    serialization logic.
+    The context is serialized to JSON during experiment submission with type
+    information preserved for dataclasses (FilePath, DirPath, etc.).
 
     Args:
         store_path: Path to the store root directory.
 
     Returns:
-        The unpickled context spec object, or None if not found.
+        The deserialized context spec object, or None if not found.
     """
-    import pickle
+    context_json_path = store_path / "context_spec.json"
 
-    context_pkl_path = store_path / "context_spec.pkl"
-
-    if not context_pkl_path.exists():
-        logger.warning(f"Context spec pickle not found: {context_pkl_path}")
+    if not context_json_path.exists():
+        logger.warning(f"Context spec JSON not found: {context_json_path}")
         return None
 
     try:
-        with open(context_pkl_path, "rb") as f:
-            return pickle.load(f)
+        with open(context_json_path, "r") as f:
+            data = json.load(f)
+        return _deserialize_context_spec(data)
     except Exception as e:
         logger.error(f"Failed to load context spec: {e}")
         raise
+
+
+def _deserialize_context_spec(obj: Any) -> Any:
+    """
+    Deserialize a context spec from JSON structure with type reconstruction.
+
+    Reconstructs dataclasses (FilePath, DirPath, context_spec decorated classes)
+    from their serialized form using __type__ metadata.
+
+    Args:
+        obj: The JSON-loaded structure.
+
+    Returns:
+        The reconstructed context spec object.
+    """
+    import importlib
+
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, list):
+        return [_deserialize_context_spec(item) for item in obj]
+    if isinstance(obj, dict):
+        if "__type__" in obj:
+            # Reconstruct the dataclass
+            type_path = obj["__type__"]
+            module_path, class_name = type_path.rsplit(".", 1)
+            try:
+                module = importlib.import_module(module_path)
+                cls = getattr(module, class_name)
+                # Get field values, excluding __type__
+                field_values = {
+                    k: _deserialize_context_spec(v)
+                    for k, v in obj.items()
+                    if k != "__type__"
+                }
+                return cls(**field_values)
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Could not reconstruct type {type_path}: {e}")
+                # Return as dict if reconstruction fails
+                return {k: _deserialize_context_spec(v) for k, v in obj.items() if k != "__type__"}
+        else:
+            return {k: _deserialize_context_spec(v) for k, v in obj.items()}
+    return obj
 
 
 if __name__ == "__main__":

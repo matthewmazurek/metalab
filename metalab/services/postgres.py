@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ DEFAULT_DATABASE = "metalab"
 class PostgresServiceConfig:
     """
     Configuration for PostgreSQL service.
-    
+
     Attributes:
         data_dir: Directory for PGDATA (database files).
         port: Port to listen on.
@@ -61,7 +62,7 @@ class PostgresServiceConfig:
         listen_addresses: Addresses to listen on ('*' for all, 'localhost' for local).
         max_connections: Maximum concurrent connections.
     """
-    
+
     data_dir: Path | None = None
     port: int = DEFAULT_PORT
     database: str = DEFAULT_DATABASE
@@ -70,7 +71,7 @@ class PostgresServiceConfig:
     auth_method: str = "trust"  # 'trust' for dev, 'scram-sha-256' for production
     listen_addresses: str = "localhost"
     max_connections: int = 100
-    
+
     def __post_init__(self) -> None:
         if self.data_dir is not None:
             self.data_dir = Path(self.data_dir)
@@ -80,10 +81,10 @@ class PostgresServiceConfig:
 class PostgresService:
     """
     Information about a running PostgreSQL service.
-    
+
     Can be serialized to/from a service.json file.
     """
-    
+
     host: str
     port: int
     database: str
@@ -93,7 +94,7 @@ class PostgresService:
     pid: int | None = None
     slurm_job_id: str | None = None
     started_at: str | None = None
-    
+
     @property
     def connection_string(self) -> str:
         """Generate PostgreSQL connection string."""
@@ -101,7 +102,7 @@ class PostgresService:
         if self.password:
             auth = f"{self.user}:{self.password}"
         return f"postgresql://{auth}@{self.host}:{self.port}/{self.database}"
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
@@ -116,7 +117,7 @@ class PostgresService:
             "started_at": self.started_at,
             "connection_string": self.connection_string,
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PostgresService:
         """Create from dictionary."""
@@ -131,14 +132,14 @@ class PostgresService:
             slurm_job_id=data.get("slurm_job_id"),
             started_at=data.get("started_at"),
         )
-    
+
     def save(self, service_file: Path) -> None:
         """Save service info to file."""
         service_file.parent.mkdir(parents=True, exist_ok=True)
         service_file.write_text(json.dumps(self.to_dict(), indent=2))
         # Restrict permissions (contains password)
         os.chmod(service_file, 0o600)
-    
+
     @classmethod
     def load(cls, service_file: Path) -> PostgresService:
         """Load service info from file."""
@@ -146,16 +147,43 @@ class PostgresService:
         return cls.from_dict(data)
 
 
+def build_store_locator(
+    service: PostgresService,
+    *,
+    experiments_root: Path | str,
+    schema: str | None = None,
+    extra_params: dict[str, str] | None = None,
+) -> str:
+    """
+    Build a PostgresStore locator from a running service.
+
+    Ensures required experiments_root is included and preserves existing params.
+    """
+    parsed = urlparse(service.connection_string)
+    params = {}
+    if parsed.query:
+        for key, values in parse_qs(parsed.query).items():
+            params[key] = values[-1] if values else ""
+
+    params["experiments_root"] = str(Path(experiments_root))
+    if schema:
+        params["schema"] = schema
+    if extra_params:
+        params.update(extra_params)
+
+    return urlunparse(parsed._replace(query=urlencode(params)))
+
+
 def _find_postgres_binaries() -> dict[str, Path | None]:
     """Find PostgreSQL binaries in PATH or common locations."""
     binaries = ["initdb", "pg_ctl", "psql", "createdb"]
     found = {}
-    
+
     # Check PATH first
     for name in binaries:
         path = shutil.which(name)
         found[name] = Path(path) if path else None
-    
+
     # Check common locations if not in PATH
     common_paths = [
         Path("/usr/lib/postgresql/15/bin"),
@@ -165,7 +193,7 @@ def _find_postgres_binaries() -> dict[str, Path | None]:
         Path("/opt/homebrew/opt/postgresql/bin"),
         Path("/usr/local/opt/postgresql/bin"),
     ]
-    
+
     for bin_dir in common_paths:
         if bin_dir.exists():
             for name in binaries:
@@ -173,7 +201,7 @@ def _find_postgres_binaries() -> dict[str, Path | None]:
                     candidate = bin_dir / name
                     if candidate.exists():
                         found[name] = candidate
-    
+
     return found
 
 
@@ -188,7 +216,7 @@ def _run_cmd(
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
-    
+
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -196,14 +224,14 @@ def _run_cmd(
         timeout=timeout,
         env=full_env,
     )
-    
+
     if check and result.returncode != 0:
         raise RuntimeError(
             f"Command failed: {' '.join(cmd)}\n"
             f"stdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
         )
-    
+
     return result
 
 
@@ -215,55 +243,55 @@ def start_postgres_local(
 ) -> PostgresService:
     """
     Start a local PostgreSQL service.
-    
+
     Uses Docker/Podman if available, otherwise falls back to local binaries.
-    
+
     Args:
         config: Service configuration.
         service_id: Unique identifier for this service instance.
         service_dir: Directory for service files.
-    
+
     Returns:
         PostgresService with connection info.
-    
+
     Raises:
         RuntimeError: If PostgreSQL cannot be started.
     """
     if config is None:
         config = PostgresServiceConfig()
-    
+
     if service_dir is None:
         service_dir = DEFAULT_LOCAL_SERVICE_DIR / service_id
-    
+
     service_dir.mkdir(parents=True, exist_ok=True)
     service_file = service_dir / "service.json"
-    
+
     # Check if already running
     if service_file.exists():
         existing = PostgresService.load(service_file)
         if _is_postgres_running(existing):
             logger.info(f"PostgreSQL already running at {existing.connection_string}")
             return existing
-    
+
     # Generate password if using scram auth
     password = config.password
     if config.auth_method == "scram-sha-256" and password is None:
         password = secrets.token_urlsafe(16)
-    
+
     # Try Docker/Podman first
     docker = shutil.which("docker") or shutil.which("podman")
     if docker:
         return _start_postgres_container(
             config, service_dir, service_file, docker, password
         )
-    
+
     # Fall back to local binaries
     binaries = _find_postgres_binaries()
     if all(binaries.values()):
         return _start_postgres_native(
             config, service_dir, service_file, binaries, password
         )
-    
+
     raise RuntimeError(
         "PostgreSQL not found. Install PostgreSQL or Docker/Podman, "
         "or load the appropriate module (e.g., 'module load postgresql')"
@@ -281,32 +309,39 @@ def _start_postgres_container(
     container_name = f"metalab-postgres-{service_dir.name}"
     data_dir = config.data_dir or (service_dir / "data")
     data_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Stop any existing container
     _run_cmd([docker, "rm", "-f", container_name], check=False)
-    
+
     # Build run command
     cmd = [
-        docker, "run", "-d",
-        "--name", container_name,
-        "-p", f"{config.port}:5432",
-        "-v", f"{data_dir}:/var/lib/postgresql/data",
-        "-e", f"POSTGRES_USER={config.user}",
-        "-e", f"POSTGRES_DB={config.database}",
+        docker,
+        "run",
+        "-d",
+        "--name",
+        container_name,
+        "-p",
+        f"{config.port}:5432",
+        "-v",
+        f"{data_dir}:/var/lib/postgresql/data",
+        "-e",
+        f"POSTGRES_USER={config.user}",
+        "-e",
+        f"POSTGRES_DB={config.database}",
     ]
-    
+
     if password:
         cmd.extend(["-e", f"POSTGRES_PASSWORD={password}"])
     else:
         cmd.extend(["-e", "POSTGRES_HOST_AUTH_METHOD=trust"])
-    
+
     cmd.append("postgres:15-alpine")
-    
+
     _run_cmd(cmd)
-    
+
     # Wait for startup
     time.sleep(2)
-    
+
     service = PostgresService(
         host="localhost",
         port=config.port,
@@ -316,13 +351,13 @@ def _start_postgres_container(
         pgdata=str(data_dir),
         started_at=datetime.now().isoformat(),
     )
-    
+
     # Wait for ready
     _wait_for_postgres(service, timeout=30)
-    
+
     service.save(service_file)
     logger.info(f"PostgreSQL started: {service.connection_string}")
-    
+
     return service
 
 
@@ -335,12 +370,12 @@ def _start_postgres_native(
 ) -> PostgresService:
     """Start PostgreSQL using native binaries."""
     data_dir = config.data_dir or (service_dir / "data")
-    
+
     # Initialize data directory if needed
     if not (data_dir / "PG_VERSION").exists():
         logger.info(f"Initializing PostgreSQL data directory: {data_dir}")
         data_dir.mkdir(parents=True, exist_ok=True)
-        
+
         cmd = [str(binaries["initdb"]), "-D", str(data_dir)]
         if password:
             # Write password to temp file for pwfile
@@ -351,35 +386,38 @@ def _start_postgres_native(
             cmd.extend(["-A", "scram-sha-256"])
         else:
             cmd.extend(["-A", "trust"])
-        
+
         _run_cmd(cmd)
-        
+
         # Configure pg_hba.conf for network access if needed
         if config.listen_addresses != "localhost":
             _configure_pg_hba(data_dir, config)
-        
+
         # Configure postgresql.conf
         _configure_postgresql(data_dir, config)
-    
+
     # Start server
     log_file = service_dir / "postgres.log"
-    
+
     cmd = [
         str(binaries["pg_ctl"]),
-        "-D", str(data_dir),
-        "-l", str(log_file),
-        "-o", f"-p {config.port}",
+        "-D",
+        str(data_dir),
+        "-l",
+        str(log_file),
+        "-o",
+        f"-p {config.port}",
         "start",
     ]
-    
+
     _run_cmd(cmd)
-    
+
     # Get PID
     pid = None
     pid_file = data_dir / "postmaster.pid"
     if pid_file.exists():
         pid = int(pid_file.read_text().split("\n")[0])
-    
+
     service = PostgresService(
         host="localhost",
         port=config.port,
@@ -390,30 +428,30 @@ def _start_postgres_native(
         pid=pid,
         started_at=datetime.now().isoformat(),
     )
-    
+
     # Wait for ready
     _wait_for_postgres(service, timeout=30)
-    
+
     # Create database if needed
     _ensure_database(service, binaries)
-    
+
     service.save(service_file)
     logger.info(f"PostgreSQL started: {service.connection_string}")
-    
+
     return service
 
 
 def _configure_pg_hba(data_dir: Path, config: PostgresServiceConfig) -> None:
     """Configure pg_hba.conf for network access."""
     hba_file = data_dir / "pg_hba.conf"
-    
+
     # Read existing content
     content = hba_file.read_text()
-    
+
     # Add line for network access
     auth = config.auth_method
     new_line = f"host    all    all    0.0.0.0/0    {auth}\n"
-    
+
     if new_line not in content:
         with hba_file.open("a") as f:
             f.write(f"\n# Added by metalab\n{new_line}")
@@ -422,37 +460,38 @@ def _configure_pg_hba(data_dir: Path, config: PostgresServiceConfig) -> None:
 def _configure_postgresql(data_dir: Path, config: PostgresServiceConfig) -> None:
     """Configure postgresql.conf."""
     conf_file = data_dir / "postgresql.conf"
-    
+
     settings = {
         "listen_addresses": f"'{config.listen_addresses}'",
         "port": str(config.port),
         "max_connections": str(config.max_connections),
     }
-    
+
     content = conf_file.read_text()
-    
+
     for key, value in settings.items():
         # Comment out existing setting
         import re
+
         content = re.sub(
             rf"^{key}\s*=.*$",
             f"# {key} = (overridden by metalab)",
             content,
             flags=re.MULTILINE,
         )
-    
+
     # Add our settings
     content += "\n# metalab settings\n"
     for key, value in settings.items():
         content += f"{key} = {value}\n"
-    
+
     conf_file.write_text(content)
 
 
 def _wait_for_postgres(service: PostgresService, timeout: float = 30) -> None:
     """Wait for PostgreSQL to be ready."""
     import socket
-    
+
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -465,7 +504,7 @@ def _wait_for_postgres(service: PostgresService, timeout: float = 30) -> None:
         except Exception:
             pass
         time.sleep(0.5)
-    
+
     raise RuntimeError(f"PostgreSQL failed to start within {timeout}s")
 
 
@@ -474,9 +513,12 @@ def _ensure_database(service: PostgresService, binaries: dict[str, Path]) -> Non
     # Try to create database (ignore error if exists)
     cmd = [
         str(binaries["createdb"]),
-        "-h", service.host,
-        "-p", str(service.port),
-        "-U", service.user,
+        "-h",
+        service.host,
+        "-p",
+        str(service.port),
+        "-U",
+        service.user,
         service.database,
     ]
     _run_cmd(cmd, check=False)
@@ -485,7 +527,7 @@ def _ensure_database(service: PostgresService, binaries: dict[str, Path]) -> Non
 def _is_postgres_running(service: PostgresService) -> bool:
     """Check if a PostgreSQL service is running."""
     import socket
-    
+
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
@@ -506,17 +548,17 @@ def start_postgres_slurm(
 ) -> PostgresService:
     """
     Start a PostgreSQL service via SLURM job.
-    
+
     Submits a SLURM job that runs PostgreSQL on a compute node.
     Service discovery file is written to {store_root}/services/postgres/service.json.
-    
+
     Args:
         config: Service configuration.
         store_root: Root directory for the store (on shared filesystem).
         slurm_partition: SLURM partition to submit to.
         slurm_time: Maximum walltime for the service job.
         slurm_memory: Memory allocation.
-    
+
     Returns:
         PostgresService with connection info.
     """
@@ -525,11 +567,11 @@ def start_postgres_slurm(
             listen_addresses="*",  # Need network access from other nodes
             auth_method="trust",  # For simplicity on internal network
         )
-    
+
     service_dir = store_root / "services" / "postgres"
     service_dir.mkdir(parents=True, exist_ok=True)
     service_file = service_dir / "service.json"
-    
+
     # Check if already running
     if service_file.exists():
         existing = PostgresService.load(service_file)
@@ -541,18 +583,24 @@ def start_postgres_slurm(
             )
             if result.returncode == 0 and result.stdout.strip():
                 if _is_postgres_running(existing):
-                    logger.info(f"PostgreSQL already running: {existing.connection_string}")
+                    logger.info(
+                        f"PostgreSQL already running: {existing.connection_string}"
+                    )
                     return existing
-    
+
     # Generate password
     password = config.password
     if config.auth_method == "scram-sha-256" and password is None:
         password = secrets.token_urlsafe(16)
-    
+
     # PGDATA on shared filesystem
     data_dir = config.data_dir or (service_dir / "data")
-    
+
     # Create SLURM job script
+    password_literal = password or ""
+    auth_prefix = config.user
+    if password:
+        auth_prefix = f"{config.user}:{password}"
     script_content = f"""#!/bin/bash
 #SBATCH --job-name=metalab-postgres
 #SBATCH --partition={slurm_partition}
@@ -568,11 +616,20 @@ echo "Starting PostgreSQL on $HOSTNAME"
 
 # Setup PGDATA
 export PGDATA="{data_dir}"
+PASSWORD={json.dumps(password_literal)}
 
 # Initialize if needed
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "Initializing PostgreSQL data directory..."
-    initdb -D "$PGDATA" -A {config.auth_method}
+    if [ -n "$PASSWORD" ]; then
+        PWFILE="$PGDATA/.pgpass_init"
+        printf "%s" "$PASSWORD" > "$PWFILE"
+        chmod 600 "$PWFILE"
+        initdb -D "$PGDATA" -A {config.auth_method} --pwfile="$PWFILE"
+        rm -f "$PWFILE"
+    else
+        initdb -D "$PGDATA" -A {config.auth_method}
+    fi
     
     # Configure for network access
     echo "host all all 0.0.0.0/0 {config.auth_method}" >> "$PGDATA/pg_hba.conf"
@@ -600,7 +657,7 @@ cat > "{service_file}" << EOF
     "pgdata": "{data_dir}",
     "slurm_job_id": "$SLURM_JOB_ID",
     "started_at": "$(date -Iseconds)",
-    "connection_string": "postgresql://{config.user}@$HOSTNAME:{config.port}/{config.database}"
+    "connection_string": "postgresql://{auth_prefix}@$HOSTNAME:{config.port}/{config.database}"
 }}
 EOF
 chmod 600 "{service_file}"
@@ -616,14 +673,14 @@ while true; do
     sleep 60
 done
 """
-    
+
     script_path = service_dir / "start_postgres.sh"
     script_path.write_text(script_content)
-    os.chmod(script_path, 0o755)
-    
+    os.chmod(script_path, 0o700)
+
     # Submit job
     result = _run_cmd(["sbatch", str(script_path)])
-    
+
     # Parse job ID
     # Output: "Submitted batch job 12345"
     job_id = None
@@ -631,12 +688,12 @@ done
         if "Submitted batch job" in line:
             job_id = line.split()[-1]
             break
-    
+
     if not job_id:
         raise RuntimeError(f"Failed to parse SLURM job ID: {result.stdout}")
-    
+
     logger.info(f"Submitted SLURM job {job_id} for PostgreSQL service")
-    
+
     # Wait for service file to appear
     timeout = 120  # 2 minutes for job to start
     start = time.time()
@@ -650,7 +707,7 @@ done
             except Exception:
                 pass
         time.sleep(5)
-        
+
         # Check job status
         result = _run_cmd(["squeue", "-j", job_id, "-h"], check=False)
         if result.returncode != 0 or not result.stdout.strip():
@@ -659,7 +716,7 @@ done
             if err_file.exists():
                 logger.error(f"SLURM job failed: {err_file.read_text()}")
             raise RuntimeError(f"SLURM job {job_id} failed to start PostgreSQL")
-    
+
     raise RuntimeError(f"PostgreSQL service did not start within {timeout}s")
 
 
@@ -671,12 +728,12 @@ def get_service_info(
 ) -> PostgresService | None:
     """
     Get information about a running PostgreSQL service.
-    
+
     Args:
         service_path: Direct path to service.json file.
         store_root: Store root for SLURM service discovery.
         service_id: Service ID for local services.
-    
+
     Returns:
         PostgresService if found and running, None otherwise.
     """
@@ -688,7 +745,7 @@ def get_service_info(
             if _is_postgres_running(service):
                 return service
             return None
-    
+
     # Try store root (SLURM)
     if store_root:
         service_file = Path(store_root) / "services" / "postgres" / "service.json"
@@ -696,14 +753,14 @@ def get_service_info(
             service = PostgresService.load(service_file)
             if _is_postgres_running(service):
                 return service
-    
+
     # Try local service
     service_file = DEFAULT_LOCAL_SERVICE_DIR / service_id / "service.json"
     if service_file.exists():
         service = PostgresService.load(service_file)
         if _is_postgres_running(service):
             return service
-    
+
     return None
 
 
@@ -715,26 +772,28 @@ def stop_postgres(
 ) -> bool:
     """
     Stop a running PostgreSQL service.
-    
+
     Args:
         service_path: Direct path to service.json file.
         store_root: Store root for SLURM service discovery.
         service_id: Service ID for local services.
-    
+
     Returns:
         True if stopped successfully, False if not running.
     """
-    service = get_service_info(service_path, store_root=store_root, service_id=service_id)
-    
+    service = get_service_info(
+        service_path, store_root=store_root, service_id=service_id
+    )
+
     if service is None:
         logger.info("PostgreSQL service not running")
         return False
-    
+
     # If SLURM job, cancel it
     if service.slurm_job_id:
         _run_cmd(["scancel", service.slurm_job_id], check=False)
         logger.info(f"Cancelled SLURM job {service.slurm_job_id}")
-    
+
     # Try pg_ctl stop
     if service.pgdata:
         binaries = _find_postgres_binaries()
@@ -743,7 +802,7 @@ def stop_postgres(
                 [str(binaries["pg_ctl"]), "-D", service.pgdata, "stop", "-m", "fast"],
                 check=False,
             )
-    
+
     # Try Docker stop
     docker = shutil.which("docker") or shutil.which("podman")
     if docker:
@@ -751,14 +810,18 @@ def stop_postgres(
         for prefix in ["metalab-postgres-", "metalab_postgres_"]:
             _run_cmd([docker, "stop", f"{prefix}{service_id}"], check=False)
             _run_cmd([docker, "rm", f"{prefix}{service_id}"], check=False)
-    
+
     # Remove service file
     if service_path:
         Path(service_path).unlink(missing_ok=True)
     elif store_root:
-        (Path(store_root) / "services" / "postgres" / "service.json").unlink(missing_ok=True)
+        (Path(store_root) / "services" / "postgres" / "service.json").unlink(
+            missing_ok=True
+        )
     else:
-        (DEFAULT_LOCAL_SERVICE_DIR / service_id / "service.json").unlink(missing_ok=True)
-    
+        (DEFAULT_LOCAL_SERVICE_DIR / service_id / "service.json").unlink(
+            missing_ok=True
+        )
+
     logger.info("PostgreSQL service stopped")
     return True

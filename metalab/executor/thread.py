@@ -126,3 +126,11 @@ class ThreadExecutor:
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the thread pool."""
         self._pool.shutdown(wait=wait)
+
+    def __enter__(self) -> "ThreadExecutor":
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Exit context manager, ensuring shutdown is called."""
+        self.shutdown(wait=True)

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from metalab.capture.registry import SerializerRegistry
+from metalab.store.capabilities import SupportsLogPath, SupportsStructuredResults
 from metalab.types import ArtifactDescriptor
 
 if TYPE_CHECKING:
@@ -91,6 +92,7 @@ class Capture:
         # Buffered data (metrics and artifacts only - logs stream directly)
         self._metrics: dict[str, Any] = {}
         self._stepped_metrics: list[dict[str, Any]] = []
+        self._results: list[dict[str, Any]] = []  # Structured data for derived metrics
         self._artifacts: list[ArtifactDescriptor] = []
         self._finalized = False
 
@@ -106,11 +108,8 @@ class Capture:
     def _setup_streaming_logger(self) -> None:
         """Set up the streaming file logger."""
         # Try to get a direct log path from the store (FileStore has this)
-        if hasattr(self._store, "get_log_path"):
+        if isinstance(self._store, SupportsLogPath):
             self._log_path = self._store.get_log_path(self._run_id, "run")
-        elif hasattr(self._store, "root"):
-            # Fallback: construct path manually for FileStore-like stores
-            self._log_path = Path(self._store.root) / "logs" / f"{self._run_id}_run.log"
         else:
             # Remote store - use artifact_dir as scratch space, upload at finalize
             self._log_path = self._artifact_dir / "run.log"
@@ -119,7 +118,9 @@ class Capture:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create file handler for streaming
-        self._log_handler = logging.FileHandler(self._log_path, mode="a", encoding="utf-8")
+        self._log_handler = logging.FileHandler(
+            self._log_path, mode="a", encoding="utf-8"
+        )
         self._log_handler.setLevel(logging.DEBUG)
 
         # Format includes logger name for distinguishing sources
@@ -179,7 +180,9 @@ class Capture:
         self._subscribed_loggers.append((logger, self._log_handler))
 
         # Log the subscription
-        self._logger.debug(f"Subscribed to logger: {name} (level={logging.getLevelName(level)})")
+        self._logger.debug(
+            f"Subscribed to logger: {name} (level={logging.getLevelName(level)})"
+        )
 
     def unsubscribe_logger(self, name: str) -> None:
         """
@@ -286,6 +289,72 @@ class Capture:
         """
         for name, value in values.items():
             self.metric(name, value, step=step)
+
+    def data(
+        self,
+        name: str,
+        obj: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Capture structured result data.
+
+        Data is stored in Postgres for fast access by derived metrics
+        and future Atlas visualization. Unlike artifacts, data is stored
+        inline in the database (as JSON), not as separate files.
+
+        Args:
+            name: The data name.
+            obj: The data object (numpy array, list, dict, or JSON-serializable).
+            metadata: Optional metadata to attach.
+
+        Supported types:
+            - numpy arrays (converted to nested lists, shape/dtype preserved)
+            - lists, nested lists
+            - dicts (JSON-serializable)
+            - scalars (int, float, str, bool)
+
+        Example:
+            # Store a transition matrix for derived metric computation
+            capture.data("transition_matrix", matrix)
+
+            # Store a dictionary of scores
+            capture.data("gene_scores", {"TP53": 0.8, "BRCA1": 0.6})
+
+            # Store intermediate data with metadata
+            capture.data("embeddings", embeddings, metadata={"dim": 128})
+        """
+        # Convert numpy arrays to serializable format while preserving metadata
+        if hasattr(obj, "tolist"):
+            # Numpy array or similar
+            serialized = obj.tolist()
+            dtype = str(obj.dtype) if hasattr(obj, "dtype") else None
+            shape = list(obj.shape) if hasattr(obj, "shape") else None
+        elif hasattr(obj, "numpy"):
+            # Torch tensor or similar - convert to numpy first
+            np_obj = obj.numpy()
+            serialized = np_obj.tolist()
+            dtype = str(np_obj.dtype)
+            shape = list(np_obj.shape)
+        else:
+            # Assume JSON-serializable (list, dict, scalar)
+            serialized = obj
+            dtype = None
+            shape = None
+
+        self._results.append({
+            "name": name,
+            "data": serialized,
+            "dtype": dtype,
+            "shape": shape,
+            "metadata": metadata or {},
+        })
+
+    @property
+    def results(self) -> list[dict[str, Any]]:
+        """Get the captured structured results."""
+        return list(self._results)
 
     def artifact(
         self,
@@ -470,15 +539,20 @@ class Capture:
 
         This is called by the executor in a finally block to ensure
         partial results are captured even on failure. Cleans up logging
-        handlers and uploads logs for remote stores.
+        handlers, converts stepped metrics to data entries, and uploads
+        logs for remote stores.
 
         Returns:
-            Dict containing metrics, artifacts, and logs.
+            Dict containing metrics, artifacts, results, and stepped_metrics.
         """
         if self._finalized:
             return self._get_summary()
 
         self._finalized = True
+
+        # Convert stepped metrics to data entries
+        # Group by name, create (step, value) pairs
+        self._convert_stepped_metrics_to_data()
 
         # Clean up subscribed loggers
         for logger, handler in self._subscribed_loggers:
@@ -501,26 +575,81 @@ class Capture:
             if self._logger and self._log_handler in self._logger.handlers:
                 self._logger.removeHandler(self._log_handler)
 
-        # For remote stores, upload the log file
-        # (FileStore writes directly, no upload needed)
+        # Upload logs for stores that need it
+        # - SupportsLogPath (FileStore/PostgresStore): writes directly to persistent path, no upload needed
+        # - Other stores with put_log: need explicit upload
         if self._log_path and self._log_path.exists():
-            if not hasattr(self._store, "get_log_path") and not hasattr(self._store, "root"):
-                # Remote store - upload via put_log
+            if not isinstance(self._store, SupportsLogPath) and hasattr(
+                self._store, "put_log"
+            ):
+                # Store needs explicit log upload
                 try:
                     log_content = self._log_path.read_text(encoding="utf-8")
                     self._store.put_log(self._run_id, "run", log_content)
                 except Exception:
                     pass  # Best effort
 
+        # Store results to stores that support structured results
+        if isinstance(self._store, SupportsStructuredResults):
+            for result in self._results:
+                try:
+                    self._store.put_result(
+                        self._run_id,
+                        result["name"],
+                        result["data"],
+                        dtype=result.get("dtype"),
+                        shape=result.get("shape"),
+                        metadata=result.get("metadata"),
+                    )
+                except Exception:
+                    pass  # Best effort - results stored in summary as fallback
+
         return self._get_summary()
+
+    def _convert_stepped_metrics_to_data(self) -> None:
+        """Convert accumulated stepped metrics to data entries."""
+        if not self._stepped_metrics:
+            return
+
+        # Group by name
+        stepped_by_name: dict[str, list[tuple[int, Any]]] = {}
+        for entry in self._stepped_metrics:
+            name = entry["name"]
+            if name not in stepped_by_name:
+                stepped_by_name[name] = []
+            stepped_by_name[name].append((entry["step"], entry["value"]))
+
+        # Convert each group to a data entry
+        for name, values in stepped_by_name.items():
+            # Sort by step
+            values.sort(key=lambda x: x[0])
+
+            # Add as data entry
+            self._results.append({
+                "name": name,
+                "data": values,  # List of (step, value) tuples
+                "dtype": None,
+                "shape": [len(values), 2],
+                "metadata": {"type": "stepped_metric"},
+            })
 
     def _get_summary(self) -> dict[str, Any]:
         """Get a summary of captured data."""
         return {
             "metrics": self._metrics,
             "stepped_metrics": self._stepped_metrics,
+            "results": self._results,
             "artifacts": self._artifacts,
         }
+
+    def __enter__(self) -> "Capture":
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit context manager, ensuring finalize() is called."""
+        if not self._finalized:
+            self.finalize()
 
     @staticmethod
     def _compute_hash(path: Path) -> str:

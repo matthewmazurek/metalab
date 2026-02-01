@@ -7,8 +7,8 @@ Provides:
 - SlurmRunHandle: Handle for tracking SLURM job execution
 
 This implementation uses index-addressed SLURM arrays where each array task
-computes its parameters from SLURM_ARRAY_TASK_ID, avoiding the per-task
-pickle overhead of submitit's map_array approach.
+computes its parameters from SLURM_ARRAY_TASK_ID, avoiding per-task
+serialization overhead.
 
 Job state tracking:
 - Uses squeue for active job counts (RUNNING, PENDING)
@@ -40,10 +40,69 @@ if TYPE_CHECKING:
     from metalab.operation import OperationWrapper
     from metalab.store.base import Store
 
+from metalab.store.capabilities import SupportsWorkingDirectory
+
+
+def _get_store_path(store: "Store") -> Path:
+    """
+    Get the filesystem working directory from a store.
+
+    Args:
+        store: The store instance.
+
+    Returns:
+        Path to the store's working directory.
+
+    Raises:
+        TypeError: If the store doesn't support SupportsWorkingDirectory.
+    """
+    if isinstance(store, SupportsWorkingDirectory):
+        return store.get_working_directory()
+    raise TypeError(
+        f"SLURM executor requires a store that supports filesystem access "
+        f"(SupportsWorkingDirectory capability). Got {type(store).__name__}. "
+        f"Use FileStore or a store with get_working_directory() method."
+    )
+
+
 logger = logging.getLogger(__name__)
 
 # Default maximum array size (many clusters limit this)
 DEFAULT_MAX_ARRAY_SIZE = 10000
+
+
+def _serialize_context_spec(obj: Any) -> Any:
+    """
+    Serialize a context spec to a JSON-compatible structure with type preservation.
+
+    Handles dataclasses (FilePath, DirPath, context_spec decorated classes),
+    dicts, lists, and primitives. Type information is preserved via __type__ keys.
+
+    Args:
+        obj: The context spec object to serialize.
+
+    Returns:
+        A JSON-serializable structure.
+    """
+    import dataclasses
+
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_serialize_context_spec(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _serialize_context_spec(v) for k, v in obj.items()}
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        # Preserve type information for reconstruction
+        type_name = type(obj).__module__ + "." + type(obj).__qualname__
+        fields = {
+            f.name: _serialize_context_spec(getattr(obj, f.name))
+            for f in dataclasses.fields(obj)
+        }
+        return {"__type__": type_name, **fields}
+
+    # Fallback: convert to string
+    return str(obj)
 
 
 @dataclass
@@ -341,23 +400,26 @@ def get_slurm_status_counts(
 
     # Count other states
     known_states = {
-        "RUNNING", "PENDING", "COMPLETING",
-        "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"
+        "RUNNING",
+        "PENDING",
+        "COMPLETING",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
     }
 
     other_from_squeue = sum(
-        count for state, count in squeue_counts.items()
-        if state not in known_states
+        count for state, count in squeue_counts.items() if state not in known_states
     )
     other_from_sacct = sum(
-        count for state, count in terminal_counts.items()
-        if state not in known_states
+        count for state, count in terminal_counts.items() if state not in known_states
     )
 
     # Calculate other as: total - accounted
     accounted = (
-        running + pending + completing +
-        completed + failed + cancelled + timeout + oom
+        running + pending + completing + completed + failed + cancelled + timeout + oom
     )
 
     # Add transitional states from squeue to 'other'
@@ -449,7 +511,9 @@ def _generate_sbatch_script(
 
     # Worker invocation
     lines.append("# Run the metalab array worker")
-    lines.append(f'python -m metalab.executor.slurm_array_worker --store "{store_root}"')
+    lines.append(
+        f'python -m metalab.executor.slurm_array_worker --store "{store_root}"'
+    )
 
     return "\n".join(lines)
 
@@ -469,8 +533,8 @@ def _write_array_spec(
     """
     Write the array spec file that workers use to reconstruct runs.
 
-    The context spec is pickled separately to handle arbitrary Python objects
-    (dataclasses, custom types, etc.) without manual serialization logic.
+    The context spec is serialized to JSON with type information preserved
+    for dataclasses (FilePath, DirPath, context_spec decorated classes).
 
     Args:
         store_root: Path to the store root.
@@ -479,16 +543,14 @@ def _write_array_spec(
         shards: List of shard info dicts with job_id, start_idx, end_idx.
         chunk_size: Number of runs per array task.
     """
-    import pickle
-
     from metalab.manifest import serialize
 
     total_runs = len(experiment.params) * len(experiment.seeds)  # type: ignore[arg-type]
 
-    # Pickle context spec separately - handles any Python object automatically
-    context_pkl_path = store_root / "context_spec.pkl"
-    with open(context_pkl_path, "wb") as f:
-        pickle.dump(experiment.context, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # Serialize context spec to JSON with type preservation
+    context_json_path = store_root / "context_spec.json"
+    with open(context_json_path, "w") as f:
+        json.dump(_serialize_context_spec(experiment.context), f, indent=2)
 
     spec = {
         "experiment_id": experiment.experiment_id,
@@ -528,7 +590,7 @@ class SlurmExecutor:
     3. Each array task reconstructs its parameters from SLURM_ARRAY_TASK_ID
 
     This approach scales to hundreds of thousands of tasks without the
-    filesystem overhead of per-task pickle files.
+    filesystem overhead of per-task serialization files.
     """
 
     def __init__(self, config: SlurmConfig | None = None) -> None:
@@ -575,7 +637,7 @@ class SlurmExecutor:
                 f"Use grid() or manual() instead of random()."
             )
 
-        store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
+        store_path = _get_store_path(store)
 
         # Create logs directory
         logs_dir = store_path / "slurm_logs"
@@ -679,12 +741,14 @@ class SlurmExecutor:
             else:
                 array_range = f"0-{array_end}"
 
-            shards.append({
-                "start_idx": start_idx,
-                "end_idx": end_idx,
-                "array_range": array_range,
-                "job_id": None,  # Set after submission
-            })
+            shards.append(
+                {
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "array_range": array_range,
+                    "job_id": None,  # Set after submission
+                }
+            )
 
             start_idx = end_idx + 1
 
@@ -780,7 +844,7 @@ class SlurmExecutor:
         skipped_count: int = 0,
     ) -> None:
         """Write the lightweight manifest for reconnection and Atlas."""
-        store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
+        store_path = _get_store_path(store)
         manifest_path = store_path / "manifest.json"
 
         manifest = {
@@ -853,6 +917,14 @@ class SlurmExecutor:
         """No-op for SLURM executor (jobs run independently)."""
         pass
 
+    def __enter__(self) -> "SlurmExecutor":
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Exit context manager."""
+        self.shutdown(wait=True)
+
 
 # ---------------------------------------------------------------------------
 # SlurmRunHandle
@@ -902,7 +974,7 @@ class SlurmRunHandle:
         self._on_event = on_event
 
         # Compute store path for .done marker counting
-        self._store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
+        self._store_path = _get_store_path(store)
 
         # Cache for sacct results (expensive to query)
         self._sacct_cache: dict[str, int] | None = None
@@ -985,8 +1057,13 @@ class SlurmRunHandle:
 
         # Convert chunk counts to approximate run counts
         # (last chunk may have fewer runs, but this is a reasonable estimate)
-        running_runs = min(running_chunks * self._chunk_size, self._total_runs - completed)
-        pending_runs = min(pending_chunks * self._chunk_size, self._total_runs - completed - running_runs)
+        running_runs = min(
+            running_chunks * self._chunk_size, self._total_runs - completed
+        )
+        pending_runs = min(
+            pending_chunks * self._chunk_size,
+            self._total_runs - completed - running_runs,
+        )
 
         # Failed = total - completed - running - pending (when all chunks done)
         remaining = self._total_runs - completed - running_runs - pending_runs
@@ -1044,12 +1121,19 @@ class SlurmRunHandle:
         )
 
         # Estimate run counts
-        running_runs = min(running_chunks * self._chunk_size, self._total_runs - completed)
-        pending_runs = min(pending_chunks * self._chunk_size, self._total_runs - completed - running_runs)
+        running_runs = min(
+            running_chunks * self._chunk_size, self._total_runs - completed
+        )
+        pending_runs = min(
+            pending_chunks * self._chunk_size,
+            self._total_runs - completed - running_runs,
+        )
 
         # Failed runs: when all chunks done, remaining = failed
         remaining = self._total_runs - completed - running_runs - pending_runs
-        failed_runs = max(0, remaining) if running_chunks == 0 and pending_chunks == 0 else 0
+        failed_runs = (
+            max(0, remaining) if running_chunks == 0 and pending_chunks == 0 else 0
+        )
 
         return {
             "running": running_runs,
@@ -1073,7 +1157,8 @@ class SlurmRunHandle:
         if (
             self._sacct_cache is not None
             and self._sacct_cache_time is not None
-            and (now - self._sacct_cache_time).total_seconds() < self._sacct_cache_ttl_seconds
+            and (now - self._sacct_cache_time).total_seconds()
+            < self._sacct_cache_ttl_seconds
         ):
             return self._sacct_cache
 
@@ -1188,7 +1273,7 @@ class SlurmRunHandle:
         Raises:
             FileNotFoundError: If no manifest exists in the store.
         """
-        store_path = Path(store.root) if hasattr(store, "root") else Path(".")  # type: ignore[union-attr]
+        store_path = _get_store_path(store)
         manifest_path = store_path / "manifest.json"
 
         if not manifest_path.exists():

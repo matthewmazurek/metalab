@@ -115,27 +115,51 @@ Record metrics, artifacts, and logs during execution:
 def train(params, seeds, capture):
     capture.log("Starting training")
     
-    # Scalar metrics
+    # Scalar metrics - immediate Atlas visualization
     capture.metric("accuracy", 0.95)
     capture.metric("loss", 0.05)
     
     # Multiple metrics at once
     capture.log_metrics({"precision": 0.92, "recall": 0.89})
     
-    # Time-series metrics
+    # Time-series metrics (converted to structured data at finalize)
     for epoch, loss in enumerate(losses):
         capture.metric("train_loss", loss, step=epoch)
         capture.log(f"Epoch {epoch}: loss={loss:.4f}")
     
-    # Artifacts (auto-serialized)
-    capture.artifact("predictions", predictions_array)  # NumPy array
-    capture.artifact("config", {"model": "resnet", "layers": 50})  # JSON
+    # Structured data - for derived metrics computation
+    capture.data("confusion_matrix", confusion_matrix)  # NumPy array
+    capture.data("gene_scores", {"TP53": 0.8, "BRCA1": 0.6})  # Dict
+    
+    # Artifacts (files on disk for forensics)
+    capture.artifact("model_weights", weights, kind="numpy")  # Large arrays
+    capture.artifact("config", {"model": "resnet"})  # JSON
     
     # Matplotlib figures
     capture.figure("learning_curve", fig)
     
     capture.log("Training completed")
     # No return needed - success is implicit
+```
+
+**Data Types Hierarchy**:
+
+| Method | Data Type | Storage | Atlas Availability |
+|--------|-----------|---------|-------------------|
+| `capture.metric()` | Scalars | RunRecord.metrics | Immediate (plots, tables) |
+| `capture.data()` | Arrays, matrices, dicts | PostgreSQL `results` table | Via derived metrics |
+| `capture.artifact()` | Files | FileStore | Preview/download only |
+
+Use `capture.data()` for structured results that you want to analyze via derived metrics. Unlike artifacts, data is stored inline in PostgreSQL for fast access:
+
+```python
+# In your operation
+capture.data("transition_matrix", matrix)
+
+# In a derived metric function
+def compute_metrics(run):
+    matrix = run.data("transition_matrix")  # Fast: from PostgreSQL
+    return {"sparsity": np.count_nonzero(matrix) / matrix.size}
 ```
 
 ### Logging
@@ -231,7 +255,26 @@ def normalized_score(run) -> dict[str, Metric]:
     lr = run.params["learning_rate"]
     score = run.metrics["score"]
     return {"normalized_score": score / lr}
+
+def matrix_metrics(run) -> dict[str, Metric]:
+    """Compute metrics from structured data captured with capture.data()."""
+    # Load structured data (fast: from PostgreSQL, not filesystem)
+    matrix = run.data("transition_matrix")
+    return {
+        "sparsity": float(np.count_nonzero(matrix) / matrix.size),
+        "max_value": float(matrix.max()),
+    }
 ```
+
+**Accessing Run Data**:
+
+| Method | Source | Use Case |
+|--------|--------|----------|
+| `run.metrics` | RunRecord.metrics | Scalar metrics captured during run |
+| `run.params` | RunRecord.params_resolved | Parameter values for this run |
+| `run.artifact(name)` | FileStore | Large files (images, models) |
+| `run.data(name)` | PostgreSQL results table | Structured data for derived computation |
+| `run.derived` | PostgreSQL/FileStore | Previously computed derived metrics |
 
 **Option 1: Compute at run time (worker-side)**
 
@@ -596,11 +639,50 @@ metalab supports multiple storage backends through **store locators** (URI-style
 handle = metalab.run(exp, store="./runs/my_exp")
 handle = metalab.run(exp, store="file:///absolute/path/to/store")
 
-# PostgresStore - stores runs in PostgreSQL (requires psycopg)
-handle = metalab.run(exp, store="postgresql://user@localhost:5432/metalab")
+# PostgresStore - PostgreSQL with FileStore composition (requires psycopg)
+# experiments_root is required: specifies where experiment directories are stored
+# Metalab automatically creates experiment subdirectories: {experiments_root}/{experiment_id}/
+handle = metalab.run(exp, store="postgresql://user@localhost/metalab?experiments_root=/shared/experiments")
+# With exp.experiment_id = "my_exp:1.0", files go to /shared/experiments/my_exp_1.0/logs/
 
-# With query parameters
-handle = metalab.run(exp, store="postgresql://localhost/db?schema=myschema&artifact_root=/data")
+# With multiple parameters
+handle = metalab.run(exp, store="postgresql://localhost/db?schema=myschema&experiments_root=/shared/experiments")
+```
+
+**PostgresStore Architecture**: PostgresStore composes with FileStore internally:
+
+| Data Type | Storage Location | Notes |
+|-----------|-----------------|-------|
+| Run records | PostgreSQL (primary) + FileStore (fallback) | Indexed for fast queries |
+| Logs | FileStore | Streaming via Python logger |
+| Artifacts | FileStore | File-backed storage |
+| Structured data | PostgreSQL `results` table | For derived metrics |
+| Derived metrics | PostgreSQL + FileStore | Post-hoc computed values |
+| Field catalog | PostgreSQL | Atlas UI optimization |
+
+**Why this architecture?**
+- **Streaming logs**: Logs are written directly to filesystem via Python's logging module, enabling real-time visibility (`tail -f`) and crash resilience
+- **Automatic fallback**: If PostgreSQL becomes unavailable, run records fall back to FileStore
+- **HPC compatibility**: `experiments_root` can point to shared filesystem (NFS/Lustre) for SLURM coordination
+
+Example for HPC/SLURM:
+
+```python
+# Shared filesystem for SLURM workers
+# experiments_root points to shared storage - metalab creates subdirectories per experiment
+store = "postgresql://host/db?schema=myschema&experiments_root=/shared/experiments"
+handle = metalab.run(exp, store=store, executor=metalab.SlurmExecutor(...))
+# With exp.experiment_id = "gene_perturb:2.0", files go to:
+#   /shared/experiments/gene_perturb_2.0/logs/
+#   /shared/experiments/gene_perturb_2.0/artifacts/
+```
+
+**Atlas with PostgresStore**: When viewing experiments in Atlas, use `--experiments-root` to point
+to the shared experiments directory:
+
+```bash
+# Atlas finds experiments by looking in {experiments_root}/{experiment_id}/
+metalab-atlas serve --store "postgresql://host/db" --experiments-root /shared/experiments
 ```
 
 Install PostgreSQL support:
@@ -609,10 +691,11 @@ Install PostgreSQL support:
 uv add metalab[postgres]
 ```
 
-**Why PostgreSQL?** For large experiments (100k+ runs), the file-based storage can become slow for queries. PostgreSQL provides:
+**Why PostgreSQL?** For large experiments (100k+ runs), file-based storage becomes slow for queries. PostgreSQL provides:
 - Efficient querying without loading all JSON files
 - Concurrent writes from SLURM array jobs
 - SQL-based aggregation for Atlas dashboards
+- Fast access to structured data for derived metrics
 
 ### Store Factory
 
@@ -631,7 +714,27 @@ locator = to_locator(store)  # "file:///absolute/path/to/runs/exp"
 
 ### Fallback Storage
 
-Use `FallbackStore` to write to a primary store with automatic fallback:
+For runtime resilience, use `fallback=True` to automatically wrap your store with a FileStore fallback. If the primary store (e.g., PostgreSQL) becomes unavailable during execution, writes automatically fall back to the local FileStore:
+
+```python
+# Simple: Postgres primary with automatic FileStore fallback at ./runs/{exp.name}
+handle = metalab.run(
+    exp,
+    store="postgresql://localhost/db",
+    fallback=True,
+)
+
+# With options
+handle = metalab.run(
+    exp,
+    store="postgresql://localhost/db",
+    fallback=True,
+    fallback_root="./runs",      # Default: "./runs"
+    write_to_both=True,          # Default: True (writes to both for redundancy)
+)
+```
+
+For manual control, you can use `FallbackStore` directly:
 
 ```python
 from metalab.store import FallbackStore, create_store
@@ -694,9 +797,33 @@ For HPC/SLURM environments:
 
 ```bash
 # Submit PostgreSQL as a SLURM job
-metalab postgres start --store /scratch/runs/my_exp --slurm
+metalab postgres start --experiments-root /scratch/experiments --slurm
 
-# Workers discover the service automatically via {store}/services/postgres/service.json
+# Workers discover the service automatically via {experiments_root}/services/postgres/service.json
+```
+
+For HPC/SLURM with password auth and a ready-to-use PostgresStore locator:
+
+```bash
+# Start PostgreSQL with SCRAM auth (password can be provided or auto-generated)
+metalab postgres start \
+  --slurm \
+  --experiments-root /scratch/experiments \
+  --auth-method scram-sha-256 \
+  --password "$PG_PASSWORD" \
+  --print-store-locator
+
+# Re-print the store locator later
+metalab postgres status \
+  --experiments-root /scratch/experiments \
+  --store-locator
+```
+
+Minimal experiment run (copy the printed store locator):
+
+```python
+store = "postgresql://user:password@host:5432/metalab?experiments_root=/scratch/experiments"
+handle = metalab.run(exp, store=store, executor=metalab.SlurmExecutor(...))
 ```
 
 The service manager handles:
@@ -712,6 +839,8 @@ When you run an experiment, metalab automatically saves an experiment manifest c
 ```
 {store}/experiments/{experiment_id}_{timestamp}.json
 ```
+
+**Note for PostgresStore**: manifests are stored in Postgres (the `experiment_manifests` table). The on-disk `{store}/experiments/...` path applies to filesystem-backed stores (e.g. `FileStore`).
 
 The manifest includes:
 - Experiment metadata (name, version, description, tags)
@@ -755,6 +884,60 @@ The metadata is:
 - **Not fingerprinted** - changing metadata does not create new runs
 
 This is useful for capturing experiment-level details that are derived from your input data (e.g., group labels, sample counts) or documentation (author, notes) without affecting deduplication.
+
+## Best Practices
+
+### Resource Management with Context Managers
+
+Executors, stores, and capture objects support context managers for automatic cleanup. Using `with` statements ensures resources are properly released even if exceptions occur.
+
+**Executors**: When using executors directly (without `metalab.run()`), wrap them in a context manager to ensure proper shutdown:
+
+```python
+from metalab import ThreadExecutor, ProcessExecutor
+
+# Thread executor with automatic shutdown
+with ThreadExecutor(max_workers=4) as executor:
+    handle = executor.submit(payloads, store, operation)
+    results = handle.result()
+# Thread pool is automatically shut down here
+
+# Process executor
+with ProcessExecutor(max_workers=4) as executor:
+    handle = executor.submit(payloads, store, operation)
+    results = handle.result()
+# Process pool is automatically shut down here
+```
+
+**PostgresStore**: Use a context manager to ensure database connections are properly closed:
+
+```python
+from metalab.store import create_store
+
+# Connection pool automatically closed
+with create_store("postgresql://localhost/db") as store:
+    results = store.list_runs()
+    # ... work with store
+# Connection pool closed here
+```
+
+**Progress Handles**: When using progress tracking, the context manager ensures the display is properly cleaned up:
+
+```python
+handle = metalab.run(exp, progress=True)
+
+# Option 1: Use result() which auto-cleans up progress
+results = handle.result()
+
+# Option 2: Context manager for manual control
+with handle:
+    while not handle.is_complete:
+        print(handle.status)
+        time.sleep(5)
+# Progress display cleaned up here
+```
+
+**Note**: The high-level `metalab.run()` API handles resource management automatically—you only need explicit context managers when working with lower-level components directly.
 
 ## Development
 

@@ -83,22 +83,19 @@ def execute_payload(
         worker_id=worker_id,
     )
 
-    # Set up third-party log capture if requested
+    # Set up third-party log capture if requested (additive, not replacing handlers)
     log_buffer: io.StringIO | None = None
-    old_handlers: list[logging.Handler] = []
-    old_level: int = logging.WARNING
+    root_log_handler: logging.Handler | None = None
 
     if capture_third_party_logs:
         log_buffer = io.StringIO()
-        log_handler = logging.StreamHandler(log_buffer)
-        log_handler.setFormatter(
+        root_log_handler = logging.StreamHandler(log_buffer)
+        root_log_handler.setFormatter(
             logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
-        root_logger = logging.getLogger()
-        old_handlers = root_logger.handlers[:]
-        old_level = root_logger.level
-        root_logger.handlers = [log_handler]
-        root_logger.setLevel(logging.DEBUG)
+        root_log_handler.setLevel(logging.DEBUG)
+        # Add handler additively - don't replace existing handlers
+        logging.getLogger().addHandler(root_log_handler)
 
     # Write RUNNING record before execution
     running_record = RunRecord.running(
@@ -162,6 +159,12 @@ def execute_payload(
         if derived_metric_refs:
             _compute_derived_metrics(result, store, derived_metric_refs)
 
+        # Persist final record for durability (survives crashes/disconnects)
+        try:
+            store.put_run_record(result)
+        except Exception as e:
+            logger.warning(f"Failed to persist final record for {run_id}: {e}")
+
         return result
 
     except Exception as e:
@@ -171,7 +174,7 @@ def execute_payload(
         finished_at = datetime.now()
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
-        return RunRecord.failed(
+        result = RunRecord.failed(
             run_id=run_id,
             experiment_id=experiment_id,
             context_fingerprint=fingerprints.get("context", ""),
@@ -191,17 +194,25 @@ def execute_payload(
             artifacts=capture_data["artifacts"],
         )
 
+        # Persist failed record for durability
+        try:
+            store.put_run_record(result)
+        except Exception as persist_err:
+            logger.warning(f"Failed to persist failed record for {run_id}: {persist_err}")
+
+        return result
+
     finally:
-        # Restore logging handlers if we captured them
-        if capture_third_party_logs and log_buffer is not None:
-            root_logger = logging.getLogger()
-            root_logger.handlers = old_handlers
-            root_logger.setLevel(old_level)
+        # Remove our handler from root logger (clean up additive handler)
+        if root_log_handler is not None:
+            logging.getLogger().removeHandler(root_log_handler)
+            root_log_handler.close()
 
             # Save third-party logging output if any
-            log_content = log_buffer.getvalue()
-            if log_content:
-                store.put_log(run_id, "logging", log_content)
+            if log_buffer is not None:
+                log_content = log_buffer.getvalue()
+                if log_content:
+                    store.put_log(run_id, "logging", log_content)
 
 
 def _compute_derived_metrics(

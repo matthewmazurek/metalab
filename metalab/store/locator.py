@@ -182,6 +182,7 @@ class StoreFactory:
         # Register PostgresStore (optional dependency)
         try:
             from metalab.store.postgres import PostgresStore
+
             cls.register("postgresql", PostgresStore)
             cls.register("postgres", PostgresStore)
         except ImportError:
@@ -273,13 +274,23 @@ class StoreFactory:
                 return backend_class(info.path, **kwargs)
             elif info.scheme in ("postgresql", "postgres"):
                 # PostgresStore accepts the full connection string
-                # Extract artifact_root from kwargs or params
-                artifact_root = kwargs.pop("artifact_root", None) or info.params.get("artifact_root")
+                # Extract experiments_root from kwargs or params
+                experiments_root = kwargs.pop(
+                    "experiments_root", None
+                ) or info.params.get("experiments_root")
+                if experiments_root is None:
+                    raise ValueError(
+                        "PostgresStore requires 'experiments_root' parameter. "
+                        "Example: postgresql://host/db?experiments_root=/shared/experiments"
+                    )
+                # Extract experiment_id for nested FileStore directory
+                experiment_id = kwargs.pop("experiment_id", None)
                 return backend_class(
                     locator,
+                    experiments_root=experiments_root,
+                    experiment_id=experiment_id,
                     connect_timeout=connect_timeout,
-                    artifact_root=artifact_root,
-                    **kwargs
+                    **kwargs,
                 )
             else:
                 # Generic: pass locator info

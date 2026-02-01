@@ -56,13 +56,17 @@ class TestParseLocator:
 
     def test_parse_postgres_with_params(self):
         """Parse postgresql:// URL with query params."""
-        info = parse_locator("postgresql://localhost/db?schema=myschema&artifact_root=/path")
+        info = parse_locator(
+            "postgresql://localhost/db?schema=myschema&experiments_root=/shared/experiments"
+        )
         assert info.params.get("schema") == "myschema"
-        assert info.params.get("artifact_root") == "/path"
+        assert info.params.get("experiments_root") == "/shared/experiments"
 
     def test_parse_auto_url(self):
         """Parse auto:// URL with fallback."""
-        info = parse_locator("auto://?primary=postgresql://localhost/db&fallback=file:///tmp")
+        info = parse_locator(
+            "auto://?primary=postgresql://localhost/db&fallback=file:///tmp"
+        )
         assert info.scheme == "auto"
         assert info.params.get("primary") == "postgresql://localhost/db"
         assert info.params.get("fallback") == "file:///tmp"
@@ -150,4 +154,6 @@ class TestFallback:
             except ValueError as e:
                 # PostgresStore not available (psycopg not installed)
                 # This is also a valid outcome
-                assert "PostgreSQL store not yet implemented" in str(e) or "Unknown store scheme" in str(e)
+                assert "PostgreSQL store not yet implemented" in str(
+                    e
+                ) or "Unknown store scheme" in str(e)

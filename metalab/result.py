@@ -13,6 +13,7 @@ Provides:
 from __future__ import annotations
 
 import inspect
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
     from metalab.derived import DerivedMetricFn
     from metalab.store.base import Store
 
+from metalab.store.capabilities import (
+    SupportsArtifactOpen,
+    SupportsStructuredResults,
+)
 from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 
@@ -265,7 +270,6 @@ class Run:
         from metalab.capture.registry import SerializerRegistry
 
         registry = SerializerRegistry()
-        data_path = Path(descriptor.uri)
 
         # Find appropriate serializer by kind
         serializer = registry.get(descriptor.kind)
@@ -273,7 +277,38 @@ class Run:
             # Fall back to reading raw bytes
             return self._store.get_artifact(descriptor.uri)
 
-        return serializer.load(data_path)
+        uri = descriptor.uri
+
+        # Check if URI is a simple filesystem path (no scheme or file://)
+        # These can be loaded directly by the serializer
+        is_filesystem_path = "://" not in uri or uri.startswith("file://")
+        if is_filesystem_path:
+            # Strip file:// prefix if present
+            path_str = uri.replace("file://", "") if uri.startswith("file://") else uri
+            return serializer.load(Path(path_str))
+
+        # Non-filesystem URI (e.g., pgblob://) - use store capability to open
+        if isinstance(self._store, SupportsArtifactOpen):
+            with self._store.open_artifact(uri) as f:
+                ext = f".{descriptor.format}" if descriptor.format else ""
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(f.read())
+                    tmp_path = Path(tmp.name)
+                try:
+                    return serializer.load(tmp_path)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+
+        # Fall back to get_artifact + temp file for stores without open_artifact
+        data = self._store.get_artifact(uri)
+        ext = f".{descriptor.format}" if descriptor.format else ""
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
+        try:
+            return serializer.load(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def artifacts(self) -> list[ArtifactDescriptor]:
         """
@@ -283,6 +318,63 @@ class Run:
             List of artifact descriptors.
         """
         return self._store.list_artifacts(self.run_id)
+
+    def data(self, name: str) -> Any:
+        """
+        Load structured result data by name.
+
+        Structured data is stored via capture.data() and is optimized for
+        fast access by derived metric functions. With PostgresStore, data is
+        stored inline in the database (as JSON). With FileStore, data is stored
+        in JSON files at results/{run_id}/{name}.json.
+
+        Args:
+            name: The data name.
+
+        Returns:
+            The data object. Arrays are returned as numpy arrays if
+            shape/dtype metadata is available.
+
+        Raises:
+            KeyError: If the data doesn't exist.
+
+        Example:
+            # In a derived metric function
+            def compute_metrics(run: Run) -> dict:
+                matrix = run.data("transition_matrix")
+                return {"sparsity": np.count_nonzero(matrix) / matrix.size}
+        """
+        if not isinstance(self._store, SupportsStructuredResults):
+            raise NotImplementedError(
+                f"Store {type(self._store).__name__} does not support structured results."
+            )
+
+        result = self._store.get_result(self.run_id, name)
+        if result is None:
+            raise KeyError(f"Result '{name}' not found in run {self.run_id}")
+
+        data = result["data"]
+
+        # Reconstruct numpy array if metadata available
+        if result.get("shape") and result.get("dtype"):
+            try:
+                import numpy as np
+                return np.array(data, dtype=result["dtype"]).reshape(result["shape"])
+            except ImportError:
+                pass  # numpy not available, return raw data
+
+        return data
+
+    def list_data(self) -> list[str]:
+        """
+        List available structured data names for this run.
+
+        Returns:
+            List of data names.
+        """
+        if not isinstance(self._store, SupportsStructuredResults):
+            return []
+        return self._store.list_results(self.run_id)
 
     @property
     def derived(self) -> dict[str, Any]:

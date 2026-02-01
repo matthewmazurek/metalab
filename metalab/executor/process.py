@@ -45,7 +45,7 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
     # Resolve operation from reference
     operation = import_operation(payload.operation_ref)
 
-    # Create store from locator
+    # Create store from locator (supports both file paths and postgres URIs)
     store = create_store(payload.store_locator)
 
     # Execute using shared logic
@@ -142,6 +142,14 @@ class ProcessExecutor:
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the process pool."""
         self._pool.shutdown(wait=wait)
+
+    def __enter__(self) -> "ProcessExecutor":
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Exit context manager, ensuring shutdown is called."""
+        self.shutdown(wait=True)
 
 
 class _ResultWrapper:
