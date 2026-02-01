@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
@@ -288,8 +288,9 @@ def start_postgres_local(
     # Fall back to local binaries
     binaries = _find_postgres_binaries()
     if all(binaries.values()):
+        resolved_binaries = cast(dict[str, Path], binaries)
         return _start_postgres_native(
-            config, service_dir, service_file, binaries, password
+            config, service_dir, service_file, resolved_binaries, password
         )
 
     raise RuntimeError(
@@ -646,13 +647,20 @@ if [ -n "$missing_bins" ]; then
 fi
 
 # Setup PGDATA
-export PGDATA="{data_dir}"
+export PGDATA_BASE="{data_dir}"
+export PGDATA="$PGDATA_BASE"
+if [ -d "$PGDATA_BASE" ] && [ ! -f "$PGDATA_BASE/PG_VERSION" ]; then
+    if [ -n "$(ls -A "$PGDATA_BASE" 2>/dev/null)" ]; then
+        # Avoid initdb on a mount point with dotfiles.
+        export PGDATA="$PGDATA_BASE/pgdata"
+    fi
+fi
+mkdir -p "$PGDATA"
 PASSWORD={json.dumps(password_literal)}
 
 # Initialize if needed
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "Initializing PostgreSQL data directory..."
-    mkdir -p "$PGDATA"
     if [ -n "$PASSWORD" ]; then
         PWFILE="$PGDATA/.pgpass_init"
         printf "%s" "$PASSWORD" > "$PWFILE"
@@ -686,7 +694,7 @@ cat > "{service_file}" << EOF
     "database": "{config.database}",
     "user": "{config.user}",
     "password": {json.dumps(password)},
-    "pgdata": "{data_dir}",
+    "pgdata": "$PGDATA",
     "slurm_job_id": "$SLURM_JOB_ID",
     "started_at": "$(date -Iseconds)",
     "connection_string": "postgresql://{auth_prefix}@$HOSTNAME:{config.port}/{config.database}"
