@@ -29,9 +29,161 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+if TYPE_CHECKING:
+    from metalab.store.base import Store
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_store_from_spec(spec: dict[str, Any], work_dir: Path) -> "Store":
+    """
+    Resolve the store backend from the array spec.
+
+    For Postgres locators without embedded credentials, reads the DSN from
+    `{experiments_root}/services/postgres/service.json`.
+
+    Args:
+        spec: The loaded array spec dictionary.
+        work_dir: Path to the working directory (experiments_root).
+
+    Returns:
+        Configured Store instance.
+    """
+    from metalab.store import create_store
+
+    # Check for store_locator in spec (new format)
+    store_locator = spec.get("store_locator")
+    experiments_root = spec.get("experiments_root", str(work_dir))
+    experiment_id = spec.get("experiment_id")
+
+    if store_locator is None:
+        # Fallback for old spec format: use work_dir as FileStore
+        logger.debug("No store_locator in spec, using FileStore at work_dir")
+        return create_store(str(work_dir))
+
+    # Parse the locator to determine scheme
+    parsed = urlparse(store_locator)
+
+    # File scheme or path: use directly (FileStore doesn't use experiment_id)
+    if parsed.scheme in ("file", "") or (parsed.scheme and len(parsed.scheme) == 1):
+        # len==1 catches Windows drive letters like "C:"
+        logger.debug(f"Using FileStore from locator: {store_locator}")
+        return create_store(store_locator)
+
+    # PostgreSQL scheme: may need credential resolution
+    if parsed.scheme in ("postgresql", "postgres"):
+        resolved_locator = _resolve_postgres_locator(
+            store_locator, experiments_root, experiment_id or "unknown"
+        )
+        logger.debug("Using PostgresStore with resolved locator")
+        # PostgresStore uses experiment_id for nested FileStore directory
+        return create_store(resolved_locator, experiment_id=experiment_id)
+
+    # Unknown scheme: try directly
+    logger.warning(f"Unknown store locator scheme '{parsed.scheme}', trying directly")
+    return create_store(store_locator)
+
+
+def _resolve_postgres_locator(
+    locator: str, experiments_root: str, experiment_id: str
+) -> str:
+    """
+    Resolve a Postgres locator by filling in credentials from service.json if needed.
+
+    Args:
+        locator: The Postgres connection URI.
+        experiments_root: Path to experiments root directory.
+        experiment_id: The experiment ID (for logging).
+
+    Returns:
+        Resolved Postgres connection URI with credentials.
+    """
+    parsed = urlparse(locator)
+
+    # If password is already present, use as-is
+    if parsed.password:
+        logger.debug("Postgres locator already has password, using as-is")
+        # Ensure experiments_root is in query params
+        return _ensure_experiments_root_param(locator, experiments_root)
+
+    # Try to load credentials from service.json
+    service_json_path = Path(experiments_root) / "services" / "postgres" / "service.json"
+
+    if not service_json_path.exists():
+        logger.warning(
+            f"Postgres service.json not found at {service_json_path}, "
+            f"attempting connection without password"
+        )
+        return _ensure_experiments_root_param(locator, experiments_root)
+
+    try:
+        with open(service_json_path) as f:
+            service_info = json.load(f)
+
+        # Prefer connection_string from service.json if available
+        if "connection_string" in service_info:
+            base_dsn = service_info["connection_string"]
+            logger.debug("Using connection_string from service.json")
+            return _ensure_experiments_root_param(base_dsn, experiments_root)
+
+        # Otherwise build from individual fields
+        password = service_info.get("password")
+        if password:
+            # Rebuild the URL with password
+            netloc = parsed.netloc
+            if "@" in netloc:
+                userinfo, hostinfo = netloc.rsplit("@", 1)
+                if ":" in userinfo:
+                    user = userinfo.split(":")[0]
+                else:
+                    user = userinfo
+            else:
+                user = service_info.get("user", "")
+                hostinfo = netloc
+
+            # URL-encode password in case it contains special chars
+            from urllib.parse import quote
+
+            new_netloc = f"{user}:{quote(password, safe='')}@{hostinfo}"
+            resolved = urlunparse(
+                (parsed.scheme, new_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+            )
+            logger.debug("Resolved password from service.json fields")
+            return _ensure_experiments_root_param(resolved, experiments_root)
+
+    except Exception as e:
+        logger.warning(f"Failed to load Postgres credentials from service.json: {e}")
+
+    # Return original locator with experiments_root param
+    return _ensure_experiments_root_param(locator, experiments_root)
+
+
+def _ensure_experiments_root_param(locator: str, experiments_root: str) -> str:
+    """
+    Ensure the experiments_root query parameter is present in a Postgres locator.
+
+    Args:
+        locator: The Postgres connection URI.
+        experiments_root: Path to experiments root directory.
+
+    Returns:
+        Locator with experiments_root query parameter.
+    """
+    parsed = urlparse(locator)
+    query_params = parse_qs(parsed.query)
+
+    # Only add if not already present
+    if "experiments_root" not in query_params:
+        query_params["experiments_root"] = [experiments_root]
+        new_query = urlencode(query_params, doseq=True)
+        locator = urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
+        )
+
+    return locator
 
 
 def main() -> int:
@@ -133,10 +285,10 @@ def run_array_task(store_root: str) -> int:
     from metalab.executor.core import execute_payload
     from metalab.manifest import deserialize_param_source, deserialize_seed_plan
     from metalab.operation import import_operation
-    from metalab.store import create_store
     from metalab.types import Status
 
-    store = create_store(store_root)
+    # Resolve store backend from spec (may be FileStore or PostgresStore)
+    store = _resolve_store_from_spec(spec, store_path)
     params_source = deserialize_param_source(spec["params"])
     seed_plan = deserialize_seed_plan(spec["seeds"])
     operation = import_operation(spec["operation_ref"])
@@ -166,7 +318,7 @@ def run_array_task(store_root: str) -> int:
         )
 
         # Skip if already complete
-        if _is_run_complete(store, run_id):
+        if _is_run_complete(store, run_id, store_path):
             logger.info(f"Run {run_id} already complete, skipping")
             continue
 
@@ -203,7 +355,7 @@ def run_array_task(store_root: str) -> int:
     return 1 if any_failed else 0
 
 
-def _is_run_complete(store: Any, run_id: str) -> bool:
+def _is_run_complete(store: Any, run_id: str, work_dir: Path) -> bool:
     """
     Check if a run is complete using robust completion detection.
 
@@ -214,8 +366,9 @@ def _is_run_complete(store: Any, run_id: str) -> bool:
     This prevents skipping runs that have partial/corrupt records.
 
     Args:
-        store: The FileStore instance.
+        store: The Store instance.
         run_id: The run ID to check.
+        work_dir: Path to the working directory for .done markers.
 
     Returns:
         True if the run is complete, False otherwise.
@@ -233,9 +386,8 @@ def _is_run_complete(store: Any, run_id: str) -> bool:
     if record.status != Status.SUCCESS:
         return False
 
-    # Check for .done marker
-    store_path = Path(store.root)
-    done_marker = store_path / "runs" / f"{run_id}.done"
+    # Check for .done marker on filesystem (coordination marker)
+    done_marker = work_dir / "runs" / f"{run_id}.done"
 
     return done_marker.exists()
 

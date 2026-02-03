@@ -84,9 +84,9 @@ for run in results:
 
 ---
 
-## 3. Write Reducing Functions for Artifacts
+## 3. Write Reducing Functions for Data and Artifacts
 
-Reducers extract scalar metrics from artifacts. They take a `Run` and return `dict[str, Metric]`:
+Reducers extract scalar metrics from data and artifacts. They take a `Run` and return `dict[str, Metric]`:
 
 ```python
 from metalab.types import Metric

@@ -138,17 +138,7 @@ def to_locator(store: "Store") -> str:
     Raises:
         ValueError: If the store type is not supported.
     """
-    # Import here to avoid circular imports
-    from metalab.store.file import FileStore
-
-    if isinstance(store, FileStore):
-        return f"file://{store.root}"
-
-    # Check for PostgresStore when implemented
-    if hasattr(store, "connection_string"):
-        return store.connection_string  # type: ignore[attr-defined]
-
-    # Check for locator attribute
+    # Both FileStore and PostgresStore expose a `locator` property
     if hasattr(store, "locator"):
         return store.locator  # type: ignore[attr-defined]
 
@@ -271,6 +261,8 @@ class StoreFactory:
         # Create store instance
         try:
             if info.scheme == "file":
+                # FileStore doesn't use experiment_id (only PostgresStore does)
+                kwargs.pop("experiment_id", None)
                 return backend_class(info.path, **kwargs)
             elif info.scheme in ("postgresql", "postgres"):
                 # PostgresStore accepts the full connection string

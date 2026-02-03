@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from metalab.executor.handle import RunStatus
 from metalab.executor.payload import RunPayload
 from metalab.result import Results
+from metalab.store.locator import to_locator
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
@@ -529,6 +530,8 @@ def _write_array_spec(
     context_fingerprint: str,
     shards: list[dict[str, Any]],
     chunk_size: int,
+    store_locator: str,
+    experiments_root: str,
 ) -> None:
     """
     Write the array spec file that workers use to reconstruct runs.
@@ -542,6 +545,8 @@ def _write_array_spec(
         context_fingerprint: Precomputed context fingerprint.
         shards: List of shard info dicts with job_id, start_idx, end_idx.
         chunk_size: Number of runs per array task.
+        store_locator: Locator string for reconstructing the store backend.
+        experiments_root: Path to experiments root for SLURM coordination files.
     """
     from metalab.manifest import serialize
 
@@ -567,6 +572,9 @@ def _write_array_spec(
         "total_chunks": (total_runs + chunk_size - 1) // chunk_size,
         "shards": shards,
         "derived_metric_refs": None,  # Set later if needed
+        # Store backend info for workers to reconstruct the correct store
+        "store_locator": store_locator,
+        "experiments_root": experiments_root,
     }
 
     spec_path = store_root / "slurm_array_spec.json"
@@ -654,6 +662,10 @@ class SlurmExecutor:
         param_cases = len(experiment.params) if hasattr(experiment.params, "__len__") else 0  # type: ignore[arg-type]
         seed_replicates = len(experiment.seeds) if hasattr(experiment.seeds, "__len__") else 0  # type: ignore[arg-type]
 
+        # Get store locator for workers to reconstruct the correct backend
+        store_locator = to_locator(store)
+        experiments_root = str(store_path)
+
         # Write array spec (before submission so workers can read it)
         _write_array_spec(
             store_root=store_path,
@@ -661,6 +673,8 @@ class SlurmExecutor:
             context_fingerprint=context_fingerprint,
             shards=shards,
             chunk_size=chunk_size,
+            store_locator=store_locator,
+            experiments_root=experiments_root,
         )
 
         # Update spec with derived metrics if provided
