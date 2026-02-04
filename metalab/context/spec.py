@@ -27,7 +27,7 @@ import hashlib
 import importlib
 import json
 import logging
-from typing import Any, Protocol, TypeVar, overload, runtime_checkable
+from typing import Any, Protocol, TypeVar, dataclass_transform, overload, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +201,7 @@ def context_spec(
 ) -> Any: ...
 
 
+@dataclass_transform(frozen_default=True, field_specifiers=(dataclasses.Field,))
 def context_spec(
     cls: type[T] | None = None,
     *,

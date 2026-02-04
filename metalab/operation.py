@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import inspect
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, overload
 
 if TYPE_CHECKING:
     from metalab.capture import Capture
@@ -156,6 +156,16 @@ class OperationWrapper:
         module = self._func.__module__
         qualname = self._func.__qualname__
         return f"{module}:{qualname}"
+
+
+@overload
+def operation(func: Callable[..., Any]) -> OperationWrapper: ...
+@overload
+def operation(
+    func: None = None,
+    *,
+    name: str | None = None,
+) -> Callable[[Callable[..., Any]], OperationWrapper]: ...
 
 
 def operation(
