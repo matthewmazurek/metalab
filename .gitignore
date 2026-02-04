@@ -18,3 +18,6 @@ data/
 
 # Nested projects (separate git repos)
 metalab-atlas/
+
+# Generated documentation
+site/

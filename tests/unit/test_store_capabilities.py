@@ -14,17 +14,19 @@ from pathlib import Path
 
 import pytest
 
-from metalab.store import FileStore
+from metalab.store import FileStore, FileStoreConfig
 from metalab.store.capabilities import (
     SupportsArtifactOpen,
     SupportsExperimentManifests,
     SupportsLogPath,
     SupportsWorkingDirectory,
 )
+from metalab.store.postgres import PostgresStoreConfig
 
 # Check if psycopg is available for PostgresStore tests
 try:
     import psycopg
+
     HAS_PSYCOPG = True
 except ImportError:
     HAS_PSYCOPG = False
@@ -35,13 +37,13 @@ class TestFileStoreCapabilities:
 
     def test_supports_working_directory(self, tmp_path: Path) -> None:
         """FileStore should implement SupportsWorkingDirectory."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         assert isinstance(store, SupportsWorkingDirectory)
         assert store.get_working_directory() == tmp_path
 
     def test_supports_experiment_manifests(self, tmp_path: Path) -> None:
         """FileStore should implement SupportsExperimentManifests."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         assert isinstance(store, SupportsExperimentManifests)
 
         # Test writing a manifest
@@ -59,7 +61,7 @@ class TestFileStoreCapabilities:
 
     def test_supports_log_path(self, tmp_path: Path) -> None:
         """FileStore should implement SupportsLogPath."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         assert isinstance(store, SupportsLogPath)
 
         run_id = "test_run_123"
@@ -71,7 +73,7 @@ class TestFileStoreCapabilities:
 
     def test_supports_artifact_open(self, tmp_path: Path) -> None:
         """FileStore should implement SupportsArtifactOpen."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         assert isinstance(store, SupportsArtifactOpen)
 
         # Create a test file
@@ -86,7 +88,7 @@ class TestFileStoreCapabilities:
 
     def test_open_artifact_not_found(self, tmp_path: Path) -> None:
         """open_artifact should raise FileNotFoundError for missing files."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
 
         with pytest.raises(FileNotFoundError):
             store.open_artifact(str(tmp_path / "nonexistent.txt"))
@@ -97,7 +99,7 @@ class TestCapabilityProtocolIsInstance:
 
     def test_file_store_all_capabilities(self, tmp_path: Path) -> None:
         """FileStore should pass isinstance for all capabilities it supports."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
 
         # All capabilities that FileStore should implement
         assert isinstance(store, SupportsWorkingDirectory)
@@ -119,18 +121,18 @@ class TestWorkingDirectoryCapability:
 
     def test_get_working_directory_returns_path(self, tmp_path: Path) -> None:
         """get_working_directory should return a Path object."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         result = store.get_working_directory()
         assert isinstance(result, Path)
 
     def test_working_directory_matches_root(self, tmp_path: Path) -> None:
         """Working directory should match the store's root."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         assert store.get_working_directory() == store.root
 
     def test_working_directory_is_absolute(self, tmp_path: Path) -> None:
         """Working directory should be an absolute path."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         wd = store.get_working_directory()
         assert wd.is_absolute()
 
@@ -139,49 +141,45 @@ class TestWorkingDirectoryCapability:
 class TestPostgresStoreComposition:
     """Tests for PostgresStore composition with FileStore."""
 
-    def test_postgres_store_requires_experiments_root(self, tmp_path: Path) -> None:
-        """PostgresStore should require experiments_root parameter."""
-        from metalab.store.postgres import PostgresStore
+    def test_postgres_store_config_requires_file_root(self, tmp_path: Path) -> None:
+        """PostgresStoreConfig should require file_root parameter."""
+        # Should raise TypeError without file_root (missing required argument)
+        with pytest.raises(TypeError):
+            PostgresStoreConfig(connection_string="postgresql://fake@localhost/db")
 
-        # Should raise ValueError without experiments_root
-        with pytest.raises(ValueError, match="experiments_root"):
-            # Use a fake connection string - will fail on connection but
-            # should fail on validation first
-            PostgresStore("postgresql://fake@localhost/db")
-
-    def test_postgres_store_delegates_to_file_store(self, tmp_path: Path) -> None:
-        """PostgresStore should have an internal FileStore for delegation."""
-        from metalab.store.postgres import PostgresStore
-        from unittest.mock import patch, MagicMock
+    def test_postgres_store_has_file_store(self, tmp_path: Path) -> None:
+        """PostgresStore should have an internal FileStore."""
+        from unittest.mock import MagicMock, patch
 
         # Mock the connection pool at the psycopg_pool module level
         with patch("psycopg_pool.ConnectionPool") as mock_pool:
             mock_pool.return_value = MagicMock()
 
-            store = PostgresStore(
-                "postgresql://fake@localhost/db",
-                experiments_root=tmp_path,
-                auto_migrate=False,  # Skip schema creation
+            config = PostgresStoreConfig(
+                connection_string="postgresql://fake@localhost/db",
+                file_root=str(tmp_path),
+                auto_migrate=False,
             )
+            store = config.connect()
 
-            # Should have a FileStore instance
-            assert store._file_store is not None
-            assert isinstance(store._file_store, FileStore)
-            assert store._file_store.root == tmp_path
+            # Should have a FileStore instance via file_store property
+            assert store.file_store is not None
+            assert isinstance(store.file_store, FileStore)
+            assert store.file_store.root == tmp_path
 
     def test_postgres_store_implements_log_path(self, tmp_path: Path) -> None:
         """PostgresStore should implement SupportsLogPath via FileStore."""
-        from metalab.store.postgres import PostgresStore
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         with patch("psycopg_pool.ConnectionPool") as mock_pool:
             mock_pool.return_value = MagicMock()
 
-            store = PostgresStore(
-                "postgresql://fake@localhost/db",
-                experiments_root=tmp_path,
+            config = PostgresStoreConfig(
+                connection_string="postgresql://fake@localhost/db",
+                file_root=str(tmp_path),
                 auto_migrate=False,
             )
+            store = config.connect()
 
             # Should implement SupportsLogPath
             assert isinstance(store, SupportsLogPath)
@@ -192,73 +190,41 @@ class TestPostgresStoreComposition:
 
     def test_postgres_store_implements_working_directory(self, tmp_path: Path) -> None:
         """PostgresStore should implement SupportsWorkingDirectory via FileStore."""
-        from metalab.store.postgres import PostgresStore
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         with patch("psycopg_pool.ConnectionPool") as mock_pool:
             mock_pool.return_value = MagicMock()
 
-            store = PostgresStore(
-                "postgresql://fake@localhost/db",
-                experiments_root=tmp_path,
+            config = PostgresStoreConfig(
+                connection_string="postgresql://fake@localhost/db",
+                file_root=str(tmp_path),
                 auto_migrate=False,
             )
+            store = config.connect()
 
             # Should implement SupportsWorkingDirectory
             assert isinstance(store, SupportsWorkingDirectory)
 
-            # Should return experiments_root
+            # Should return file_root
             wd = store.get_working_directory()
             assert wd == tmp_path
 
-    def test_postgres_store_experiment_id_creates_subdirectory(
-        self, tmp_path: Path
-    ) -> None:
-        """PostgresStore with experiment_id should nest FileStore under sanitized id."""
-        from metalab.store.postgres import PostgresStore
-        from unittest.mock import patch, MagicMock
+    def test_postgres_store_has_index(self, tmp_path: Path) -> None:
+        """PostgresStore should have a PostgresIndex for query acceleration."""
+        from unittest.mock import MagicMock, patch
+
+        from metalab.store.postgres_index import PostgresIndex
 
         with patch("psycopg_pool.ConnectionPool") as mock_pool:
             mock_pool.return_value = MagicMock()
 
-            store = PostgresStore(
-                "postgresql://fake@localhost/db",
-                experiments_root=tmp_path,
-                experiment_id="my_exp:1.0",
+            config = PostgresStoreConfig(
+                connection_string="postgresql://fake@localhost/db",
+                file_root=str(tmp_path),
                 auto_migrate=False,
             )
+            store = config.connect()
 
-            # FileStore should be created at {experiments_root}/{safe_exp_id}/
-            # my_exp:1.0 -> my_exp_1.0
-            expected_path = tmp_path / "my_exp_1.0"
-            assert store._file_store.root == expected_path
-
-    def test_postgres_store_experiment_id_sanitizes_colon(
-        self, tmp_path: Path
-    ) -> None:
-        """PostgresStore should replace colons with underscores in experiment_id."""
-        from metalab.store.postgres import PostgresStore
-        from unittest.mock import patch, MagicMock
-
-        with patch("psycopg_pool.ConnectionPool") as mock_pool:
-            mock_pool.return_value = MagicMock()
-
-            # Test various experiment_id formats
-            test_cases = [
-                ("exp:1.0", "exp_1.0"),
-                ("my_exp:2.0.1", "my_exp_2.0.1"),
-                ("simple", "simple"),  # No colon should be unchanged
-            ]
-
-            for exp_id, expected_dir in test_cases:
-                store = PostgresStore(
-                    "postgresql://fake@localhost/db",
-                    experiments_root=tmp_path,
-                    experiment_id=exp_id,
-                    auto_migrate=False,
-                )
-                expected_path = tmp_path / expected_dir
-                assert store._file_store.root == expected_path, (
-                    f"Failed for {exp_id}: expected {expected_path}, "
-                    f"got {store._file_store.root}"
-                )
+            # Should have a PostgresIndex instance
+            assert store.index is not None
+            assert isinstance(store.index, PostgresIndex)

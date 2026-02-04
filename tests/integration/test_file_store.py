@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 from metalab.schema import SCHEMA_VERSION
-from metalab.store.file import FileStore
+from metalab.store.file import FileStore, FileStoreConfig
 from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> FileStore:
     """Create a FileStore in a temporary directory."""
-    return FileStore(tmp_path)
+    return FileStoreConfig(root=str(tmp_path)).connect()
 
 
 class TestFileStoreLayout:
@@ -24,7 +24,7 @@ class TestFileStoreLayout:
 
     def test_creates_layout(self, tmp_path: Path):
         """Store should create expected directories."""
-        FileStore(tmp_path)
+        FileStoreConfig(root=str(tmp_path)).connect()
 
         assert (tmp_path / "runs").is_dir()
         assert (tmp_path / "artifacts").is_dir()
@@ -34,7 +34,7 @@ class TestFileStoreLayout:
 
     def test_meta_file_content(self, tmp_path: Path):
         """Meta file should contain schema version."""
-        FileStore(tmp_path)
+        FileStoreConfig(root=str(tmp_path)).connect()
 
         meta = json.loads((tmp_path / "_meta.json").read_text())
         assert meta["schema_version"] == SCHEMA_VERSION

@@ -18,8 +18,10 @@ class GridSource:
     Parameter source that generates a Cartesian product of values.
 
     Example:
-        source = GridSource(learning_rate=[0.01, 0.1], batch_size=[32, 64])
-        # Yields 4 cases: all combinations of learning_rate x batch_size
+    ```python
+    source = GridSource(learning_rate=[0.01, 0.1], batch_size=[32, 64])
+    # Yields 4 cases: all combinations of learning_rate x batch_size
+    ```
     """
 
     def __init__(self, **kwargs: list[Any]) -> None:
@@ -139,10 +141,12 @@ def grid(**kwargs: list[Any]) -> GridSource:
         A GridSource that yields all combinations.
 
     Example:
-        params = grid(
-            n_samples=[1000, 10000, 100000],
-            store_points=[True, False],
-        )
-        # Yields 6 cases: 3 n_samples values x 2 store_points values
+    ```python
+    params = grid(
+        n_samples=[1000, 10000, 100000],
+        store_points=[True, False],
+    )
+    # Yields 6 cases: 3 n_samples values x 2 store_points values
+    ```
     """
     return GridSource(**kwargs)

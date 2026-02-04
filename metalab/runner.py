@@ -2,12 +2,14 @@
 Runner: Orchestrates experiment execution with resume/dedupe.
 
 The Runner:
+
 1. Generates run payloads from experiment configuration
 2. Checks for existing runs (resume)
 3. Submits to executor
 4. Returns a RunHandle for tracking/awaiting results
 
 Progress tracking:
+
 - Pass `progress=True` for automatic progress display (auto-detects rich)
 - Pass `progress=Progress(...)` for customized progress display
 - Pass `on_event=callback` for custom event handling
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from metalab.experiment import Experiment
     from metalab.progress import Progress, ProgressTracker
     from metalab.store.base import Store
+    from metalab.store.config import StoreConfig
 
 from metalab._canonical import fingerprint
 from metalab._ids import (
@@ -40,10 +43,9 @@ from metalab.executor.payload import RunPayload
 from metalab.executor.thread import ThreadExecutor
 from metalab.result import Results
 from metalab.store import (
+    DEFAULT_STORE_ROOT,
     SupportsExperimentManifests,
     SupportsWorkingDirectory,
-    create_store,
-    to_locator,
 )
 from metalab.types import Status
 
@@ -90,6 +92,11 @@ class ProgressRunHandle:
     def job_id(self) -> str:
         """Unique identifier for this execution batch."""
         return self._handle.job_id
+
+    @property
+    def store(self) -> "Store":
+        """The store used for this execution."""
+        return self._handle.store
 
     @property
     def status(self) -> RunStatus:
@@ -265,7 +272,7 @@ def generate_payloads(
             context_spec=experiment.context,
             params_resolved=resolved_params,
             seed_bundle=seed_bundle,
-            store_locator=to_locator(store),
+            store_locator=store.config.to_dict(),
             fingerprints={
                 "context": ctx_fp,
                 "params": params_fp,
@@ -362,16 +369,13 @@ def _run_slurm_indexed(
 
 
 def run(
-    experiment: Experiment,
-    store: str | Store | None = None,
+    experiment: "Experiment",
+    store: "str | StoreConfig | None" = None,
     executor: "Executor | None" = None,
     resume: bool = True,
     progress: "bool | Progress | None" = None,
     on_event: "EventCallback | None" = None,
     derived_metrics: "list[str | DerivedMetricFn] | None" = None,
-    fallback: bool = False,
-    fallback_root: str = "./runs",
-    write_to_both: bool = True,
 ) -> RunHandle:
     """
     Run an experiment and return a handle for tracking/awaiting results.
@@ -384,7 +388,10 @@ def run(
 
     Args:
         experiment: The experiment to run.
-        store: Store path or instance. Defaults to "./runs/{experiment.name}".
+        store: Where to store results. Can be:
+            - None: Default to "./experiments"
+            - str: Parse as locator, auto-scope to experiment
+            - StoreConfig: Scope to experiment and connect
         executor: Executor instance. Defaults to sequential (single-threaded).
             For parallel execution, use:
             - ThreadExecutor(max_workers=N) for thread-based parallelism
@@ -402,78 +409,76 @@ def run(
             Functions must be importable (not lambdas). Can be specified as:
             - Function references: "myproject.metrics:final_loss"
             - Callable functions: final_loss (must have __module__ and __name__)
-        fallback: If True, wrap the store in a FallbackStore with a FileStore
-            fallback. This provides runtime resilience: if the primary store
-            (e.g., PostgreSQL) becomes unavailable, writes automatically fall
-            back to the local FileStore. Default: False.
-        fallback_root: Root directory for fallback FileStore. The actual fallback
-            path will be "{fallback_root}/{experiment.name}". Default: "./runs".
-        write_to_both: When fallback=True, whether to write to both primary and
-            fallback stores (for redundancy) or only to primary with fallback
-            on failure. Default: False.
 
     Returns:
         RunHandle for tracking and awaiting results.
 
     Example:
-        # Sequential execution (default)
-        handle = metalab.run(exp)
-        results = handle.result()
+    ```python
+    # Sequential execution (default)
+    handle = metalab.run(exp)
+    results = handle.result()
 
-        # Parallel with threads
-        handle = metalab.run(exp, executor=metalab.ThreadExecutor(max_workers=4))
+    # Parallel with threads
+    handle = metalab.run(exp, executor=metalab.ThreadExecutor(max_workers=4))
 
-        # Parallel with processes (bypasses GIL)
-        handle = metalab.run(exp, executor=metalab.ProcessExecutor(max_workers=4))
+    # Parallel with processes (bypasses GIL)
+    handle = metalab.run(exp, executor=metalab.ProcessExecutor(max_workers=4))
 
-        # SLURM cluster execution
-        handle = metalab.run(
-            exp,
-            store="/scratch/runs/my_exp",
-            executor=metalab.SlurmExecutor(
-                metalab.SlurmConfig(partition="gpu", time="2:00:00")
-            ),
-        )
+    # SLURM cluster execution
+    handle = metalab.run(
+        exp,
+        store="/scratch/runs/my_exp",
+        executor=metalab.SlurmExecutor(
+            metalab.SlurmConfig(partition="gpu", time="2:00:00")
+        ),
+    )
 
-        # With progress display
-        handle = metalab.run(exp, progress=True)
-        results = handle.result()  # Shows live progress bar
+    # With progress display
+    handle = metalab.run(exp, progress=True)
+    results = handle.result()  # Shows live progress bar
 
-        # Custom event handling
-        def my_callback(event):
-            print(f"Event: {event.kind}")
-        handle = metalab.run(exp, on_event=my_callback)
+    # Custom event handling
+    def my_callback(event):
+        print(f"Event: {event.kind}")
+    handle = metalab.run(exp, on_event=my_callback)
 
-        # With derived metrics
-        handle = metalab.run(exp, derived_metrics=[final_loss, convergence_stats])
-        results = handle.result()  # Derived metrics computed and stored per-run
+    # With derived metrics
+    handle = metalab.run(exp, derived_metrics=[final_loss, convergence_stats])
+    results = handle.result()  # Derived metrics computed and stored per-run
 
-        # With runtime fallback (PostgreSQL primary, FileStore backup)
-        handle = metalab.run(
-            exp,
-            store="postgresql://localhost/db",
-            fallback=True,  # Auto-creates FileStore at ./runs/{exp.name}
-        )
+    # With StoreConfig (pre-configured)
+    config = FileStoreConfig(root="./experiments")
+    handle = metalab.run(exp, store=config)  # auto-scopes to experiment
 
-        # Cancel if needed
-        handle.cancel()
+    # With PostgresStore (requires file_root for logs/artifacts)
+    handle = metalab.run(
+        exp,
+        store="postgresql://localhost/db?file_root=/path/to/files",
+    )
+
+    # Cancel if needed
+    handle.cancel()
+    ```
     """
     from metalab.derived import get_func_ref
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
-    from metalab.store import FallbackStore, FileStore
+    from metalab.store.config import StoreConfig
+    from metalab.store.locator import parse_to_config
 
-    # Resolve store
+    # Resolve store to config, then scope and connect
+    # Default: {DEFAULT_STORE_ROOT}/{safe_experiment_id}/ via collection-scoped storage
     if store is None:
-        store = f"./runs/{experiment.name}"
-    if isinstance(store, str):
-        store = create_store(store, experiment_id=experiment.experiment_id)
+        store = DEFAULT_STORE_ROOT
 
-    # Wrap in FallbackStore if requested
-    if fallback and not isinstance(store, FallbackStore):
-        fallback_path = f"{fallback_root}/{experiment.name}"
-        fallback_store = FileStore(fallback_path)
-        store = FallbackStore(store, fallback_store, write_to_both=write_to_both)
+    if isinstance(store, str):
+        config = parse_to_config(store)
+    else:
+        config = store
+
+    # Scope to experiment and connect
+    resolved_store: "Store" = config.scoped(experiment.experiment_id).connect()
 
     # Resolve executor (default: sequential execution)
     if executor is None:
@@ -497,7 +502,7 @@ def run(
         # Use index-addressed SLURM array submission
         handle = _run_slurm_indexed(
             experiment=experiment,
-            store=store,
+            store=resolved_store,
             executor=executor,
             resume=resume,
             derived_metric_refs=derived_metric_refs,
@@ -506,14 +511,14 @@ def run(
     else:
         # Standard payload-based submission for other executors
         payloads, all_run_ids = generate_payloads(
-            experiment, store, resume, derived_metric_refs=derived_metric_refs
+            experiment, resolved_store, resume, derived_metric_refs=derived_metric_refs
         )
         all_run_ids_count = len(all_run_ids)
 
         # Submit to executor
         handle = executor.submit(
             payloads=payloads,
-            store=store,
+            store=resolved_store,
             operation=experiment.operation,
             run_ids=all_run_ids,
         )
@@ -556,43 +561,100 @@ def run(
 
 
 def load_results(
-    path: str,
+    store: "str | StoreConfig",
     experiment_id: str | None = None,
 ) -> Results:
     """
-    Load results from a store path.
+    Load results from a store.
 
     Use this to load results from a previous experiment run.
 
     Args:
-        path: Path to the store directory (e.g., "./runs/my_experiment").
+        store: Store path or StoreConfig.
         experiment_id: Optional filter by experiment ID.
 
     Returns:
         Results containing the loaded runs.
 
+    Note:
+        Does NOT auto-scope. Pass a scoped config or filter by experiment_id.
+
     Example:
-        # Load all results from a store
-        results = metalab.load_results("./runs/gene_perturbation")
+    ```python
+    # Load all results from a store path
+    results = metalab.load_results("./runs/gene_perturbation")
 
-        # Access runs
-        for run in results:
-            print(run.metrics)
+    # Access runs
+    for run in results:
+        print(run.metrics)
 
-        # Load artifact from a specific run
-        artifact = results[0].artifact("summary")
+    # Load artifact from a specific run
+    artifact = results[0].artifact("summary")
 
-        # Filter and export
-        results.successful.to_csv("./successful_runs.csv")
+    # Filter and export
+    results.successful.to_csv("./successful_runs.csv")
+
+    # Load with StoreConfig
+    config = FileStoreConfig(root="./experiments", experiment_id="my_exp:1.0")
+    results = metalab.load_results(config)
+    ```
     """
-    store = create_store(path)
-    return Results.from_store(store, experiment_id=experiment_id)
+    from metalab.store.config import StoreConfig
+    from metalab.store.locator import parse_to_config
+
+    if isinstance(store, str):
+        config = parse_to_config(store)
+    else:
+        config = store
+
+    resolved_store = config.connect()
+    return Results.from_store(resolved_store, experiment_id=experiment_id)
+
+
+# Local executor types that don't support reconnection
+_LOCAL_EXECUTOR_TYPES = {"local", "thread", "process"}
+
+
+def _load_manifest(store: "Store") -> dict:
+    """
+    Load the experiment manifest from a store.
+
+    Args:
+        store: Store instance with working directory support.
+
+    Returns:
+        The manifest dictionary.
+
+    Raises:
+        FileNotFoundError: If no manifest exists.
+        TypeError: If the store doesn't support working directory.
+    """
+    import json
+
+    if not isinstance(store, SupportsWorkingDirectory):
+        raise TypeError(
+            f"Cannot load manifest from store type {type(store).__name__}. "
+            f"Store must support SupportsWorkingDirectory capability."
+        )
+
+    store_path = store.get_working_directory()
+    manifest_path = store_path / "manifest.json"
+
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"No manifest found at {manifest_path}. "
+            "Cannot reconnect without a manifest."
+        )
+
+    with open(manifest_path) as f:
+        return json.load(f)
 
 
 def reconnect(
-    path: str,
+    store: "str | StoreConfig",
     on_event: "EventCallback | None" = None,
     progress: "bool | Progress | None" = None,
+    **kwargs,
 ) -> RunHandle:
     """
     Reconnect to an in-progress or completed experiment.
@@ -600,47 +662,94 @@ def reconnect(
     Use this to resume watching progress of a SLURM experiment from a new session,
     or to check status of an experiment that was submitted earlier.
 
+    Note: This function only supports async executors (SLURM, etc.) where jobs
+    may still be running. For loading results from local executor experiments,
+    use `load_results()` instead.
+
     Args:
-        path: Path to the store directory (e.g., "./runs/my_experiment").
+        store: Store locator string or StoreConfig. Supports:
+            - Path string: "./runs/my_experiment"
+            - File URI: "file:///scratch/runs/my_exp"
+            - Postgres URI: "postgresql://localhost/metalab" (requires file_root)
+            - StoreConfig instance
         on_event: Optional event callback for custom event handling.
         progress: Enable progress display. Options:
             - True: Auto-detect rich, use simple fallback if not available.
             - False/None: No progress display.
             - Progress(...): Customized progress display with title, metrics, etc.
+        **kwargs: Additional arguments passed to store config (e.g., file_root
+            for Postgres stores).
 
     Returns:
         A RunHandle that can be used to check status and wait for results.
 
     Raises:
-        FileNotFoundError: If no manifest exists at the path.
+        FileNotFoundError: If no manifest exists at the store.
+        ValueError: If the executor type doesn't support reconnection.
 
     Example:
-        # Reconnect with progress display
-        handle = metalab.reconnect("./runs/my_exp", progress=True)
-        results = handle.result()  # Shows live progress
+    ```python
+    # Reconnect with progress display (file store)
+    handle = metalab.reconnect("./runs/my_exp", progress=True)
+    results = handle.result()  # Shows live progress
 
-        # Check current status without blocking
-        handle = metalab.reconnect("./runs/my_exp")
-        print(handle.status)  # RunStatus(total=100, completed=45, ...)
+    # Check current status without blocking
+    handle = metalab.reconnect("./runs/my_exp")
+    print(handle.status)  # RunStatus(total=100, completed=45, ...)
 
-        # Custom progress configuration
-        handle = metalab.reconnect(
-            "./runs/my_exp",
-            progress=metalab.Progress(
-                title="Resuming Experiment",
-                display_metrics=["best_f:.2f"],
-            ),
-        )
-        results = handle.result()
+    # Reconnect with Postgres store
+    handle = metalab.reconnect(
+        "postgresql://localhost/metalab",
+        file_root="/scratch/artifacts",
+        progress=True,
+    )
+
+    # Custom progress configuration
+    handle = metalab.reconnect(
+        "./runs/my_exp",
+        progress=metalab.Progress(
+            title="Resuming Experiment",
+            display_metrics=["best_f:.2f"],
+        ),
+    )
+    results = handle.result()
+    ```
     """
-    from metalab.executor.slurm import SlurmRunHandle
+    from metalab.executor.registry import HandleRegistry
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
-    from metalab.store import FileStore
+    from metalab.store.config import StoreConfig
+    from metalab.store.locator import parse_to_config
 
-    store = FileStore(path)
-    handle: RunHandle = SlurmRunHandle.from_store(
-        store, on_event=on_event if progress is None else None
+    # 1. Resolve store config
+    if isinstance(store, str):
+        config = parse_to_config(store, **kwargs)
+    else:
+        config = store
+
+    store_instance = config.connect()
+
+    # 2. Load manifest and get executor_type
+    manifest = _load_manifest(store_instance)
+    executor_type = manifest.get("executor_type")
+
+    # 3. Reject local executors with helpful error
+    if executor_type in _LOCAL_EXECUTOR_TYPES:
+        raise ValueError(
+            f"Cannot reconnect to '{executor_type}' executor - local runs are synchronous. "
+            f"Use metalab.load_results() to retrieve completed results."
+        )
+
+    # 4. Dispatch to registered handle
+    handle_class = HandleRegistry.get(executor_type)
+    if handle_class is None:
+        raise ValueError(
+            f"No reconnectable handle registered for executor type '{executor_type}'. "
+            f"Supported types: {HandleRegistry.types()}"
+        )
+
+    handle: RunHandle = handle_class.from_store(
+        store_instance, on_event=on_event if progress is None else None
     )
 
     # Wire up on_event callback if provided (and no progress)

@@ -20,11 +20,13 @@ class SeedPlan:
     allowing for reproducible replication studies.
 
     Example:
-        plan = SeedPlan(base=42, replicates=3)
-        for bundle in plan:
-            # bundle.replicate_index: 0, 1, 2
-            rng = bundle.numpy()
-            ...
+    ```python
+    plan = SeedPlan(base=42, replicates=3)
+    for bundle in plan:
+        # bundle.replicate_index: 0, 1, 2
+        rng = bundle.numpy()
+        ...
+    ```
     """
 
     def __init__(self, base: int, replicates: int = 1) -> None:
@@ -105,18 +107,20 @@ def seeds(base: int, replicates: int = 1) -> SeedPlan:
         A SeedPlan that yields SeedBundle instances.
 
     Example:
-        seed_plan = seeds(base=42, replicates=3)
+    ```python
+    seed_plan = seeds(base=42, replicates=3)
 
-        # Use with an experiment
-        exp = Experiment(
-            name="my_exp",
-            seeds=seed_plan,
-            ...
-        )
+    # Use with an experiment
+    exp = Experiment(
+        name="my_exp",
+        seeds=seed_plan,
+        ...
+    )
 
-        # Or iterate directly
-        for bundle in seed_plan:
-            rng = bundle.numpy("sampling")
-            ...
+    # Or iterate directly
+    for bundle in seed_plan:
+        rng = bundle.numpy("sampling")
+        ...
+    ```
     """
     return SeedPlan(base=base, replicates=replicates)

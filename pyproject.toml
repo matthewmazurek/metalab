@@ -3,6 +3,7 @@ name = "metalab"
 version = "0.1.0"
 description = "A general experiment runner: (FrozenContext, Params, SeedBundle) -> RunRecord + Artifacts"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -28,6 +29,11 @@ dev = [
     "rich>=13.0",
     "ruff>=0.4",
     "pyright>=1.1",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
 ]
 
 [project.scripts]

@@ -2,6 +2,7 @@
 Experiment: Container for experiment configuration.
 
 An Experiment bundles together:
+
 - Operation to run
 - Context specification (lightweight manifest)
 - Parameter source
@@ -28,6 +29,7 @@ class Experiment:
     Container for experiment configuration.
 
     An Experiment defines what to run and how:
+
     - name/version: Identifies the experiment
     - description: Optional human-readable description
     - operation: The computation to perform
@@ -38,22 +40,25 @@ class Experiment:
 
     The metadata field is for arbitrary experiment-level information that should
     be persisted but does NOT affect reproducibility or run identity. Examples:
+
     - Resource hints: {"gpu": True, "memory_gb": 16}
     - Documentation: {"author": "name", "notes": "..."}
     - Data summaries: {"n_samples": 1000, "groups": ["A", "B"]}
 
     Example:
-        exp = Experiment(
-            name="pi_mc",
-            version="0.1",
-            description="Estimate pi using Monte Carlo sampling",
-            context={},  # or a @context_spec decorated class
-            operation=pi_monte_carlo,
-            params=grid(n_samples=[1000, 10000]),
-            seeds=seeds(base=42, replicates=3),
-            tags=["example", "monte_carlo"],
-            metadata={"author": "you", "resource_hints": {"gpu": False}},
-        )
+    ```python
+    exp = Experiment(
+        name="pi_mc",
+        version="0.1",
+        description="Estimate pi using Monte Carlo sampling",
+        context={},  # or a @context_spec decorated class
+        operation=pi_monte_carlo,
+        params=grid(n_samples=[1000, 10000]),
+        seeds=seeds(base=42, replicates=3),
+        tags=["example", "monte_carlo"],
+        metadata={"author": "you", "resource_hints": {"gpu": False}},
+    )
+    ```
     """
 
     name: str

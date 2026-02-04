@@ -37,7 +37,7 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
     from metalab.executor.payload import RunPayload
     from metalab.operation import import_operation
     from metalab.schema import dump_run_record
-    from metalab.store import create_store
+    from metalab.store.config import StoreConfig
 
     # Deserialize payload
     payload = RunPayload.from_dict(payload_dict)
@@ -45,8 +45,8 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
     # Resolve operation from reference
     operation = import_operation(payload.operation_ref)
 
-    # Create store from locator (supports both file paths and postgres URIs)
-    store = create_store(payload.store_locator)
+    # Recreate store from serialized config
+    store = StoreConfig.from_dict(payload.store_locator).connect()
 
     # Execute using shared logic
     result = execute_payload(

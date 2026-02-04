@@ -33,16 +33,18 @@ class Fingerprintable(Protocol):
     context fingerprinting with lazy evaluation.
 
     Example:
-        @dataclass(frozen=True)
-        class GitCommit:
-            repo: str
+    ```python
+    @dataclass(frozen=True)
+    class GitCommit:
+        repo: str
 
-            def fingerprint_payload(self) -> dict[str, Any]:
-                # Compute hash at fingerprint time, not construction
-                commit = subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"], cwd=self.repo
-                ).decode().strip()
-                return {"repo": self.repo, "commit": commit}
+        def fingerprint_payload(self) -> dict[str, Any]:
+            # Compute hash at fingerprint time, not construction
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=self.repo
+            ).decode().strip()
+            return {"repo": self.repo, "commit": commit}
+    ```
     """
 
     def fingerprint_payload(self) -> dict[str, Any]:
@@ -73,13 +75,15 @@ class FilePath:
                    paths produces the same fingerprint.
 
     Example:
-        @metalab.context_spec
-        class DataSpec:
-            data: FilePath
+    ```python
+    @metalab.context_spec
+    class DataSpec:
+        data: FilePath
 
-        spec = DataSpec(data=FilePath("./cache/adata.h5ad"))
-        preprocess(spec)  # File created here
-        metalab.run(...)  # Hash computed here
+    spec = DataSpec(data=FilePath("./cache/adata.h5ad"))
+    preprocess(spec)  # File created here
+    metalab.run(...)  # Hash computed here
+    ```
     """
 
     path: str
@@ -128,11 +132,13 @@ class DirPath:
         hash_path: If True, include the path in the fingerprint (default: False).
 
     Example:
-        @metalab.context_spec
-        class DataSpec:
-            raw_data: DirPath
+    ```python
+    @metalab.context_spec
+    class DataSpec:
+        raw_data: DirPath
 
-        spec = DataSpec(raw_data=DirPath("./data/raw/", pattern="*.csv"))
+    spec = DataSpec(raw_data=DirPath("./data/raw/", pattern="*.csv"))
+    ```
     """
 
     path: str
@@ -276,8 +282,10 @@ def resolve_context(spec: Any, _path: str = "context") -> tuple[Any, dict[str, A
                           with the full path in the error message.
 
     Example:
-        resolved, manifest = resolve_context(spec)
-        # manifest contains {"context.data": {"type": "FilePath", "hash": "abc123"}}
+    ```python
+    resolved, manifest = resolve_context(spec)
+    # manifest contains {"context.data": {"type": "FilePath", "hash": "abc123"}}
+    ```
     """
     manifest: dict[str, Any] = {}
 
@@ -344,15 +352,17 @@ def file_hash(path: str | Path, algorithm: str = "sha256") -> str:
         FileNotFoundError: If the file does not exist.
 
     Example:
-        @metalab.context_spec
-        class MyDataSpec:
-            raw_path: str
-            raw_hash: str  # Include so fingerprint changes if data changes
+    ```python
+    @metalab.context_spec
+    class MyDataSpec:
+        raw_path: str
+        raw_hash: str  # Include so fingerprint changes if data changes
 
-        spec = MyDataSpec(
-            raw_path="data/matrix.mtx.gz",
-            raw_hash=metalab.file_hash("data/matrix.mtx.gz"),
-        )
+    spec = MyDataSpec(
+        raw_path="data/matrix.mtx.gz",
+        raw_hash=metalab.file_hash("data/matrix.mtx.gz"),
+    )
+    ```
     """
     path = Path(path)
     h = hashlib.new(algorithm)
@@ -384,10 +394,12 @@ def dir_hash(path: str | Path, pattern: str = "*", algorithm: str = "sha256") ->
         FileNotFoundError: If the directory does not exist.
 
     Example:
-        spec = MyDataSpec(
-            raw_dir="data/raw/",
-            raw_hash=metalab.dir_hash("data/raw/", pattern="*.mtx.gz"),
-        )
+    ```python
+    spec = MyDataSpec(
+        raw_dir="data/raw/",
+        raw_hash=metalab.dir_hash("data/raw/", pattern="*.mtx.gz"),
+    )
+    ```
     """
     path = Path(path)
     if not path.is_dir():

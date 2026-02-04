@@ -1,5 +1,5 @@
 """
-Tests for store locator and factory.
+Tests for store locator and config parsing.
 """
 
 import tempfile
@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from metalab.store import (
+    ConfigRegistry,
     FileStore,
-    StoreFactory,
+    FileStoreConfig,
     create_store,
     parse_locator,
-    to_locator,
+    parse_to_config,
+    safe_experiment_id,
 )
 from metalab.store.locator import LocatorInfo
 
@@ -57,38 +59,63 @@ class TestParseLocator:
     def test_parse_postgres_with_params(self):
         """Parse postgresql:// URL with query params."""
         info = parse_locator(
-            "postgresql://localhost/db?schema=myschema&experiments_root=/shared/experiments"
+            "postgresql://localhost/db?schema=myschema&file_root=/shared/experiments"
         )
         assert info.params.get("schema") == "myschema"
-        assert info.params.get("experiments_root") == "/shared/experiments"
-
-    def test_parse_auto_url(self):
-        """Parse auto:// URL with fallback."""
-        info = parse_locator(
-            "auto://?primary=postgresql://localhost/db&fallback=file:///tmp"
-        )
-        assert info.scheme == "auto"
-        assert info.params.get("primary") == "postgresql://localhost/db"
-        assert info.params.get("fallback") == "file:///tmp"
+        assert info.params.get("file_root") == "/shared/experiments"
 
 
-class TestStoreFactory:
-    """Tests for StoreFactory."""
+class TestParseToConfig:
+    """Tests for parse_to_config function."""
 
-    def test_supports_file(self):
-        """File scheme is supported."""
-        assert StoreFactory.supports("file")
+    def test_parse_path_to_config(self):
+        """Plain path creates FileStoreConfig."""
+        config = parse_to_config("./experiments")
+        assert isinstance(config, FileStoreConfig)
 
-    def test_supports_postgresql(self):
-        """PostgreSQL scheme is supported (when psycopg available)."""
-        # This may be True or False depending on environment
-        # Just test it doesn't error
-        StoreFactory.supports("postgresql")
+    def test_parse_file_url_to_config(self):
+        """file:// URL creates FileStoreConfig."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = parse_to_config(f"file://{tmpdir}")
+            assert isinstance(config, FileStoreConfig)
+
+    def test_parse_with_experiment_id(self):
+        """experiment_id kwarg is passed through."""
+        config = parse_to_config("./experiments", experiment_id="my_exp:1.0")
+        assert config.experiment_id == "my_exp:1.0"
+
+    def test_unknown_scheme_raises(self):
+        """Unknown scheme raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown store scheme"):
+            parse_to_config("unknown://localhost")
+
+
+class TestConfigRegistry:
+    """Tests for ConfigRegistry."""
+
+    def test_file_scheme_registered(self):
+        """FileStoreConfig is registered for 'file' scheme."""
+        config_class = ConfigRegistry.get("file")
+        assert config_class is FileStoreConfig
+
+    def test_postgresql_scheme_registered(self):
+        """PostgresStoreConfig is registered for 'postgresql' scheme (when available)."""
+        # This may return None if psycopg not installed
+        config_class = ConfigRegistry.get("postgresql")
+        # Just ensure no error - may be None or PostgresStoreConfig
+
+    def test_schemes_includes_file(self):
+        """schemes() includes 'file'."""
+        assert "file" in ConfigRegistry.schemes()
+
+
+class TestCreateStore:
+    """Tests for create_store convenience function."""
 
     def test_create_file_store_from_path(self):
         """Create FileStore from path."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = StoreFactory.from_locator(tmpdir)
+            store = create_store(tmpdir)
             assert isinstance(store, FileStore)
             # Compare resolved paths (macOS may use /private symlinks)
             assert store.root.resolve() == Path(tmpdir).resolve()
@@ -96,64 +123,145 @@ class TestStoreFactory:
     def test_create_file_store_from_url(self):
         """Create FileStore from file:// URL."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = StoreFactory.from_locator(f"file://{tmpdir}")
-            assert isinstance(store, FileStore)
-
-    def test_create_store_convenience(self):
-        """Test create_store convenience function."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = create_store(tmpdir)
+            store = create_store(f"file://{tmpdir}")
             assert isinstance(store, FileStore)
 
     def test_unknown_scheme_raises(self):
         """Unknown scheme raises ValueError."""
         with pytest.raises(ValueError, match="Unknown store scheme"):
-            StoreFactory.from_locator("unknown://localhost")
+            create_store("unknown://localhost")
 
-
-class TestToLocator:
-    """Tests for to_locator function."""
-
-    def test_file_store_locator(self):
-        """FileStore produces file:// locator."""
+    def test_create_store_with_experiment_id(self):
+        """create_store passes experiment_id to config."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = FileStore(tmpdir)
-            locator = to_locator(store)
-            assert locator.startswith("file://")
-            assert tmpdir in locator
+            store = create_store(tmpdir, experiment_id="test:2.0")
+            assert isinstance(store, FileStore)
+            expected = Path(tmpdir) / "test_2.0"
+            assert store.root.resolve() == expected.resolve()
 
-    def test_round_trip(self):
-        """Store -> locator -> store round-trip."""
+
+class TestPostgresConfigCreation:
+    """Tests for PostgresStoreConfig creation (requires psycopg)."""
+
+    def test_postgres_locator_without_file_root(self):
+        """Postgres locator without file_root has empty params."""
+        config_class = ConfigRegistry.get("postgresql")
+        if config_class is None:
+            pytest.skip("psycopg not installed")
+
+        info = parse_locator("postgresql://localhost/db")
+        assert info.params.get("file_root") is None
+
+    def test_postgres_config_requires_file_root(self):
+        """PostgresStoreConfig requires file_root."""
+        config_class = ConfigRegistry.get("postgresql")
+        if config_class is None:
+            pytest.skip("psycopg not installed")
+
+        with pytest.raises(ValueError, match="file_root"):
+            parse_to_config("postgresql://localhost/db")
+
+    def test_postgres_with_file_root_in_uri(self):
+        """PostgresStoreConfig accepts file_root in URI."""
+        config_class = ConfigRegistry.get("postgresql")
+        if config_class is None:
+            pytest.skip("psycopg not installed")
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            store1 = FileStore(tmpdir)
-            locator = to_locator(store1)
-            store2 = create_store(locator)
-            assert isinstance(store2, FileStore)
-            # Compare resolved paths (macOS may use /private symlinks)
-            assert store2.root.resolve() == store1.root.resolve()
+            config = parse_to_config(f"postgresql://localhost/db?file_root={tmpdir}")
+            # Compare resolved paths (macOS resolves /var -> /private/var)
+            assert Path(config.file_root).resolve() == Path(tmpdir).resolve()
 
+    def test_postgres_with_file_root_kwarg(self):
+        """PostgresStoreConfig accepts file_root as kwarg."""
+        config_class = ConfigRegistry.get("postgresql")
+        if config_class is None:
+            pytest.skip("psycopg not installed")
 
-class TestFallback:
-    """Tests for fallback store creation."""
-
-    def test_fallback_on_failure(self):
-        """Falls back to secondary store when primary fails."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Try to create PostgresStore (which will fail without psycopg/server)
-            # with fallback to FileStore
-            try:
-                store = StoreFactory.from_locator(
-                    "postgresql://nonexistent:5432/db",
-                    fallback=tmpdir,
-                    connect_timeout=0.1,  # Short timeout
-                )
-                # If we get here, either psycopg is installed and connection failed
-                # (which should trigger fallback), or postgres scheme is not supported
-                # In either case, we should get a FileStore from fallback
-                assert isinstance(store, FileStore)
-            except ValueError as e:
-                # PostgresStore not available (psycopg not installed)
-                # This is also a valid outcome
-                assert "PostgreSQL store not yet implemented" in str(
-                    e
-                ) or "Unknown store scheme" in str(e)
+            config = parse_to_config(
+                "postgresql://localhost/db",
+                file_root=tmpdir,
+            )
+            # Compare resolved paths (macOS resolves /var -> /private/var)
+            assert Path(config.file_root).resolve() == Path(tmpdir).resolve()
+
+
+class TestSafeExperimentId:
+    """Tests for safe_experiment_id helper."""
+
+    def test_sanitizes_colon(self):
+        """Colons are replaced with underscores."""
+        assert safe_experiment_id("my_exp:1.0") == "my_exp_1.0"
+
+    def test_multiple_colons(self):
+        """Multiple colons are all replaced."""
+        assert safe_experiment_id("a:b:c") == "a_b_c"
+
+    def test_no_colon(self):
+        """IDs without colons pass through unchanged."""
+        assert safe_experiment_id("my_experiment") == "my_experiment"
+
+    def test_empty_string(self):
+        """Empty string is handled."""
+        assert safe_experiment_id("") == ""
+
+
+class TestExperimentScopedStorage:
+    """Tests for experiment-scoped directory nesting."""
+
+    def test_filestore_without_experiment_id(self):
+        """FileStore without experiment_id uses root directly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileStoreConfig(root=tmpdir).connect()
+            # Root should be the exact directory we passed
+            assert store.root.resolve() == Path(tmpdir).resolve()
+
+    def test_filestore_with_experiment_id(self):
+        """FileStore with experiment_id creates nested directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileStoreConfig(root=tmpdir, experiment_id="my_exp:1.0").connect()
+            # Root should be under {tmpdir}/my_exp_1.0/
+            expected = Path(tmpdir) / "my_exp_1.0"
+            assert store.root.resolve() == expected.resolve()
+            # Directory should be created
+            assert expected.exists()
+
+    def test_scoped_via_method(self):
+        """FileStoreConfig.scoped() creates nested directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = FileStoreConfig(root=tmpdir)
+            scoped_config = config.scoped("exp:3.0")
+            store = scoped_config.connect()
+            expected = Path(tmpdir) / "exp_3.0"
+            assert store.root.resolve() == expected.resolve()
+
+    def test_config_round_trip_with_experiment_id(self):
+        """Config with experiment_id round-trips through to_dict/from_dict."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create config with experiment_id
+            config1 = FileStoreConfig(root=tmpdir, experiment_id="exp:3.0")
+
+            # Serialize and deserialize
+            d = config1.to_dict()
+            from metalab.store.config import StoreConfig
+
+            config2 = StoreConfig.from_dict(d)
+
+            assert config2.root == config1.root
+            assert config2.experiment_id == config1.experiment_id
+
+    def test_multiple_experiments_separate_directories(self):
+        """Different experiments get their own directories."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store1 = FileStoreConfig(root=tmpdir, experiment_id="exp:1.0").connect()
+            store2 = FileStoreConfig(root=tmpdir, experiment_id="exp:2.0").connect()
+
+            # Each should have its own directory
+            assert store1.root != store2.root
+            assert store1.root.name == "exp_1.0"
+            assert store2.root.name == "exp_2.0"
+
+            # Both should exist
+            assert store1.root.exists()
+            assert store2.root.exists()

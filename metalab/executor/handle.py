@@ -2,11 +2,13 @@
 RunHandle: Promise-like interface for tracking experiment execution.
 
 Provides:
+
 - RunStatus: Status summary for a batch of runs
 - RunHandle: Protocol for tracking/awaiting experiment execution
 - LocalRunHandle: Implementation for thread/process executors
 
 Event-driven architecture:
+
 - All handles support an optional on_event callback
 - Events are emitted when run state changes (started, finished, failed, skipped)
 - LocalRunHandle emits events synchronously from futures
@@ -92,6 +94,11 @@ class RunHandle(Protocol):
     @property
     def job_id(self) -> str:
         """Unique identifier for this execution batch."""
+        ...
+
+    @property
+    def store(self) -> "Store":
+        """The store used for this execution."""
         ...
 
     @property
@@ -240,6 +247,11 @@ class LocalRunHandle:
     def job_id(self) -> str:
         """Unique identifier for this execution batch."""
         return self._job_id
+
+    @property
+    def store(self) -> "Store":
+        """The store used for this execution."""
+        return self._store
 
     @property
     def status(self) -> RunStatus:

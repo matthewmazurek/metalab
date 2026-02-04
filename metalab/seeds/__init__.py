@@ -2,6 +2,7 @@
 Seeds module: Explicit RNG control with deterministic derivation.
 
 Provides:
+
 - SeedBundle: Manages root seed and derived sub-seeds
 - SeedPlan: Generates seed bundles for replicates
 - seeds(): Factory for creating seed plans

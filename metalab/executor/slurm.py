@@ -2,6 +2,7 @@
 SlurmExecutor: SLURM cluster execution via direct sbatch submission.
 
 Provides:
+
 - SlurmConfig: Configuration for SLURM job parameters
 - SlurmExecutor: Executor that submits index-addressed SLURM arrays
 - SlurmRunHandle: Handle for tracking SLURM job execution
@@ -11,6 +12,7 @@ computes its parameters from SLURM_ARRAY_TASK_ID, avoiding per-task
 serialization overhead.
 
 Job state tracking:
+
 - Uses squeue for active job counts (RUNNING, PENDING)
 - Uses sacct for terminal job counts (COMPLETED, FAILED, etc.)
 - Falls back to store-only polling if SLURM commands unavailable
@@ -28,12 +30,11 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from metalab.executor.handle import RunStatus
 from metalab.executor.payload import RunPayload
 from metalab.result import Results
-from metalab.store.locator import to_locator
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
@@ -70,40 +71,6 @@ logger = logging.getLogger(__name__)
 
 # Default maximum array size (many clusters limit this)
 DEFAULT_MAX_ARRAY_SIZE = 10000
-
-
-def _serialize_context_spec(obj: Any) -> Any:
-    """
-    Serialize a context spec to a JSON-compatible structure with type preservation.
-
-    Handles dataclasses (FilePath, DirPath, context_spec decorated classes),
-    dicts, lists, and primitives. Type information is preserved via __type__ keys.
-
-    Args:
-        obj: The context spec object to serialize.
-
-    Returns:
-        A JSON-serializable structure.
-    """
-    import dataclasses
-
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    if isinstance(obj, (list, tuple)):
-        return [_serialize_context_spec(item) for item in obj]
-    if isinstance(obj, dict):
-        return {k: _serialize_context_spec(v) for k, v in obj.items()}
-    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        # Preserve type information for reconstruction
-        type_name = type(obj).__module__ + "." + type(obj).__qualname__
-        fields = {
-            f.name: _serialize_context_spec(getattr(obj, f.name))
-            for f in dataclasses.fields(obj)
-        }
-        return {"__type__": type_name, **fields}
-
-    # Fallback: convert to string
-    return str(obj)
 
 
 @dataclass
@@ -252,9 +219,11 @@ def squeue_state_counts(
         Returns empty dict if squeue fails.
 
     Example:
-        >>> counts = squeue_state_counts(["12345", "12346"])
-        >>> counts
-        {"RUNNING": 50, "PENDING": 100, "COMPLETING": 5}
+    ```pycon
+    >>> counts = squeue_state_counts(["12345", "12346"])
+    >>> counts
+    {"RUNNING": 50, "PENDING": 100, "COMPLETING": 5}
+    ```
 
     Notes:
         - Ignores .batch, .extern, and other step jobs
@@ -306,9 +275,11 @@ def sacct_state_counts(
         Returns empty dict if sacct fails.
 
     Example:
-        >>> counts = sacct_state_counts(["12345", "12346"])
-        >>> counts
-        {"COMPLETED": 95, "FAILED": 3, "CANCELLED": 2}
+    ```pycon
+    >>> counts = sacct_state_counts(["12345", "12346"])
+    >>> counts
+    {"COMPLETED": 95, "FAILED": 3, "CANCELLED": 2}
+    ```
 
     Notes:
         - Uses parsable output format for reliable parsing
@@ -530,32 +501,19 @@ def _write_array_spec(
     context_fingerprint: str,
     shards: list[dict[str, Any]],
     chunk_size: int,
-    store_locator: str,
-    experiments_root: str,
+    store_locator: dict[str, Any],
 ) -> None:
-    """
-    Write the array spec file that workers use to reconstruct runs.
-
-    The context spec is serialized to JSON with type information preserved
-    for dataclasses (FilePath, DirPath, context_spec decorated classes).
-
-    Args:
-        store_root: Path to the store root.
-        experiment: The experiment being run.
-        context_fingerprint: Precomputed context fingerprint.
-        shards: List of shard info dicts with job_id, start_idx, end_idx.
-        chunk_size: Number of runs per array task.
-        store_locator: Locator string for reconstructing the store backend.
-        experiments_root: Path to experiments root for SLURM coordination files.
-    """
+    """Write array spec file for workers to reconstruct runs."""
     from metalab.manifest import serialize
 
     total_runs = len(experiment.params) * len(experiment.seeds)  # type: ignore[arg-type]
 
     # Serialize context spec to JSON with type preservation
+    from metalab.context.spec import serialize_context_spec
+
     context_json_path = store_root / "context_spec.json"
     with open(context_json_path, "w") as f:
-        json.dump(_serialize_context_spec(experiment.context), f, indent=2)
+        json.dump(serialize_context_spec(experiment.context), f, indent=2)
 
     spec = {
         "experiment_id": experiment.experiment_id,
@@ -571,10 +529,8 @@ def _write_array_spec(
         "chunk_size": chunk_size,
         "total_chunks": (total_runs + chunk_size - 1) // chunk_size,
         "shards": shards,
-        "derived_metric_refs": None,  # Set later if needed
-        # Store backend info for workers to reconstruct the correct store
+        "derived_metric_refs": None,
         "store_locator": store_locator,
-        "experiments_root": experiments_root,
     }
 
     spec_path = store_root / "slurm_array_spec.json"
@@ -662,9 +618,7 @@ class SlurmExecutor:
         param_cases = len(experiment.params) if hasattr(experiment.params, "__len__") else 0  # type: ignore[arg-type]
         seed_replicates = len(experiment.seeds) if hasattr(experiment.seeds, "__len__") else 0  # type: ignore[arg-type]
 
-        # Get store locator for workers to reconstruct the correct backend
-        store_locator = to_locator(store)
-        experiments_root = str(store_path)
+        store_locator = store.config.to_dict()
 
         # Write array spec (before submission so workers can read it)
         _write_array_spec(
@@ -674,7 +628,6 @@ class SlurmExecutor:
             shards=shards,
             chunk_size=chunk_size,
             store_locator=store_locator,
-            experiments_root=experiments_root,
         )
 
         # Update spec with derived metrics if provided
@@ -957,6 +910,9 @@ class SlurmRunHandle:
     This handle does not depend on submitit.
     """
 
+    # Executor type for HandleRegistry
+    executor_type: ClassVar[str] = "slurm"
+
     def __init__(
         self,
         store: "Store",
@@ -1008,6 +964,11 @@ class SlurmRunHandle:
     def job_id(self) -> str:
         """Primary SLURM job ID (first shard)."""
         return self._job_ids[0] if self._job_ids else "slurm-no-jobs"
+
+    @property
+    def store(self) -> "Store":
+        """The store used for this execution."""
+        return self._store
 
     def _count_done_markers(self) -> int:
         """
@@ -1340,3 +1301,9 @@ class SlurmRunHandle:
                 skipped_count=skipped,
                 on_event=on_event,
             )
+
+
+# Register SlurmRunHandle with the HandleRegistry for reconnection support
+from metalab.executor.registry import HandleRegistry
+
+HandleRegistry.register(SlurmRunHandle.executor_type, SlurmRunHandle)

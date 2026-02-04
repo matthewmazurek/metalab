@@ -1,0 +1,86 @@
+site_name: metalab
+site_description: A general experiment runner framework
+repo_url: https://github.com/matthewmazurek/metalab
+repo_name: matthewmazurek/metalab
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.expand
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            docstring_style: google
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+  - Guides:
+    - Key Concepts: key-concepts.md
+    - Preprocessing: preprocessing.md
+    - Execution: execution.md
+    - Storage: storage.md
+    - Remote Analysis: remote-analysis-workflow.md
+  - API Reference:
+    - Overview: api/index.md
+    - Core:
+      - Experiment: api/experiment.md
+      - Operation: api/operation.md
+      - Context: api/context.md
+    - Parameters: api/params.md
+    - Seeds: api/seeds.md
+    - Capture: api/capture.md
+    - Results: api/results.md
+    - Stores: api/stores.md
+    - Executors: api/executors.md
+  - CLI Reference: cli.md

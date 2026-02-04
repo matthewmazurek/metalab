@@ -28,7 +28,7 @@ class RunPayload:
         context_spec: The serializable context specification.
         params_resolved: The resolved parameter dictionary.
         seed_bundle: The seed bundle for this run.
-        store_locator: Path or URI to the store.
+        store_locator: Store configuration as dict (from StoreConfig.to_dict()).
         fingerprints: Dict with context_fingerprint, params_fingerprint, seed_fingerprint.
         metadata: Experiment-level metadata (not fingerprinted, passed to Runtime).
         operation_ref: Reference to operation (e.g., "module:name").
@@ -41,7 +41,7 @@ class RunPayload:
     context_spec: Any  # Serializable
     params_resolved: dict[str, Any]
     seed_bundle: SeedBundle
-    store_locator: str
+    store_locator: dict[str, Any]
     fingerprints: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     operation_ref: str = ""

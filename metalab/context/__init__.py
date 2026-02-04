@@ -8,13 +8,10 @@ The context system provides:
 Operations receive the spec directly and load any heavy data themselves.
 """
 
-from metalab.context.provider import ContextProvider, DefaultContextProvider
 from metalab.context.spec import ContextSpec, FrozenContext, context_spec
 
 __all__ = [
     "ContextSpec",
     "FrozenContext",
     "context_spec",
-    "ContextProvider",
-    "DefaultContextProvider",
 ]

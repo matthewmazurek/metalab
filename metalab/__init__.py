@@ -8,37 +8,41 @@ persisted by a Store.
 Everything else is plug-ins.
 
 Example:
-    import metalab
+```python
+import metalab
 
-    @metalab.operation
-    def estimate_pi(params, seeds, capture):
-        n = params["n_samples"]
-        rng = seeds.numpy()
-        x, y = rng.random(n), rng.random(n)
-        pi_est = 4.0 * (x**2 + y**2 <= 1).mean()
-        capture.metric("pi_estimate", pi_est)
 
-    exp = metalab.Experiment(
-        name="pi_mc",
-        version="0.1",
-        context={},
-        operation=estimate_pi,
-        params=metalab.grid(n_samples=[1000, 10000, 100000]),
-        seeds=metalab.seeds(base=42, replicates=3),
-    )
+@metalab.operation
+def estimate_pi(params, seeds, capture):
+    n = params["n_samples"]
+    rng = seeds.numpy()
+    x, y = rng.random(n), rng.random(n)
+    pi_est = 4.0 * (x**2 + y**2 <= 1).mean()
+    capture.metric("pi_estimate", pi_est)
 
-    # Run and get results
-    handle = metalab.run(exp)  # returns RunHandle
-    results = handle.result()  # blocks until complete
-    print(results.table())
 
-    # Or for SLURM execution:
-    handle = metalab.run(
-        exp,
-        store="/scratch/runs/pi_mc",
-        executor=metalab.SlurmExecutor(metalab.SlurmConfig(partition="gpu")),
-    )
-    print(handle.status)  # check progress without blocking
+exp = metalab.Experiment(
+    name="pi_mc",
+    version="0.1",
+    context={},
+    operation=estimate_pi,
+    params=metalab.grid(n_samples=[1000, 10000, 100000]),
+    seeds=metalab.seeds(base=42, replicates=3),
+)
+
+# Run and get results
+handle = metalab.run(exp)  # returns RunHandle
+results = handle.result()  # blocks until complete
+print(results.table())
+
+# Or for SLURM execution:
+handle = metalab.run(
+    exp,
+    store="/scratch/runs/pi_mc",
+    executor=metalab.SlurmExecutor(metalab.SlurmConfig(partition="gpu")),
+)
+print(handle.status)  # check progress without blocking
+```
 """
 
 __version__ = "0.1.0"
@@ -47,13 +51,7 @@ __version__ = "0.1.0"
 from metalab.capture import Capture
 
 # Context
-from metalab.context import (
-    ContextProvider,
-    ContextSpec,
-    DefaultContextProvider,
-    FrozenContext,
-    context_spec,
-)
+from metalab.context import ContextSpec, FrozenContext, context_spec
 
 # Events
 from metalab.events import Event, EventCallback, EventKind
@@ -70,7 +68,7 @@ from metalab.executor import (
 )
 
 
-# Lazy import for SLURM (requires submitit)
+# Lazy import for SLURM (requires submitit) and PostgresStoreConfig (requires psycopg)
 def __getattr__(name: str):
     if name in ("SlurmExecutor", "SlurmConfig", "SlurmRunHandle"):
         from metalab.executor.slurm import SlurmConfig, SlurmExecutor, SlurmRunHandle
@@ -81,6 +79,10 @@ def __getattr__(name: str):
             return SlurmConfig
         elif name == "SlurmRunHandle":
             return SlurmRunHandle
+    if name == "PostgresStoreConfig":
+        from metalab.store.postgres import PostgresStoreConfig
+
+        return PostgresStoreConfig
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -134,7 +136,7 @@ from metalab.runtime import CancellationToken, CancelledError, Runtime
 from metalab.seeds import SeedBundle, SeedPlan, seeds
 
 # Store (for advanced usage)
-from metalab.store import FileStore, Store
+from metalab.store import FileStore, FileStoreConfig, Store, StoreConfig
 
 # Types (public)
 from metalab.types import ArtifactDescriptor, Provenance, RunRecord, Status
@@ -184,8 +186,6 @@ __all__ = [
     "ContextSpec",
     "FrozenContext",
     "context_spec",
-    "ContextProvider",
-    "DefaultContextProvider",
     # Experiment
     "Experiment",
     # Result
@@ -198,7 +198,11 @@ __all__ = [
     "reconnect",
     # Store
     "Store",
+    "StoreConfig",
     "FileStore",
+    "FileStoreConfig",
+    # Lazy-loaded store configs
+    "PostgresStoreConfig",
     # Executor
     "Executor",
     "ThreadExecutor",

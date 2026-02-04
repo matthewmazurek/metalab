@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from metalab.capture.capture import Capture
-from metalab.store import FileStore
+from metalab.store import FileStore, FileStoreConfig
 
 
 class TestCaptureData:
@@ -24,7 +24,7 @@ class TestCaptureData:
 
     def test_data_stores_list(self, tmp_path: Path) -> None:
         """capture.data() should store list data."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.data("scores", [0.1, 0.2, 0.3])
@@ -40,7 +40,7 @@ class TestCaptureData:
 
     def test_data_stores_dict(self, tmp_path: Path) -> None:
         """capture.data() should store dict data."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         data = {"gene_a": 0.8, "gene_b": 0.6}
@@ -57,7 +57,7 @@ class TestCaptureData:
         pytest.importorskip("numpy")
         import numpy as np
 
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         matrix = np.array([[1.0, 2.0], [3.0, 4.0]])
@@ -74,7 +74,7 @@ class TestCaptureData:
 
     def test_data_with_metadata(self, tmp_path: Path) -> None:
         """capture.data() should store optional metadata."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.data("embeddings", [1, 2, 3], metadata={"dim": 3})
@@ -85,7 +85,7 @@ class TestCaptureData:
 
     def test_multiple_data_entries(self, tmp_path: Path) -> None:
         """Multiple capture.data() calls should accumulate."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.data("data_a", [1, 2])
@@ -105,7 +105,7 @@ class TestSteppedMetricsConversion:
 
     def test_stepped_metrics_converted_to_data(self, tmp_path: Path) -> None:
         """Stepped metrics should be converted to data entries at finalize."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         # Log some stepped metrics
@@ -130,7 +130,7 @@ class TestSteppedMetricsConversion:
 
     def test_multiple_stepped_metrics_grouped(self, tmp_path: Path) -> None:
         """Multiple stepped metric names should create separate data entries."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         # Log stepped metrics for two different names
@@ -148,7 +148,7 @@ class TestSteppedMetricsConversion:
 
     def test_stepped_metrics_sorted_by_step(self, tmp_path: Path) -> None:
         """Stepped metrics should be sorted by step number."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         # Log out of order
@@ -168,7 +168,7 @@ class TestCaptureMetrics:
 
     def test_metric_stores_scalar(self, tmp_path: Path) -> None:
         """capture.metric() should store scalar values."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.metric("accuracy", 0.95)
@@ -180,7 +180,7 @@ class TestCaptureMetrics:
 
     def test_log_metrics_batch(self, tmp_path: Path) -> None:
         """capture.log_metrics() should store multiple metrics."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.log_metrics({"a": 1, "b": 2, "c": 3})
@@ -191,7 +191,7 @@ class TestCaptureMetrics:
 
     def test_log_metrics_with_step(self, tmp_path: Path) -> None:
         """capture.log_metrics() with step should use stepped metrics."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.log_metrics({"loss": 0.9, "accuracy": 0.1}, step=0)
@@ -209,7 +209,7 @@ class TestCaptureSummary:
 
     def test_summary_includes_results(self, tmp_path: Path) -> None:
         """Summary should include results in addition to metrics and artifacts."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.metric("accuracy", 0.95)
@@ -228,7 +228,7 @@ class TestCaptureSummary:
 
     def test_finalize_idempotent(self, tmp_path: Path) -> None:
         """finalize() should be idempotent."""
-        store = FileStore(tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         capture = Capture(store=store, run_id="test_run_123")
 
         capture.metric("accuracy", 0.95)

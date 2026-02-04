@@ -516,13 +516,10 @@ class TestCaptureLog:
         assert len(result) == 1
         assert result[0].status == Status.SUCCESS
 
-        # Check that logs were stored
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
+        # Check that logs were stored (use handle.store which has correct root)
         run_id = result[0].run_id
 
-        run_log = store.get_log(run_id, "run")
+        run_log = handle.store.get_log(run_id, "run")
         assert run_log is not None
         assert "Starting with x=5" in run_log
         assert "Debug info for x=5" in run_log
@@ -548,12 +545,9 @@ class TestCaptureLog:
         assert len(result) == 1
         assert result[0].status == Status.SUCCESS
 
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
         run_id = result[0].run_id
 
-        run_log = store.get_log(run_id, "run")
+        run_log = handle.store.get_log(run_id, "run")
         assert run_log is not None
         assert "x is large" in run_log
         assert "[WARNING]" in run_log
@@ -574,12 +568,8 @@ class TestCaptureLog:
 
         assert len(result) == 3
 
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
-
         for run in result:
-            run_log = store.get_log(run.run_id, "run")
+            run_log = handle.store.get_log(run.run_id, "run")
             assert run_log is not None
             # Each should contain its own log messages
             x_val = run.metrics.get("result", 0) // 2  # result = x * 2
@@ -599,12 +589,9 @@ class TestCaptureLog:
         handle = metalab.run(exp, store=str(store_path))
         result = handle.result()
 
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
         run_id = result[0].run_id
 
-        run_log = store.get_log(run_id, "run")
+        run_log = handle.store.get_log(run_id, "run")
         assert run_log is not None
         # ThreadExecutor uses "thread:N" format in the logger name
         assert "thread:" in run_log
@@ -643,12 +630,9 @@ class TestCaptureLog:
         handle = metalab.run(exp, store=str(store_path))
         result = handle.result()
 
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
         run_id = result[0].run_id
 
-        run_log = store.get_log(run_id, "run")
+        run_log = handle.store.get_log(run_id, "run")
         assert run_log is not None
 
         # Check that our operation logs are captured
@@ -685,12 +669,9 @@ class TestCaptureLog:
         handle = metalab.run(exp, store=str(store_path))
         result = handle.result()
 
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
         run_id = result[0].run_id
 
-        run_log = store.get_log(run_id, "run")
+        run_log = handle.store.get_log(run_id, "run")
         assert run_log is not None
 
         # All logging methods should work
@@ -719,8 +700,8 @@ class TestExperimentManifest:
         handle = metalab.run(exp, store=str(store_path))
         handle.result()
 
-        # Check that experiments directory exists
-        experiments_dir = store_path / "experiments"
+        # Check that experiments directory exists (within experiment subdirectory)
+        experiments_dir = handle.store.root / "experiments"
         assert experiments_dir.exists()
 
         # Check that a manifest file was created
@@ -750,7 +731,7 @@ class TestExperimentManifest:
         handle = metalab.run(exp, store=str(store_path))
         handle.result()
 
-        experiments_dir = store_path / "experiments"
+        experiments_dir = handle.store.root / "experiments"
         manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
         manifest = json.loads(manifest_files[0].read_text())
 
@@ -773,7 +754,7 @@ class TestExperimentManifest:
         handle = metalab.run(exp, store=str(store_path))
         handle.result()
 
-        experiments_dir = store_path / "experiments"
+        experiments_dir = handle.store.root / "experiments"
         manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
         manifest = json.loads(manifest_files[0].read_text())
 
@@ -796,7 +777,7 @@ class TestExperimentManifest:
         handle = metalab.run(exp, store=str(store_path))
         handle.result()
 
-        experiments_dir = store_path / "experiments"
+        experiments_dir = handle.store.root / "experiments"
         manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
         manifest = json.loads(manifest_files[0].read_text())
 
@@ -820,7 +801,7 @@ class TestExperimentManifest:
         handle = metalab.run(exp, store=str(store_path))
         handle.result()
 
-        experiments_dir = store_path / "experiments"
+        experiments_dir = handle.store.root / "experiments"
         manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
         manifest = json.loads(manifest_files[0].read_text())
 
@@ -855,7 +836,8 @@ class TestExperimentManifest:
         handle2 = metalab.run(exp, store=str(store_path), resume=False)
         handle2.result()
 
-        experiments_dir = store_path / "experiments"
+        # Both runs use the same experiment, so same store root
+        experiments_dir = handle2.store.root / "experiments"
         manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
         assert len(manifest_files) == 2
 
@@ -877,7 +859,7 @@ class TestExperimentManifest:
         result_run_ids = set(run.run_id for run in result)
 
         # Check the manifest
-        experiments_dir = store_path / "experiments"
+        experiments_dir = handle.store.root / "experiments"
         manifest_files = list(experiments_dir.glob("test_1.0_*.json"))
         manifest = json.loads(manifest_files[0].read_text())
 
@@ -900,6 +882,9 @@ class TestRunningStatusRecords:
         """A running record should be written before the operation completes."""
         import threading
         import time
+
+        from metalab.store.file import FileStoreConfig
+        from metalab.store.layout import safe_experiment_id
 
         # Track when we see the running record
         seen_running = threading.Event()
@@ -927,11 +912,12 @@ class TestRunningStatusRecords:
             seeds=metalab.seeds(base=42, replicates=1),
         )
 
-        from metalab.store.file import FileStore
+        # Compute the actual store path (collection root + experiment subdirectory)
+        actual_store_path = store_path / safe_experiment_id(exp.experiment_id)
 
         # Use a monitor to check for running records
         def monitor_for_running():
-            store = FileStore(str(store_path))
+            store = FileStoreConfig(root=str(actual_store_path)).connect()
             for _ in range(20):  # Try for up to 2 seconds
                 records = store.list_run_records()
                 for record in records:
@@ -971,101 +957,13 @@ class TestRunningStatusRecords:
         handle = metalab.run(exp, store=str(store_path))
         result = handle.result()
 
-        # Check the final record in the store
-        from metalab.store.file import FileStore
-
-        store = FileStore(str(store_path))
-        records = store.list_run_records()
+        # Check the final record in the store (use handle.store for correct path)
+        records = handle.store.list_run_records()
 
         # Should only have one record per run_id
         assert len(records) == 1
         # Final status should be SUCCESS, not RUNNING
         assert records[0].status == Status.SUCCESS
-
-
-class TestFallbackStore:
-    """Tests for the fallback=True functionality."""
-
-    def test_fallback_wraps_filestore(self, tmp_path: Path):
-        """fallback=True wraps a FileStore with FallbackStore."""
-        from metalab.store import FileStore
-
-        exp = metalab.Experiment(
-            name="fallback_test",
-            version="1.0",
-            context=SimpleContext(),
-            operation=simple_operation,
-            params=metalab.grid(x=[1]),
-            seeds=metalab.seeds(base=42, replicates=1),
-        )
-
-        primary_path = tmp_path / "primary"
-        fallback_root = tmp_path / "fallback"
-
-        # Run with fallback=True
-        handle = metalab.run(
-            exp,
-            store=str(primary_path),
-            fallback=True,
-            fallback_root=str(fallback_root),
-            write_to_both=True,
-        )
-        result = handle.result()
-
-        # Should succeed
-        assert len(result) == 1
-        assert result[0].status == Status.SUCCESS
-
-        # With write_to_both=True, records should be in both stores
-        primary_store = FileStore(primary_path)
-        fallback_store = FileStore(fallback_root / "fallback_test")
-
-        primary_records = primary_store.list_run_records()
-        fallback_records = fallback_store.list_run_records()
-
-        assert len(primary_records) == 1
-        assert len(fallback_records) == 1
-        assert primary_records[0].run_id == fallback_records[0].run_id
-
-    def test_fallback_default_root(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """fallback_root defaults to ./runs."""
-        from metalab.store import FileStore
-
-        # Change to tmp_path so ./runs is created there
-        # Use resolve() to handle macOS /var vs /private/var symlink
-        tmp_path = tmp_path.resolve()
-        monkeypatch.chdir(tmp_path)
-
-        exp = metalab.Experiment(
-            name="default_fallback",
-            version="1.0",
-            context=SimpleContext(),
-            operation=simple_operation,
-            params=metalab.grid(x=[1]),
-            seeds=metalab.seeds(base=42, replicates=1),
-        )
-
-        primary_path = tmp_path / "primary"
-
-        # Run with fallback=True (default fallback_root)
-        handle = metalab.run(
-            exp,
-            store=str(primary_path),
-            fallback=True,
-        )
-        result = handle.result()
-
-        # Should succeed
-        assert len(result) == 1
-
-        # Default fallback should be at ./runs/{exp.name}
-        # The FileStore resolves the path, so use the resolved form
-        expected_fallback = (tmp_path / "runs" / "default_fallback").resolve()
-        fallback_store = FileStore(expected_fallback)
-        fallback_records = fallback_store.list_run_records()
-        assert len(fallback_records) == 1
 
 
 class TestDataCapture:
@@ -1145,11 +1043,8 @@ class TestDataCapture:
         assert result[0].status == Status.SUCCESS
         assert result[0].metrics["final_loss"] == 0.05
 
-        # Check that logs were written
-        from metalab.store.file import FileStore
-
-        store = FileStore(store_path)
-        log_content = store.get_log(result[0].run_id, "run")
+        # Check that logs were written (use handle.store for correct path)
+        log_content = handle.store.get_log(result[0].run_id, "run")
         assert log_content is not None
         assert "Starting operation" in log_content
         assert "Data captured" in log_content
@@ -1157,6 +1052,7 @@ class TestDataCapture:
     def test_derived_metrics_can_access_data(self, store_path: Path):
         """Test that derived metrics can access data captured via capture.data()."""
         import numpy as np
+
         from metalab.types import Metric
 
         @metalab.operation
@@ -1189,11 +1085,9 @@ class TestDataCapture:
         assert result[0].status == Status.SUCCESS
 
         # Compute derived metrics post-hoc (can use local functions)
-        from metalab.store.file import FileStore
         from metalab.result import Run
 
-        store = FileStore(store_path)
-        run = Run(result[0], store)
+        run = Run(result[0], handle.store)
 
         # Access captured data via run.data()
         matrix = run.data("test_matrix")
@@ -1241,12 +1135,9 @@ class TestDataCapture:
         assert result[0].status == Status.SUCCESS
 
         # Load results and access data via run.data()
-        from metalab.store.file import FileStore
-
-        store = FileStore(store_path)
         from metalab.result import Run
 
-        run = Run(result[0], store)
+        run = Run(result[0], handle.store)
 
         # Access dict data
         config = run.data("config")

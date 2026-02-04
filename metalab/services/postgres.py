@@ -150,14 +150,14 @@ class PostgresService:
 def build_store_locator(
     service: PostgresService,
     *,
-    experiments_root: Path | str,
+    file_root: Path | str,
     schema: str | None = None,
     extra_params: dict[str, str] | None = None,
 ) -> str:
     """
     Build a PostgresStore locator from a running service.
 
-    Ensures required experiments_root is included and preserves existing params.
+    Ensures required file_root is included and preserves existing params.
     """
     parsed = urlparse(service.connection_string)
     params = {}
@@ -165,7 +165,7 @@ def build_store_locator(
         for key, values in parse_qs(parsed.query).items():
             params[key] = values[-1] if values else ""
 
-    params["experiments_root"] = str(Path(experiments_root))
+    params["file_root"] = str(Path(file_root))
     if schema:
         params["schema"] = schema
     if extra_params:

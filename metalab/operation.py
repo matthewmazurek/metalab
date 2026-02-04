@@ -28,6 +28,7 @@ class OperationWrapper:
     Wrapper around an operation function.
 
     Provides:
+
     - Metadata (name)
     - Consistent interface
     - Code hash for provenance
@@ -103,9 +104,11 @@ class OperationWrapper:
         Only injects parameters that the function signature requests.
         This allows operations to declare only the parameters they need:
 
-            @metalab.operation
-            def my_op(params, seeds, capture):  # Only request what you need
-                ...
+        ```python
+        @metalab.operation
+        def my_op(params, seeds, capture):  # Only request what you need
+            ...
+        ```
 
         Args:
             context: The frozen context.
@@ -164,21 +167,25 @@ def operation(
     Decorator to mark a function as a metalab operation.
 
     Can be used with or without arguments:
-        @metalab.operation
-        def my_op(params, capture): ...
 
-        @metalab.operation()
-        def my_op(params, capture): ...
+    ```python
+    @metalab.operation
+    def my_op(params, capture): ...
 
-        @metalab.operation(name="custom_name")
-        def my_op(params, capture): ...
+    @metalab.operation()
+    def my_op(params, capture): ...
+
+    @metalab.operation(name="custom_name")
+    def my_op(params, capture): ...
+    ```
 
     The decorated function can request any subset of these parameters:
-        - context: The frozen context (shared read-only data)
-        - params: The resolved parameters for this run
-        - seeds: The seed bundle for reproducible randomness
-        - runtime: Runtime context (scratch dir, resource hints)
-        - capture: Interface for recording metrics and artifacts
+
+    - `context`: The frozen context (shared read-only data)
+    - `params`: The resolved parameters for this run
+    - `seeds`: The seed bundle for reproducible randomness
+    - `runtime`: Runtime context (scratch dir, resource hints)
+    - `capture`: Interface for recording metrics and artifacts
 
     Only include the parameters your operation needs—unused ones can be omitted.
 
@@ -190,6 +197,7 @@ def operation(
         An OperationWrapper or a decorator that creates one.
 
     Example:
+        ```python
         # Simplest form - uses function name as operation name
         @metalab.operation
         def estimate_pi(params, seeds, capture):
@@ -208,6 +216,7 @@ def operation(
         @metalab.operation
         def full_operation(context, params, seeds, runtime, capture):
             ...
+        ```
     """
 
     def decorator(fn: F) -> OperationWrapper:

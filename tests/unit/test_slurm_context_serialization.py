@@ -1,4 +1,4 @@
-"""Unit tests for SLURM context spec JSON serialization."""
+"""Unit tests for context spec JSON serialization."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from typing import Any
 import pytest
 
 from metalab._ids import DirPath, FilePath
-from metalab.executor.slurm import _serialize_context_spec
-from metalab.executor.slurm_array_worker import _deserialize_context_spec
+from metalab.context.spec import deserialize_context_spec, serialize_context_spec
 
 
 @dataclass(frozen=True)
@@ -48,7 +47,7 @@ class TestContextSpecSerialization:
     def test_serialize_simple_dict(self):
         """Simple dicts should serialize cleanly."""
         ctx = {"name": "test", "value": 42}
-        result = _serialize_context_spec(ctx)
+        result = serialize_context_spec(ctx)
 
         assert result == {"name": "test", "value": 42}
         # Should be JSON serializable
@@ -57,7 +56,7 @@ class TestContextSpecSerialization:
     def test_serialize_simple_dataclass(self):
         """Simple dataclasses should include __type__ info."""
         ctx = SimpleContext(name="test", value=42)
-        result = _serialize_context_spec(ctx)
+        result = serialize_context_spec(ctx)
 
         assert "__type__" in result
         assert result["name"] == "test"
@@ -68,7 +67,7 @@ class TestContextSpecSerialization:
     def test_serialize_filepath(self):
         """FilePath should serialize with type info."""
         fp = FilePath("/path/to/file.txt")
-        result = _serialize_context_spec(fp)
+        result = serialize_context_spec(fp)
 
         assert "__type__" in result
         assert "FilePath" in result["__type__"]
@@ -78,7 +77,7 @@ class TestContextSpecSerialization:
     def test_serialize_dirpath(self):
         """DirPath should serialize with type info."""
         dp = DirPath("/path/to/dir", pattern="*.csv")
-        result = _serialize_context_spec(dp)
+        result = serialize_context_spec(dp)
 
         assert "__type__" in result
         assert "DirPath" in result["__type__"]
@@ -92,7 +91,7 @@ class TestContextSpecSerialization:
             file=FilePath("/data/input.csv"),
             dir=DirPath("/data/outputs", pattern="*.json"),
         )
-        result = _serialize_context_spec(ctx)
+        result = serialize_context_spec(ctx)
 
         assert "__type__" in result
         assert result["name"] == "test"
@@ -110,7 +109,7 @@ class TestContextSpecSerialization:
             enabled=True,
             threshold=0.5,
         )
-        result = _serialize_context_spec(ctx)
+        result = serialize_context_spec(ctx)
 
         assert result["values"] == [1, 2, 3]
         assert result["config"]["lr"] == 0.01
@@ -125,7 +124,7 @@ class TestContextSpecDeserialization:
     def test_deserialize_simple_dict(self):
         """Simple dicts should pass through unchanged."""
         data = {"name": "test", "value": 42}
-        result = _deserialize_context_spec(data)
+        result = deserialize_context_spec(data)
 
         assert result == {"name": "test", "value": 42}
 
@@ -136,7 +135,7 @@ class TestContextSpecDeserialization:
             "path": "/path/to/file.txt",
             "hash_path": False,
         }
-        result = _deserialize_context_spec(data)
+        result = deserialize_context_spec(data)
 
         assert isinstance(result, FilePath)
         assert result.path == "/path/to/file.txt"
@@ -150,7 +149,7 @@ class TestContextSpecDeserialization:
             "pattern": "*.csv",
             "hash_path": False,
         }
-        result = _deserialize_context_spec(data)
+        result = deserialize_context_spec(data)
 
         assert isinstance(result, DirPath)
         assert result.path == "/path/to/dir"
@@ -162,7 +161,7 @@ class TestContextSpecDeserialization:
             {"__type__": "metalab._ids.FilePath", "path": "/a.txt", "hash_path": False},
             {"__type__": "metalab._ids.FilePath", "path": "/b.txt", "hash_path": True},
         ]
-        result = _deserialize_context_spec(data)
+        result = deserialize_context_spec(data)
 
         assert len(result) == 2
         assert isinstance(result[0], FilePath)
@@ -173,8 +172,8 @@ class TestContextSpecDeserialization:
     def test_round_trip_simple_context(self):
         """Serialize and deserialize should preserve data."""
         ctx = SimpleContext(name="test", value=42)
-        serialized = _serialize_context_spec(ctx)
-        deserialized = _deserialize_context_spec(serialized)
+        serialized = serialize_context_spec(ctx)
+        deserialized = deserialize_context_spec(serialized)
 
         assert isinstance(deserialized, SimpleContext)
         assert deserialized.name == "test"
@@ -187,8 +186,8 @@ class TestContextSpecDeserialization:
             file=FilePath("/data/input.csv"),
             dir=DirPath("/data/outputs", pattern="*.json"),
         )
-        serialized = _serialize_context_spec(ctx)
-        deserialized = _deserialize_context_spec(serialized)
+        serialized = serialize_context_spec(ctx)
+        deserialized = deserialize_context_spec(serialized)
 
         assert isinstance(deserialized, NestedContext)
         assert deserialized.name == "test"
@@ -204,10 +203,10 @@ class TestContextSpecDeserialization:
             file=FilePath("/data/input.csv"),
             dir=DirPath("/data/outputs"),
         )
-        serialized = _serialize_context_spec(ctx)
+        serialized = serialize_context_spec(ctx)
         json_str = json.dumps(serialized)
         json_data = json.loads(json_str)
-        deserialized = _deserialize_context_spec(json_data)
+        deserialized = deserialize_context_spec(json_data)
 
         assert isinstance(deserialized, NestedContext)
         assert isinstance(deserialized.file, FilePath)

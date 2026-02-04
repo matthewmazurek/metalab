@@ -250,9 +250,9 @@ def handle_postgres(args: argparse.Namespace) -> int:
         stop_postgres,
     )
 
-    def _resolve_experiments_root() -> Path | None:
-        if getattr(args, "experiments_root", None):
-            return Path(args.experiments_root)
+    def _resolve_file_root() -> Path | None:
+        if getattr(args, "file_root", None):
+            return Path(args.file_root)
         if getattr(args, "store", None):
             return Path(args.store)
         return None
@@ -260,8 +260,8 @@ def handle_postgres(args: argparse.Namespace) -> int:
     def _resolve_store_root() -> Path | None:
         if getattr(args, "store", None):
             return Path(args.store)
-        if getattr(args, "experiments_root", None):
-            return Path(args.experiments_root)
+        if getattr(args, "file_root", None):
+            return Path(args.file_root)
         return None
 
     if args.postgres_command == "start":
@@ -278,7 +278,7 @@ def handle_postgres(args: argparse.Namespace) -> int:
                 store_root = _resolve_store_root()
                 if store_root is None:
                     print(
-                        "Error: --experiments-root (or --store) required for SLURM mode",
+                        "Error: --file-root (or --store) required for SLURM mode",
                         file=sys.stderr,
                     )
                     return 1
@@ -300,16 +300,16 @@ def handle_postgres(args: argparse.Namespace) -> int:
             if service.slurm_job_id:
                 print(f"  SLURM Job: {service.slurm_job_id}")
             if args.print_store_locator:
-                experiments_root = _resolve_experiments_root()
-                if experiments_root is None:
+                file_root = _resolve_file_root()
+                if file_root is None:
                     print(
-                        "Error: --experiments-root (or --store in SLURM) required for store locator",
+                        "Error: --file-root (or --store in SLURM) required for store locator",
                         file=sys.stderr,
                     )
                     return 1
                 locator = build_store_locator(
                     service,
-                    experiments_root=experiments_root,
+                    file_root=file_root,
                     schema=args.schema,
                 )
                 print(f"  Store locator: {locator}")
@@ -334,16 +334,16 @@ def handle_postgres(args: argparse.Namespace) -> int:
             data = service.to_dict()
             data["running"] = True
             if args.store_locator:
-                experiments_root = _resolve_experiments_root()
-                if experiments_root is None:
+                file_root = _resolve_file_root()
+                if file_root is None:
                     print(
-                        "Error: --experiments-root (or --store) required for store locator",
+                        "Error: --file-root (or --store) required for store locator",
                         file=sys.stderr,
                     )
                     return 1
                 data["store_locator"] = build_store_locator(
                     service,
-                    experiments_root=experiments_root,
+                    file_root=file_root,
                     schema=args.schema,
                 )
             print(json.dumps(data, indent=2))
@@ -358,16 +358,16 @@ def handle_postgres(args: argparse.Namespace) -> int:
             if service.started_at:
                 print(f"  Started: {service.started_at}")
             if args.store_locator:
-                experiments_root = _resolve_experiments_root()
-                if experiments_root is None:
+                file_root = _resolve_file_root()
+                if file_root is None:
                     print(
-                        "Error: --experiments-root (or --store) required for store locator",
+                        "Error: --file-root (or --store) required for store locator",
                         file=sys.stderr,
                     )
                     return 1
                 locator = build_store_locator(
                     service,
-                    experiments_root=experiments_root,
+                    file_root=file_root,
                     schema=args.schema,
                 )
                 print(f"  Store locator: {locator}")

@@ -5,11 +5,13 @@ The Capture object is passed to Operation.run() and provides methods
 for recording experimental outputs without returning large objects.
 
 Logging:
-    Logs are streamed in real-time to the store using Python's logging module.
-    This enables:
-    - Real-time log visibility (tail -f works)
-    - Crash resilience (logs written immediately)
-    - Integration with third-party library logging via subscribe_logger()
+
+Logs are streamed in real-time to the store using Python's logging module.
+This enables:
+
+- Real-time log visibility (tail -f works)
+- Crash resilience (logs written immediately)
+- Integration with third-party library logging via subscribe_logger()
 """
 
 from __future__ import annotations
@@ -37,26 +39,28 @@ class Capture:
     Logs are streamed in real-time to the store.
 
     Example:
-        @metalab.operation
-        def my_operation(context, params, seeds, capture, runtime):
-            capture.log("Starting operation")
+    ```python
+    @metalab.operation
+    def my_operation(context, params, seeds, capture, runtime):
+        capture.log("Starting operation")
 
-            # Subscribe to third-party library logs
-            capture.subscribe_logger("dynamo")
-            capture.subscribe_logger("sklearn", level=logging.WARNING)
+        # Subscribe to third-party library logs
+        capture.subscribe_logger("dynamo")
+        capture.subscribe_logger("sklearn", level=logging.WARNING)
 
-            # Capture scalar metrics
-            capture.metric("accuracy", 0.95)
-            capture.log_metrics({"loss": 0.05, "epoch": 10})
+        # Capture scalar metrics
+        capture.metric("accuracy", 0.95)
+        capture.log_metrics({"loss": 0.05, "epoch": 10})
 
-            # Capture artifacts (serialized automatically)
-            capture.artifact("predictions", predictions_array, kind="numpy")
+        # Capture artifacts (serialized automatically)
+        capture.artifact("predictions", predictions_array, kind="numpy")
 
-            # Capture a file you generated
-            capture.file("plot", "/tmp/plot.png", kind="image")
+        # Capture a file you generated
+        capture.file("plot", "/tmp/plot.png", kind="image")
 
-            capture.log("Operation completed")
-            # No return needed - success is implicit
+        capture.log("Operation completed")
+        # No return needed - success is implicit
+    ```
     """
 
     # Default log format
@@ -154,15 +158,17 @@ class Capture:
             level: Minimum log level to capture (default: DEBUG).
 
         Example:
-            # Capture all dynamo logs
-            capture.subscribe_logger("dynamo")
+        ```python
+        # Capture all dynamo logs
+        capture.subscribe_logger("dynamo")
 
-            # Capture sklearn warnings and above
-            capture.subscribe_logger("sklearn", level=logging.WARNING)
+        # Capture sklearn warnings and above
+        capture.subscribe_logger("sklearn", level=logging.WARNING)
 
-            # Now any logging from these libraries is captured
-            import dynamo as dyn
-            dyn.tl.dynamics(adata)  # Logs captured automatically
+        # Now any logging from these libraries is captured
+        import dynamo as dyn
+        dyn.tl.dynamics(adata)  # Logs captured automatically
+        ```
         """
         if self._log_handler is None:
             return
@@ -221,9 +227,11 @@ class Capture:
             level: Log level - "debug", "info", "warning", "error" (default: "info").
 
         Example:
-            capture.log("Starting optimization")
-            capture.log(f"Iteration {i}: loss={loss:.4f}")
-            capture.log("Convergence failed", level="warning")
+        ```python
+        capture.log("Starting optimization")
+        capture.log(f"Iteration {i}: loss={loss:.4f}")
+        capture.log("Convergence failed", level="warning")
+        ```
         """
         log_method = getattr(self._logger, level.lower(), self._logger.info)
         log_method(message)
@@ -236,8 +244,10 @@ class Capture:
         Use this for direct access to Python's logging API.
 
         Example:
-            capture.logger.info("Using standard logging API")
-            capture.logger.exception("Caught error", exc_info=True)
+        ```python
+        capture.logger.info("Using standard logging API")
+        capture.logger.exception("Caught error", exc_info=True)
+        ```
         """
         return self._logger
 
@@ -316,14 +326,16 @@ class Capture:
             - scalars (int, float, str, bool)
 
         Example:
-            # Store a transition matrix for derived metric computation
-            capture.data("transition_matrix", matrix)
+        ```python
+        # Store a transition matrix for derived metric computation
+        capture.data("transition_matrix", matrix)
 
-            # Store a dictionary of scores
-            capture.data("gene_scores", {"TP53": 0.8, "BRCA1": 0.6})
+        # Store a dictionary of scores
+        capture.data("gene_scores", {"TP53": 0.8, "BRCA1": 0.6})
 
-            # Store intermediate data with metadata
-            capture.data("embeddings", embeddings, metadata={"dim": 128})
+        # Store intermediate data with metadata
+        capture.data("embeddings", embeddings, metadata={"dim": 128})
+        ```
         """
         # Convert numpy arrays to serializable format while preserving metadata
         if hasattr(obj, "tolist"):
@@ -495,13 +507,15 @@ class Capture:
             The ArtifactDescriptor for the saved artifact.
 
         Example:
-            import matplotlib.pyplot as plt
+        ```python
+        import matplotlib.pyplot as plt
 
-            fig, ax = plt.subplots()
-            ax.plot([1, 2, 3], [1, 4, 9])
-            ax.set_title("My Plot")
+        fig, ax = plt.subplots()
+        ax.plot([1, 2, 3], [1, 4, 9])
+        ax.set_title("My Plot")
 
-            capture.figure("my_plot", fig)  # Saves and closes figure
+        capture.figure("my_plot", fig)  # Saves and closes figure
+        ```
         """
         # Ensure artifact directory exists
         self._artifact_dir.mkdir(parents=True, exist_ok=True)

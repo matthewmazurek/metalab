@@ -14,13 +14,14 @@ class DataContext:
 ```
 
 Key points:
-- Use `metalab.FilePath` and `metalab.DirPath` for lazy hashing
+
+- Use [FilePath][metalab.FilePath] and [DirPath][metalab.DirPath] for lazy hashing
 - The context is fingerprinted and contributes to `run_id`
 - No large data objects are passed across executor boundaries
 
 ## Parameter Sources
 
-Use `grid`, `random`, or `manual` to define parameter cases.
+Use [grid][metalab.grid], [random][metalab.random], or [manual][metalab.manual] to define parameter cases.
 
 ```python
 params = metalab.grid(lr=[1e-3, 1e-2], batch=[32, 64])
@@ -30,7 +31,7 @@ params = metalab.manual([{"lr": 0.01}, {"lr": 0.001}])
 
 ## Seed Discipline
 
-All randomness is controlled by `SeedBundle`.
+All randomness is controlled by [SeedBundle][metalab.SeedBundle].
 
 ```python
 seeds = metalab.seeds(base=42, replicates=5)
@@ -44,7 +45,7 @@ def op(seeds, capture):
 
 ## Capture System
 
-Capture scalars, structured data, artifacts, and logs from your operation.
+[Capture][metalab.Capture] scalars, structured data, artifacts, and logs from your operation.
 
 ```python
 capture.metric("accuracy", 0.95)

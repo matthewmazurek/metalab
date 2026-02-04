@@ -30,160 +30,10 @@ import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-
 if TYPE_CHECKING:
     from metalab.store.base import Store
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_store_from_spec(spec: dict[str, Any], work_dir: Path) -> "Store":
-    """
-    Resolve the store backend from the array spec.
-
-    For Postgres locators without embedded credentials, reads the DSN from
-    `{experiments_root}/services/postgres/service.json`.
-
-    Args:
-        spec: The loaded array spec dictionary.
-        work_dir: Path to the working directory (experiments_root).
-
-    Returns:
-        Configured Store instance.
-    """
-    from metalab.store import create_store
-
-    # Check for store_locator in spec (new format)
-    store_locator = spec.get("store_locator")
-    experiments_root = spec.get("experiments_root", str(work_dir))
-    experiment_id = spec.get("experiment_id")
-
-    if store_locator is None:
-        # Fallback for old spec format: use work_dir as FileStore
-        logger.debug("No store_locator in spec, using FileStore at work_dir")
-        return create_store(str(work_dir))
-
-    # Parse the locator to determine scheme
-    parsed = urlparse(store_locator)
-
-    # File scheme or path: use directly (FileStore doesn't use experiment_id)
-    if parsed.scheme in ("file", "") or (parsed.scheme and len(parsed.scheme) == 1):
-        # len==1 catches Windows drive letters like "C:"
-        logger.debug(f"Using FileStore from locator: {store_locator}")
-        return create_store(store_locator)
-
-    # PostgreSQL scheme: may need credential resolution
-    if parsed.scheme in ("postgresql", "postgres"):
-        resolved_locator = _resolve_postgres_locator(
-            store_locator, experiments_root, experiment_id or "unknown"
-        )
-        logger.debug("Using PostgresStore with resolved locator")
-        # PostgresStore uses experiment_id for nested FileStore directory
-        return create_store(resolved_locator, experiment_id=experiment_id)
-
-    # Unknown scheme: try directly
-    logger.warning(f"Unknown store locator scheme '{parsed.scheme}', trying directly")
-    return create_store(store_locator)
-
-
-def _resolve_postgres_locator(
-    locator: str, experiments_root: str, experiment_id: str
-) -> str:
-    """
-    Resolve a Postgres locator by filling in credentials from service.json if needed.
-
-    Args:
-        locator: The Postgres connection URI.
-        experiments_root: Path to experiments root directory.
-        experiment_id: The experiment ID (for logging).
-
-    Returns:
-        Resolved Postgres connection URI with credentials.
-    """
-    parsed = urlparse(locator)
-
-    # If password is already present, use as-is
-    if parsed.password:
-        logger.debug("Postgres locator already has password, using as-is")
-        # Ensure experiments_root is in query params
-        return _ensure_experiments_root_param(locator, experiments_root)
-
-    # Try to load credentials from service.json
-    service_json_path = Path(experiments_root) / "services" / "postgres" / "service.json"
-
-    if not service_json_path.exists():
-        logger.warning(
-            f"Postgres service.json not found at {service_json_path}, "
-            f"attempting connection without password"
-        )
-        return _ensure_experiments_root_param(locator, experiments_root)
-
-    try:
-        with open(service_json_path) as f:
-            service_info = json.load(f)
-
-        # Prefer connection_string from service.json if available
-        if "connection_string" in service_info:
-            base_dsn = service_info["connection_string"]
-            logger.debug("Using connection_string from service.json")
-            return _ensure_experiments_root_param(base_dsn, experiments_root)
-
-        # Otherwise build from individual fields
-        password = service_info.get("password")
-        if password:
-            # Rebuild the URL with password
-            netloc = parsed.netloc
-            if "@" in netloc:
-                userinfo, hostinfo = netloc.rsplit("@", 1)
-                if ":" in userinfo:
-                    user = userinfo.split(":")[0]
-                else:
-                    user = userinfo
-            else:
-                user = service_info.get("user", "")
-                hostinfo = netloc
-
-            # URL-encode password in case it contains special chars
-            from urllib.parse import quote
-
-            new_netloc = f"{user}:{quote(password, safe='')}@{hostinfo}"
-            resolved = urlunparse(
-                (parsed.scheme, new_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
-            )
-            logger.debug("Resolved password from service.json fields")
-            return _ensure_experiments_root_param(resolved, experiments_root)
-
-    except Exception as e:
-        logger.warning(f"Failed to load Postgres credentials from service.json: {e}")
-
-    # Return original locator with experiments_root param
-    return _ensure_experiments_root_param(locator, experiments_root)
-
-
-def _ensure_experiments_root_param(locator: str, experiments_root: str) -> str:
-    """
-    Ensure the experiments_root query parameter is present in a Postgres locator.
-
-    Args:
-        locator: The Postgres connection URI.
-        experiments_root: Path to experiments root directory.
-
-    Returns:
-        Locator with experiments_root query parameter.
-    """
-    parsed = urlparse(locator)
-    query_params = parse_qs(parsed.query)
-
-    # Only add if not already present
-    if "experiments_root" not in query_params:
-        query_params["experiments_root"] = [experiments_root]
-        new_query = urlencode(query_params, doseq=True)
-        locator = urlunparse(
-            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
-        )
-
-    return locator
 
 
 def main() -> int:
@@ -285,10 +135,19 @@ def run_array_task(store_root: str) -> int:
     from metalab.executor.core import execute_payload
     from metalab.manifest import deserialize_param_source, deserialize_seed_plan
     from metalab.operation import import_operation
+    from metalab.store.config import StoreConfig
+    from metalab.store.file import FileStoreConfig
+    from metalab.store.locator import create_store
     from metalab.types import Status
 
     # Resolve store backend from spec (may be FileStore or PostgresStore)
-    store = _resolve_store_from_spec(spec, store_path)
+    store_locator = spec.get("store_locator")
+    if store_locator is None:
+        store = FileStoreConfig(root=str(store_path)).connect()
+    elif isinstance(store_locator, dict):
+        store = StoreConfig.from_dict(store_locator).connect()
+    else:
+        store = create_store(store_locator)
     params_source = deserialize_param_source(spec["params"])
     seed_plan = deserialize_seed_plan(spec["seeds"])
     operation = import_operation(spec["operation_ref"])
@@ -373,6 +232,9 @@ def _is_run_complete(store: Any, run_id: str, work_dir: Path) -> bool:
     Returns:
         True if the run is complete, False otherwise.
     """
+    from metalab.store.layout import FileStoreLayout
+    from metalab.types import Status
+
     # Check for run record
     if not store.run_exists(run_id):
         return False
@@ -381,13 +243,12 @@ def _is_run_complete(store: Any, run_id: str, work_dir: Path) -> bool:
     if record is None:
         return False
 
-    from metalab.types import Status
-
     if record.status != Status.SUCCESS:
         return False
 
     # Check for .done marker on filesystem (coordination marker)
-    done_marker = work_dir / "runs" / f"{run_id}.done"
+    layout = FileStoreLayout(work_dir)
+    done_marker = layout.runs_dir_path() / f"{run_id}.done"
 
     return done_marker.exists()
 
@@ -404,31 +265,19 @@ def _write_done_marker(store_path: Path, run_id: str) -> None:
         store_path: Path to the store root.
         run_id: The run ID.
     """
-    import tempfile
     from datetime import datetime
 
-    runs_dir = store_path / "runs"
+    from metalab.store.file import FileStore
+    from metalab.store.layout import FileStoreLayout
+
+    layout = FileStoreLayout(store_path)
+    runs_dir = layout.runs_dir_path()
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     done_marker = runs_dir / f"{run_id}.done"
-    content = json.dumps({"completed_at": datetime.now().isoformat()})
+    content = {"completed_at": datetime.now().isoformat()}
 
-    # Write atomically via temp file + rename
-    fd, temp_path = tempfile.mkstemp(
-        dir=str(runs_dir),
-        suffix=".tmp",
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.rename(temp_path, done_marker)
-    except Exception:
-        # Clean up temp file on failure
-        try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
-        raise
+    FileStore._atomic_write_json(done_marker, content)
 
 
 def _load_context_spec(store_path: Path) -> Any:
@@ -444,6 +293,8 @@ def _load_context_spec(store_path: Path) -> Any:
     Returns:
         The deserialized context spec object, or None if not found.
     """
+    from metalab.context.spec import deserialize_context_spec
+
     context_json_path = store_path / "context_spec.json"
 
     if not context_json_path.exists():
@@ -453,53 +304,10 @@ def _load_context_spec(store_path: Path) -> Any:
     try:
         with open(context_json_path, "r") as f:
             data = json.load(f)
-        return _deserialize_context_spec(data)
+        return deserialize_context_spec(data)
     except Exception as e:
         logger.error(f"Failed to load context spec: {e}")
         raise
-
-
-def _deserialize_context_spec(obj: Any) -> Any:
-    """
-    Deserialize a context spec from JSON structure with type reconstruction.
-
-    Reconstructs dataclasses (FilePath, DirPath, context_spec decorated classes)
-    from their serialized form using __type__ metadata.
-
-    Args:
-        obj: The JSON-loaded structure.
-
-    Returns:
-        The reconstructed context spec object.
-    """
-    import importlib
-
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    if isinstance(obj, list):
-        return [_deserialize_context_spec(item) for item in obj]
-    if isinstance(obj, dict):
-        if "__type__" in obj:
-            # Reconstruct the dataclass
-            type_path = obj["__type__"]
-            module_path, class_name = type_path.rsplit(".", 1)
-            try:
-                module = importlib.import_module(module_path)
-                cls = getattr(module, class_name)
-                # Get field values, excluding __type__
-                field_values = {
-                    k: _deserialize_context_spec(v)
-                    for k, v in obj.items()
-                    if k != "__type__"
-                }
-                return cls(**field_values)
-            except (ImportError, AttributeError) as e:
-                logger.warning(f"Could not reconstruct type {type_path}: {e}")
-                # Return as dict if reconstruction fails
-                return {k: _deserialize_context_spec(v) for k, v in obj.items() if k != "__type__"}
-        else:
-            return {k: _deserialize_context_spec(v) for k, v in obj.items()}
-    return obj
 
 
 if __name__ == "__main__":

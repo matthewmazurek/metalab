@@ -17,10 +17,12 @@ class ManualSource:
     Parameter source from an explicit list of parameter dictionaries.
 
     Example:
-        source = ManualSource([
-            {"learning_rate": 0.01, "batch_size": 32},
-            {"learning_rate": 0.1, "batch_size": 64},
-        ])
+    ```python
+    source = ManualSource([
+        {"learning_rate": 0.01, "batch_size": 32},
+        {"learning_rate": 0.1, "batch_size": 64},
+    ])
+    ```
     """
 
     def __init__(
@@ -126,9 +128,11 @@ def manual(
         A ManualSource that yields the specified cases.
 
     Example:
-        params = manual([
-            {"learning_rate": 0.01, "batch_size": 32},
-            {"learning_rate": 0.1, "batch_size": 64},
-        ])
+    ```python
+    params = manual([
+        {"learning_rate": 0.01, "batch_size": 32},
+        {"learning_rate": 0.1, "batch_size": 64},
+    ])
+    ```
     """
     return ManualSource(cases=cases, tags=tags)

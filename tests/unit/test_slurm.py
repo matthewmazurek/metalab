@@ -9,13 +9,9 @@ from pathlib import Path
 import pytest
 
 from metalab._ids import DirPath, FilePath
-from metalab.executor.slurm import SlurmConfig, SlurmExecutor, _serialize_context_spec
-from metalab.executor.slurm_array_worker import (
-    _ensure_experiments_root_param,
-    _load_context_spec,
-    _resolve_postgres_locator,
-    _resolve_store_from_spec,
-)
+from metalab.context.spec import serialize_context_spec
+from metalab.executor.slurm import SlurmConfig, SlurmExecutor
+from metalab.executor.slurm_array_worker import _load_context_spec
 
 
 # Module-level context specs for serialization tests
@@ -255,9 +251,9 @@ class TestWorkerChunkRange:
 
         # Test a few indices
         test_cases = [
-            (0, 0, 0),   # First run
-            (4, 0, 4),   # Last seed of first param
-            (5, 1, 0),   # First seed of second param
+            (0, 0, 0),  # First run
+            (4, 0, 4),  # Last seed of first param
+            (5, 1, 0),  # First seed of second param
             (49, 9, 4),  # Last run
         ]
 
@@ -282,7 +278,7 @@ class TestContextSpecSerialization:
         # Write JSON (simulating what _write_array_spec does)
         json_path = tmp_path / "context_spec.json"
         with open(json_path, "w") as f:
-            json.dump(_serialize_context_spec(original), f)
+            json.dump(serialize_context_spec(original), f)
 
         # Load (simulating what worker does)
         loaded = _load_context_spec(tmp_path)
@@ -300,7 +296,7 @@ class TestContextSpecSerialization:
 
         json_path = tmp_path / "context_spec.json"
         with open(json_path, "w") as f:
-            json.dump(_serialize_context_spec(original), f)
+            json.dump(serialize_context_spec(original), f)
 
         loaded = _load_context_spec(tmp_path)
 
@@ -312,7 +308,7 @@ class TestContextSpecSerialization:
         """None context should survive JSON roundtrip."""
         json_path = tmp_path / "context_spec.json"
         with open(json_path, "w") as f:
-            json.dump(_serialize_context_spec(None), f)
+            json.dump(serialize_context_spec(None), f)
 
         loaded = _load_context_spec(tmp_path)
         assert loaded is None
@@ -331,7 +327,7 @@ class TestContextSpecSerialization:
 
         json_path = tmp_path / "context_spec.json"
         with open(json_path, "w") as f:
-            json.dump(_serialize_context_spec(original), f)
+            json.dump(serialize_context_spec(original), f)
 
         loaded = _load_context_spec(tmp_path)
 
@@ -350,7 +346,7 @@ class TestContextSpecSerialization:
 
         json_path = tmp_path / "context_spec.json"
         with open(json_path, "w") as f:
-            json.dump(_serialize_context_spec(original), f)
+            json.dump(serialize_context_spec(original), f)
 
         loaded = _load_context_spec(tmp_path)
 
@@ -361,117 +357,35 @@ class TestContextSpecSerialization:
 class TestWorkerStoreResolution:
     """Test worker store locator resolution logic."""
 
-    def test_resolve_from_spec_with_filestore_locator(self, tmp_path: Path):
-        """When spec has file:// locator, returns FileStore."""
+    def test_resolve_from_dict_config(self, tmp_path: Path):
+        """When spec has dict locator (from StoreConfig.to_dict), returns FileStore."""
         from metalab.store import FileStore
+        from metalab.store.config import StoreConfig
+        from metalab.store.file import FileStoreConfig
 
-        spec = {
-            "experiment_id": "test_exp",
-            "store_locator": f"file://{tmp_path}",
-            "experiments_root": str(tmp_path),
-        }
-        store = _resolve_store_from_spec(spec, tmp_path)
+        # Create a dict locator like StoreConfig.to_dict() produces
+        config = FileStoreConfig(root=str(tmp_path))
+        store_locator = config.to_dict()
+
+        # Resolve using the same logic as the worker
+        store = StoreConfig.from_dict(store_locator).connect()
+
         assert isinstance(store, FileStore)
         assert store.root.resolve() == tmp_path.resolve()
 
-    def test_resolve_from_spec_without_locator_uses_work_dir(self, tmp_path: Path):
+    def test_resolve_from_string_locator(self, tmp_path: Path):
+        """When spec has string locator, returns FileStore."""
+        from metalab.store import FileStore
+        from metalab.store.locator import create_store
+
+        store = create_store(str(tmp_path))
+        assert isinstance(store, FileStore)
+
+    def test_default_filestore_when_no_locator(self, tmp_path: Path):
         """When spec lacks store_locator, falls back to work_dir as FileStore."""
         from metalab.store import FileStore
+        from metalab.store.file import FileStoreConfig
 
-        spec = {
-            "experiment_id": "test_exp",
-            # No store_locator field
-        }
-        store = _resolve_store_from_spec(spec, tmp_path)
+        store = FileStoreConfig(root=str(tmp_path)).connect()
         assert isinstance(store, FileStore)
         assert store.root.resolve() == tmp_path.resolve()
-
-    def test_resolve_from_spec_with_plain_path_locator(self, tmp_path: Path):
-        """When spec has plain path locator (no scheme), returns FileStore."""
-        from metalab.store import FileStore
-
-        spec = {
-            "experiment_id": "test_exp",
-            "store_locator": str(tmp_path),
-            "experiments_root": str(tmp_path),
-        }
-        store = _resolve_store_from_spec(spec, tmp_path)
-        assert isinstance(store, FileStore)
-
-
-class TestPostgresLocatorResolution:
-    """Test Postgres locator credential resolution."""
-
-    def test_resolve_postgres_with_password_unchanged(self, tmp_path: Path):
-        """Postgres locator with password is used as-is (plus experiments_root)."""
-        locator = "postgresql://user:secret@localhost:5432/db"
-        experiments_root = str(tmp_path)
-
-        resolved = _resolve_postgres_locator(locator, experiments_root, "test_exp")
-
-        assert "user:secret@" in resolved
-        assert "experiments_root" in resolved
-
-    def test_resolve_postgres_fills_password_from_service_json(self, tmp_path: Path):
-        """Postgres locator without password reads from service.json."""
-        # Create service.json
-        service_dir = tmp_path / "services" / "postgres"
-        service_dir.mkdir(parents=True)
-        service_json = service_dir / "service.json"
-        service_json.write_text(json.dumps({
-            "host": "db-host",
-            "port": 5432,
-            "user": "dbuser",
-            "password": "secret123",
-            "connection_string": "postgresql://dbuser:secret123@db-host:5432/metalab",
-        }))
-
-        # Locator without password
-        locator = "postgresql://dbuser@localhost:5432/db"
-        experiments_root = str(tmp_path)
-
-        resolved = _resolve_postgres_locator(locator, experiments_root, "test_exp")
-
-        # Should use connection_string from service.json (with experiments_root added)
-        assert "dbuser:secret123@" in resolved
-        assert "experiments_root" in resolved
-
-    def test_resolve_postgres_missing_service_json_returns_original(self, tmp_path: Path):
-        """When service.json doesn't exist, returns original locator."""
-        locator = "postgresql://user@localhost:5432/db"
-        experiments_root = str(tmp_path)
-
-        resolved = _resolve_postgres_locator(locator, experiments_root, "test_exp")
-
-        # Should add experiments_root but keep original user (no password)
-        assert "user@localhost" in resolved
-        assert "experiments_root" in resolved
-
-
-class TestExperimentsRootParam:
-    """Test experiments_root query parameter handling."""
-
-    def test_adds_experiments_root_when_missing(self):
-        """Adds experiments_root param when not present."""
-        locator = "postgresql://user:pass@localhost:5432/db"
-        result = _ensure_experiments_root_param(locator, "/shared/experiments")
-
-        assert "experiments_root" in result
-        assert "/shared/experiments" in result or "experiments" in result
-
-    def test_preserves_existing_experiments_root(self):
-        """Does not duplicate experiments_root if already present."""
-        locator = "postgresql://user:pass@localhost:5432/db?experiments_root=/old/path"
-        result = _ensure_experiments_root_param(locator, "/new/path")
-
-        # Should preserve the original value
-        assert result.count("experiments_root") == 1
-        assert "/old/path" in result
-
-    def test_preserves_existing_query_params(self):
-        """Preserves other query params when adding experiments_root."""
-        locator = "postgresql://user:pass@localhost:5432/db?schema=custom"
-        result = _ensure_experiments_root_param(locator, "/shared/experiments")
-
-        assert "schema=custom" in result
-        assert "experiments_root" in result

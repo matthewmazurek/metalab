@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from metalab.result import Results, Run
-from metalab.store.file import FileStore
+from metalab.store.file import FileStore, FileStoreConfig
 from metalab.types import Metric, RunRecord, Status
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> FileStore:
     """Create a FileStore in a temporary directory."""
-    return FileStore(tmp_path)
+    return FileStoreConfig(root=str(tmp_path)).connect()
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ class TestFileStoreDerived:
 
     def test_layout_includes_derived_dir(self, tmp_path: Path):
         """Store should create derived directory."""
-        FileStore(tmp_path)
+        FileStoreConfig(root=str(tmp_path)).connect()
         assert (tmp_path / "derived").is_dir()
 
     def test_put_and_get_derived(self, store: FileStore):

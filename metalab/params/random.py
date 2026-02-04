@@ -302,6 +302,7 @@ def random(
         A RandomSource that yields random parameter cases.
 
     Example:
+        ```python
         params = random(
             space={
                 "n_samples": loguniform_int(1000, 1000000),
@@ -310,5 +311,6 @@ def random(
             n_trials=20,
             seed=123,
         )
+        ```
     """
     return RandomSource(space=space, n_trials=n_trials, seed=seed)

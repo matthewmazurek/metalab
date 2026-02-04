@@ -63,7 +63,36 @@ What you get:
 - **Capture system**: metrics, structured data, artifacts, logs
 - **Resume + dedupe**: stable run IDs skip completed work
 - **Parallel + SLURM**: local executors and cluster runs
-- **Stores**: filesystem by default, PostgreSQL for large-scale experiments
+- **Stores**: filesystem by default, PostgreSQL for query acceleration
+
+## Storage
+
+By default, metalab stores everything on the filesystem:
+
+```python
+metalab.run(exp, store="./runs/my_exp")
+```
+
+For large-scale experiments with many runs, add PostgreSQL for fast queries:
+
+```python
+# PostgresStore = FileStore (source of truth) + PostgresIndex (fast queries)
+metalab.run(
+    exp,
+    store="postgresql://localhost/db?file_root=/shared/experiments",
+)
+```
+
+Files remain the source of truth—Postgres accelerates lookups. If the database is lost, rebuild the index from files:
+
+```python
+from metalab.store import PostgresStore
+
+store = PostgresStore("postgresql://localhost/db", file_root="/shared/experiments")
+store.rebuild_index()  # Restores index from files
+```
+
+See [Storage](docs/storage.md) for details on store architecture and data transfer.
 
 ## Learn More
 

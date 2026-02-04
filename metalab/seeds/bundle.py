@@ -2,6 +2,7 @@
 SeedBundle: Explicit RNG control with deterministic derivation.
 
 A SeedBundle provides:
+
 - A root seed for reproducibility
 - Deterministic sub-seed derivation via sha256
 - Convenience methods for creating RNG instances
@@ -53,9 +54,11 @@ class SeedBundle:
             A 64-bit integer seed.
 
         Example:
-            bundle = SeedBundle(root_seed=42, replicate_index=0)
-            seed1 = bundle.derive("sampling")
-            seed2 = bundle.derive("initialization")
+        ```python
+        bundle = SeedBundle(root_seed=42, replicate_index=0)
+        seed1 = bundle.derive("sampling")
+        seed2 = bundle.derive("initialization")
+        ```
         """
         data = f"{self.root_seed}:{name}:{self.replicate_index or 0}"
         h = hashlib.sha256(data.encode("utf-8")).digest()
@@ -72,9 +75,11 @@ class SeedBundle:
             A seeded random.Random instance.
 
         Example:
-            bundle = SeedBundle(root_seed=42)
-            rng = bundle.rng("sampling")
-            value = rng.random()
+        ```python
+        bundle = SeedBundle(root_seed=42)
+        rng = bundle.rng("sampling")
+        value = rng.random()
+        ```
         """
         seed = self.derive(name)
         return stdlib_random.Random(seed)
@@ -95,9 +100,11 @@ class SeedBundle:
             ImportError: If numpy is not installed.
 
         Example:
-            bundle = SeedBundle(root_seed=42)
-            rng = bundle.numpy("sampling")
-            values = rng.random(100)
+        ```python
+        bundle = SeedBundle(root_seed=42)
+        rng = bundle.numpy("sampling")
+        values = rng.random(100)
+        ```
         """
         try:
             import numpy as np
@@ -172,22 +179,24 @@ class SeedBundle:
             A SeedBundle for use in preprocessing code.
 
         Example:
-            BASE_SEED = 42
+        ```python
+        BASE_SEED = 42
 
-            # Use for preprocessing (before metalab.run)
-            seeds = SeedBundle.for_preprocessing(BASE_SEED)
-            rng = seeds.numpy("train_test_split")
-            train, test = my_split(data, rng=rng)
+        # Use for preprocessing (before metalab.run)
+        seeds = SeedBundle.for_preprocessing(BASE_SEED)
+        rng = seeds.numpy("train_test_split")
+        train, test = my_split(data, rng=rng)
 
-            # Include seed in filename for automatic cache invalidation
-            output_path = f"./cache/processed_seed{BASE_SEED}.h5ad"
+        # Include seed in filename for automatic cache invalidation
+        output_path = f"./cache/processed_seed{BASE_SEED}.h5ad"
 
-            # Same base seed for experiment
-            exp = metalab.Experiment(
-                context=MyContext(data=metalab.FilePath(output_path)),
-                seeds=metalab.seeds(base=BASE_SEED, replicates=5),
-                ...
-            )
+        # Same base seed for experiment
+        exp = metalab.Experiment(
+            context=MyContext(data=metalab.FilePath(output_path)),
+            seeds=metalab.seeds(base=BASE_SEED, replicates=5),
+            ...
+        )
+        ```
         """
         # Derive a preprocessing-specific root seed from the base
         data = f"{base_seed}:preprocessing:0"

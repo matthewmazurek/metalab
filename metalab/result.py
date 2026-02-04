@@ -2,6 +2,7 @@
 Results: Query interface for experiment results.
 
 Provides:
+
 - Run class for single run access (metrics, artifacts)
 - Results class for collections of runs
 - ExperimentInfo for experiment-level metadata
@@ -23,10 +24,7 @@ if TYPE_CHECKING:
     from metalab.derived import DerivedMetricFn
     from metalab.store.base import Store
 
-from metalab.store.capabilities import (
-    SupportsArtifactOpen,
-    SupportsStructuredResults,
-)
+from metalab.store.capabilities import SupportsArtifactOpen, SupportsStructuredResults
 from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 
@@ -115,20 +113,22 @@ class Run:
     - Experiment-level metadata via the `experiment` property
 
     Example:
-        result = metalab.run(experiment)
-        run = result[0]  # Get first run
+    ```python
+    result = metalab.run(experiment)
+    run = result[0]  # Get first run
 
-        # Access metrics
-        print(run.metrics)
-        print(run.status)
+    # Access metrics
+    print(run.metrics)
+    print(run.status)
 
-        # Access experiment metadata
-        print(run.experiment.metadata)
+    # Access experiment metadata
+    print(run.experiment.metadata)
 
-        # Load artifacts
-        summary = run.artifact("summary")
-        for desc in run.artifacts():
-            print(f"  {desc.name}: {desc.kind}")
+    # Load artifacts
+    summary = run.artifact("summary")
+    for desc in run.artifacts():
+        print(f"  {desc.name}: {desc.kind}")
+    ```
     """
 
     def __init__(self, record: RunRecord, store: Store) -> None:
@@ -227,9 +227,11 @@ class Run:
             ExperimentInfo with experiment metadata.
 
         Example:
-            # Access user-defined metadata
-            group_labels = run.experiment.metadata.get("group_labels")
-            markov_iter = run.experiment.metadata.get("markov_iter", 3)
+        ```python
+        # Access user-defined metadata
+        group_labels = run.experiment.metadata.get("group_labels")
+        markov_iter = run.experiment.metadata.get("markov_iter", 3)
+        ```
         """
         if self._experiment_info is None:
             manifest = self._store.get_experiment_manifest(self.experiment_id)
@@ -339,10 +341,12 @@ class Run:
             KeyError: If the data doesn't exist.
 
         Example:
-            # In a derived metric function
-            def compute_metrics(run: Run) -> dict:
-                matrix = run.data("transition_matrix")
-                return {"sparsity": np.count_nonzero(matrix) / matrix.size}
+        ```python
+        # In a derived metric function
+        def compute_metrics(run: Run) -> dict:
+            matrix = run.data("transition_matrix")
+            return {"sparsity": np.count_nonzero(matrix) / matrix.size}
+        ```
         """
         if not isinstance(self._store, SupportsStructuredResults):
             raise NotImplementedError(
@@ -359,6 +363,7 @@ class Run:
         if result.get("shape") and result.get("dtype"):
             try:
                 import numpy as np
+
                 return np.array(data, dtype=result["dtype"]).reshape(result["shape"])
             except ImportError:
                 pass  # numpy not available, return raw data
@@ -400,25 +405,27 @@ class Results:
     - Filtering by status, tags, or parameters
 
     Example:
-        result = metalab.run(experiment)  # stores in ./runs/{name} by default
+    ```python
+    result = metalab.run(experiment)  # stores in ./runs/{name} by default
 
-        # Access individual runs
-        run = result[0]
-        print(run.metrics)
-        artifact = run.artifact("summary")
+    # Access individual runs
+    run = result[0]
+    print(run.metrics)
+    artifact = run.artifact("summary")
 
-        # Get tabular view
-        df = result.table(as_dataframe=True)
+    # Get tabular view
+    df = result.table(as_dataframe=True)
 
-        # Filter results
-        successful = result.successful
-        filtered = result.filter(gene="KLF1")
+    # Filter results
+    successful = result.successful
+    filtered = result.filter(gene="KLF1")
 
-        # Export
-        result.to_csv("./output/results.csv")
+    # Export
+    result.to_csv("./output/results.csv")
 
-        # Display summary
-        result.display()
+    # Display summary
+    result.display()
+    ```
     """
 
     def __init__(
@@ -435,6 +442,11 @@ class Results:
         """
         self._store = store
         self._records = records
+
+    @property
+    def store(self) -> "Store":
+        """The store containing the run data."""
+        return self._store
 
     @property
     def runs(self) -> list[Run]:

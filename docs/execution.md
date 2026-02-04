@@ -32,10 +32,10 @@ handle = metalab.run(
 results = handle.result()
 ```
 
-Notes:
-- Uses index-addressed job arrays for scalable sweeps
-- Parameter sources support O(1) index access
-- Works efficiently for very large experiments
+!!! note
+    - Uses index-addressed job arrays for scalable sweeps
+    - Parameter sources support O(1) index access
+    - Works efficiently for very large experiments
 
 ## Resume and Deduplication
 

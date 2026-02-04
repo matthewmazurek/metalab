@@ -2,6 +2,7 @@
 Params module: Parameter generation, canonicalization, and resolution.
 
 Provides:
+
 - ParamSource: Protocol for parameter generators
 - ParamCase: A single parameter configuration
 - grid(): Cartesian product of parameter values
