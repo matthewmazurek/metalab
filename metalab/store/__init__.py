@@ -48,6 +48,13 @@ from metalab.store.locator import (
 )
 from metalab.store.transfer import export_store
 
+# Eagerly import postgres module to register the 'postgresql' scheme
+# (auto-registration happens in PostgresStoreConfig.__init_subclass__)
+try:
+    from metalab.store.postgres import PostgresStore, PostgresStoreConfig
+except ImportError:
+    pass  # psycopg not installed, postgres support unavailable
+
 __all__ = [
     # Base protocol
     "Store",
@@ -55,6 +62,8 @@ __all__ = [
     "StoreConfig",
     "ConfigRegistry",
     "FileStoreConfig",
+    "PostgresStoreConfig",
+    "PostgresStore",
     # Capability protocols
     "SupportsWorkingDirectory",
     "SupportsExperimentManifests",
