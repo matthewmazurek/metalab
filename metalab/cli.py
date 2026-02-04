@@ -3,7 +3,7 @@ MetaLab CLI: Command-line interface for metalab utilities.
 
 Provides commands for:
 - postgres: Manage PostgreSQL services
-- store: Transfer data between stores
+- store: Transfer data between stores, list experiments
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def main() -> int:
     start_parser.add_argument(
         "--store",
         "-s",
-        help="Store root directory (for SLURM service discovery). Defaults to --experiments-root.",
+        help="Store root directory (for SLURM service discovery). Defaults to --file-root.",
     )
     start_parser.add_argument(
         "--port",
@@ -62,6 +62,11 @@ def main() -> int:
         "-d",
         default="metalab",
         help="Database name (default: metalab)",
+    )
+    start_parser.add_argument(
+        "--user",
+        "-u",
+        help="Database user (default: current user)",
     )
     start_parser.add_argument(
         "--slurm",
@@ -98,8 +103,8 @@ def main() -> int:
         help="PostgreSQL password (used with scram-sha-256)",
     )
     start_parser.add_argument(
-        "--experiments-root",
-        help="Shared experiments root (also used for SLURM service discovery if --store is omitted)",
+        "--file-root",
+        help="File root for artifacts/logs (also used for SLURM service discovery if --store is omitted)",
     )
     start_parser.add_argument(
         "--schema",
@@ -110,6 +115,22 @@ def main() -> int:
         action="store_true",
         help="Print PostgresStore locator for this service",
     )
+    start_parser.add_argument(
+        "--service-id",
+        default="default",
+        help="Service identifier for local mode (default: default)",
+    )
+    start_parser.add_argument(
+        "--listen-addresses",
+        default="localhost",
+        help="Addresses to listen on (default: localhost, use '*' for all)",
+    )
+    start_parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=100,
+        help="Maximum concurrent connections (default: 100)",
+    )
 
     # postgres status
     status_parser = postgres_subparsers.add_parser(
@@ -119,7 +140,7 @@ def main() -> int:
     status_parser.add_argument(
         "--store",
         "-s",
-        help="Store root directory (defaults to --experiments-root)",
+        help="Store root directory (defaults to --file-root)",
     )
     status_parser.add_argument(
         "--json",
@@ -128,8 +149,8 @@ def main() -> int:
         help="Output as JSON",
     )
     status_parser.add_argument(
-        "--experiments-root",
-        help="Shared experiments root (also used for SLURM service discovery if --store is omitted)",
+        "--file-root",
+        help="File root for artifacts/logs (also used for service discovery if --store is omitted)",
     )
     status_parser.add_argument(
         "--schema",
@@ -140,6 +161,11 @@ def main() -> int:
         action="store_true",
         help="Include PostgresStore locator in output",
     )
+    status_parser.add_argument(
+        "--service-id",
+        default="default",
+        help="Service identifier for local mode (default: default)",
+    )
 
     # postgres stop
     stop_parser = postgres_subparsers.add_parser(
@@ -149,17 +175,22 @@ def main() -> int:
     stop_parser.add_argument(
         "--store",
         "-s",
-        help="Store root directory (defaults to --experiments-root)",
+        help="Store root directory (defaults to --file-root)",
     )
     stop_parser.add_argument(
-        "--experiments-root",
-        help="Shared experiments root (also used for SLURM service discovery if --store is omitted)",
+        "--file-root",
+        help="File root for artifacts/logs (also used for service discovery if --store is omitted)",
+    )
+    stop_parser.add_argument(
+        "--service-id",
+        default="default",
+        help="Service identifier for local mode (default: default)",
     )
 
     # Store commands
     store_parser = subparsers.add_parser(
         "store",
-        help="Store transfer operations",
+        help="Store operations (transfer, list)",
     )
     store_subparsers = store_parser.add_subparsers(
         dest="store_command",
@@ -193,13 +224,42 @@ def main() -> int:
     export_parser.add_argument(
         "--include-artifacts",
         action="store_true",
-        help="Include artifact files (usually skipped)",
+        help="Include artifact files (usually skipped for file-backed stores)",
+    )
+    export_parser.add_argument(
+        "--include-derived",
+        action="store_true",
+        default=True,
+        help="Include derived metrics (default: True)",
+    )
+    export_parser.add_argument(
+        "--no-include-derived",
+        action="store_false",
+        dest="include_derived",
+        help="Exclude derived metrics",
+    )
+    export_parser.add_argument(
+        "--include-logs",
+        action="store_true",
+        default=True,
+        help="Include log files (default: True)",
+    )
+    export_parser.add_argument(
+        "--no-include-logs",
+        action="store_false",
+        dest="include_logs",
+        help="Exclude log files",
+    )
+    export_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing records in destination",
     )
 
-    # store import
+    # store import (alias for export, since export_store is bidirectional)
     import_parser = store_subparsers.add_parser(
         "import",
-        help="Import data from source store to destination",
+        help="Import data from source store to destination (alias for export)",
     )
     import_parser.add_argument(
         "--from",
@@ -219,6 +279,58 @@ def main() -> int:
         "--experiment",
         "-e",
         help="Filter by experiment ID",
+    )
+    import_parser.add_argument(
+        "--include-artifacts",
+        action="store_true",
+        help="Include artifact files (usually skipped for file-backed stores)",
+    )
+    import_parser.add_argument(
+        "--include-derived",
+        action="store_true",
+        default=True,
+        help="Include derived metrics (default: True)",
+    )
+    import_parser.add_argument(
+        "--no-include-derived",
+        action="store_false",
+        dest="include_derived",
+        help="Exclude derived metrics",
+    )
+    import_parser.add_argument(
+        "--include-logs",
+        action="store_true",
+        default=True,
+        help="Include log files (default: True)",
+    )
+    import_parser.add_argument(
+        "--no-include-logs",
+        action="store_false",
+        dest="include_logs",
+        help="Exclude log files",
+    )
+    import_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing records in destination",
+    )
+
+    # store list
+    list_parser = store_subparsers.add_parser(
+        "list",
+        help="List experiments in a store",
+    )
+    list_parser.add_argument(
+        "--store",
+        "-s",
+        required=True,
+        help="Store locator (e.g., file:///path/to/store or postgresql://localhost/db)",
+    )
+    list_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output as JSON",
     )
 
     args = parser.parse_args()
@@ -251,6 +363,7 @@ def handle_postgres(args: argparse.Namespace) -> int:
     )
 
     def _resolve_file_root() -> Path | None:
+        """Resolve file_root from args, preferring explicit file_root over store."""
         if getattr(args, "file_root", None):
             return Path(args.file_root)
         if getattr(args, "store", None):
@@ -258,6 +371,7 @@ def handle_postgres(args: argparse.Namespace) -> int:
         return None
 
     def _resolve_store_root() -> Path | None:
+        """Resolve store_root from args, preferring explicit store over file_root."""
         if getattr(args, "store", None):
             return Path(args.store)
         if getattr(args, "file_root", None):
@@ -265,13 +379,22 @@ def handle_postgres(args: argparse.Namespace) -> int:
         return None
 
     if args.postgres_command == "start":
-        config = PostgresServiceConfig(
-            port=args.port,
-            database=args.database,
-            data_dir=Path(args.data_dir) if args.data_dir else None,
-            auth_method=args.auth_method,
-            password=args.password,
-        )
+        # Build config with all available options
+        config_kwargs: dict = {
+            "port": args.port,
+            "database": args.database,
+            "auth_method": args.auth_method,
+            "listen_addresses": args.listen_addresses,
+            "max_connections": args.max_connections,
+        }
+        if args.data_dir:
+            config_kwargs["data_dir"] = Path(args.data_dir)
+        if args.password:
+            config_kwargs["password"] = args.password
+        if args.user:
+            config_kwargs["user"] = args.user
+
+        config = PostgresServiceConfig(**config_kwargs)
 
         try:
             if args.slurm:
@@ -290,9 +413,12 @@ def handle_postgres(args: argparse.Namespace) -> int:
                     slurm_memory=args.slurm_memory,
                 )
             else:
-                service = start_postgres_local(config)
+                service = start_postgres_local(
+                    config,
+                    service_id=args.service_id,
+                )
 
-            print(f"PostgreSQL started:")
+            print("PostgreSQL started:")
             print(f"  Connection: {service.connection_string}")
             print(f"  Host: {service.host}")
             print(f"  Port: {service.port}")
@@ -321,7 +447,10 @@ def handle_postgres(args: argparse.Namespace) -> int:
 
     elif args.postgres_command == "status":
         store_root = _resolve_store_root()
-        service = get_service_info(store_root=store_root)
+        service = get_service_info(
+            store_root=store_root,
+            service_id=args.service_id,
+        )
 
         if service is None:
             if args.json_output:
@@ -348,7 +477,7 @@ def handle_postgres(args: argparse.Namespace) -> int:
                 )
             print(json.dumps(data, indent=2))
         else:
-            print(f"PostgreSQL service is running:")
+            print("PostgreSQL service is running:")
             print(f"  Connection: {service.connection_string}")
             print(f"  Host: {service.host}")
             print(f"  Port: {service.port}")
@@ -377,7 +506,10 @@ def handle_postgres(args: argparse.Namespace) -> int:
     elif args.postgres_command == "stop":
         store_root = _resolve_store_root()
 
-        if stop_postgres(store_root=store_root):
+        if stop_postgres(
+            store_root=store_root,
+            service_id=args.service_id,
+        ):
             print("PostgreSQL service stopped")
             return 0
         else:
@@ -391,11 +523,7 @@ def handle_postgres(args: argparse.Namespace) -> int:
 
 def handle_store(args: argparse.Namespace) -> int:
     """Handle store subcommands."""
-    from metalab.store.transfer import (
-        export_store,
-        export_to_filestore,
-        import_from_filestore,
-    )
+    from metalab.store.transfer import export_store
 
     if args.store_command == "export":
         try:
@@ -408,11 +536,14 @@ def handle_store(args: argparse.Namespace) -> int:
                 args.destination,
                 experiment_id=args.experiment,
                 include_artifacts=args.include_artifacts,
+                include_derived=args.include_derived,
+                include_logs=args.include_logs,
+                overwrite=args.overwrite,
                 progress_callback=progress,
             )
 
             print()  # Newline after progress
-            print(f"Export complete:")
+            print("Export complete:")
             for key, value in counts.items():
                 print(f"  {key}: {value}")
 
@@ -423,20 +554,25 @@ def handle_store(args: argparse.Namespace) -> int:
             return 1
 
     elif args.store_command == "import":
+        # Import is an alias for export (export_store is bidirectional)
         try:
 
             def progress(current: int, total: int) -> None:
                 print(f"\rImporting: {current}/{total}", end="", flush=True)
 
-            counts = import_from_filestore(
+            counts = export_store(
                 args.source,
                 args.destination,
                 experiment_id=args.experiment,
+                include_artifacts=args.include_artifacts,
+                include_derived=args.include_derived,
+                include_logs=args.include_logs,
+                overwrite=args.overwrite,
                 progress_callback=progress,
             )
 
             print()  # Newline after progress
-            print(f"Import complete:")
+            print("Import complete:")
             for key, value in counts.items():
                 print(f"  {key}: {value}")
 
@@ -446,8 +582,39 @@ def handle_store(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
+    elif args.store_command == "list":
+        try:
+            from metalab.store.locator import parse_to_config
+
+            config = parse_to_config(args.store)
+
+            # Check if config supports listing experiments
+            if hasattr(config, "list_experiments"):
+                experiments = config.list_experiments()
+            else:
+                # Fall back to connecting and listing run records
+                store = config.connect()
+                records = store.list_run_records()
+                experiments = sorted(set(r.experiment_id for r in records))
+
+            if args.json_output:
+                print(json.dumps({"experiments": experiments}))
+            else:
+                if experiments:
+                    print("Experiments:")
+                    for exp in experiments:
+                        print(f"  {exp}")
+                else:
+                    print("No experiments found")
+
+            return 0
+
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     else:
-        print("Usage: metalab store {export|import}", file=sys.stderr)
+        print("Usage: metalab store {export|import|list}", file=sys.stderr)
         return 1
 
 
