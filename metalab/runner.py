@@ -52,6 +52,35 @@ from metalab.types import Status
 logger = logging.getLogger(__name__)
 
 
+def _write_experiment_manifest(
+    experiment: "Experiment",
+    store: "Store",
+    context_fingerprint: str,
+    total_runs: int,
+    run_ids: list[str] | None = None,
+) -> None:
+    """Write experiment manifest to store for Atlas."""
+    from datetime import datetime
+
+    from metalab.manifest import build_experiment_manifest
+
+    exp_manifest = build_experiment_manifest(
+        experiment=experiment,
+        context_fingerprint=context_fingerprint,
+        total_runs=total_runs,
+        run_ids=run_ids,
+    )
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if isinstance(store, SupportsExperimentManifests):
+        store.put_experiment_manifest(
+            experiment.experiment_id,
+            exp_manifest,
+            timestamp=timestamp,
+        )
+        logger.debug(f"Saved experiment manifest: {experiment.experiment_id}")
+
+
 class ProgressRunHandle:
     """
     Wrapper handle that manages progress tracker lifecycle.
@@ -232,29 +261,9 @@ def generate_payloads(
 
     # Write experiment manifest (versioned by timestamp) - now includes run_ids
     if persist_manifest:
-        from datetime import datetime
-
-        from metalab.manifest import build_experiment_manifest
-
-        exp_manifest = build_experiment_manifest(
-            experiment=experiment,
-            context_fingerprint=ctx_fp,
-            total_runs=len(all_run_ids),
-            run_ids=all_run_ids,
+        _write_experiment_manifest(
+            experiment, store, ctx_fp, len(all_run_ids), all_run_ids
         )
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        # Write to store if it supports experiment manifests
-        if isinstance(store, SupportsExperimentManifests):
-            store.put_experiment_manifest(
-                experiment.experiment_id,
-                exp_manifest,
-                timestamp=timestamp,
-            )
-            logger.debug(
-                f"Saved experiment manifest to store: {experiment.experiment_id}"
-            )
 
     # Second pass: create payloads, skipping successful runs if resume=True
     payloads = []
@@ -354,6 +363,9 @@ def _run_slurm_indexed(
                 indent=2,
             )
         logger.debug(f"Saved context manifest to {manifest_path}")
+
+    # Write experiment manifest for Atlas
+    _write_experiment_manifest(experiment, store, ctx_fp, total_runs)
 
     # Submit via indexed array
     handle = executor.submit_indexed(

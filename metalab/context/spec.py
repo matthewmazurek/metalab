@@ -27,7 +27,14 @@ import hashlib
 import importlib
 import json
 import logging
-from typing import Any, Protocol, TypeVar, dataclass_transform, overload, runtime_checkable
+from typing import (
+    Any,
+    Protocol,
+    TypeVar,
+    dataclass_transform,
+    overload,
+    runtime_checkable,
+)
 
 logger = logging.getLogger(__name__)
 

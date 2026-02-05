@@ -419,11 +419,11 @@ class Capture:
             metadata=full_metadata,
         )
 
-        # Store the artifact
-        self._store.put_artifact(artifact_path, descriptor)
-        self._artifacts.append(descriptor)
+        # Store the artifact and use the returned descriptor with updated URI
+        stored_descriptor = self._store.put_artifact(artifact_path, descriptor)
+        self._artifacts.append(stored_descriptor)
 
-        return descriptor
+        return stored_descriptor
 
     def file(
         self,
@@ -471,11 +471,11 @@ class Capture:
             metadata=full_metadata,
         )
 
-        # Store the artifact
-        self._store.put_artifact(path, descriptor)
-        self._artifacts.append(descriptor)
+        # Store the artifact and use the returned descriptor with updated URI
+        stored_descriptor = self._store.put_artifact(path, descriptor)
+        self._artifacts.append(stored_descriptor)
 
-        return descriptor
+        return stored_descriptor
 
     def figure(
         self,
