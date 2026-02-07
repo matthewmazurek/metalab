@@ -15,12 +15,15 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from metalab.executor.base import Executor
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorConfigRegistry:
@@ -161,8 +164,14 @@ def resolve_executor(
         project_config = ProjectConfig.load()
         resolved = project_config.resolve(platform)
         defaults = dict(resolved.env_config)
-    except (FileNotFoundError, ValueError, ImportError):
-        pass  # No .metalab.toml, unknown env, or config module not available
+        logger.info(
+            "Loaded executor defaults from .metalab.toml [%s] (%d settings)",
+            platform, len(defaults),
+        )
+    except FileNotFoundError:
+        logger.debug("No .metalab.toml found; using overrides only")
+    except (ValueError, ImportError):
+        logger.debug("Could not resolve environment %r; using overrides only", platform)
 
     merged = {**defaults, **(overrides or {})}
     return executor_from_config(platform, merged)

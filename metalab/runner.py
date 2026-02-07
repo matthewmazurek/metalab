@@ -51,6 +51,25 @@ from metalab.types import Status
 
 logger = logging.getLogger(__name__)
 
+# The package-level logger: all metalab.* loggers propagate here.
+_pkg_logger = logging.getLogger("metalab")
+
+
+def _ensure_verbose_logging() -> None:
+    """Attach a stderr handler to the ``metalab`` logger if none exists.
+
+    Called by :func:`run` and :func:`reconnect` when ``verbose=True``
+    (the default).  If the application has already configured a handler
+    on the ``metalab`` logger (or any ancestor), this is a no-op so we
+    never duplicate output.
+    """
+    if _pkg_logger.handlers or _pkg_logger.parent and _pkg_logger.parent.handlers:
+        return  # user or framework already configured logging
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    _pkg_logger.addHandler(handler)
+    _pkg_logger.setLevel(logging.INFO)
+
 
 def _write_experiment_manifest(
     experiment: "Experiment",
@@ -399,6 +418,7 @@ def run(
     progress: "bool | Progress | None" = None,
     on_event: "EventCallback | None" = None,
     derived_metrics: "list[str | DerivedMetricFn] | None" = None,
+    verbose: bool = True,
 ) -> RunHandle:
     """
     Run an experiment and return a handle for tracking/awaiting results.
@@ -436,6 +456,9 @@ def run(
             Functions must be importable (not lambdas). Can be specified as:
             - Function references: "myproject.metrics:final_loss"
             - Callable functions: final_loss (must have __module__ and __name__)
+        verbose: Log resolved store, executor, and run counts to stderr
+            (default: True).  Automatically configures a handler on the
+            ``metalab`` logger if none exists.  Set to ``False`` to silence.
 
     Returns:
         RunHandle for tracking and awaiting results.
@@ -488,6 +511,9 @@ def run(
     handle.cancel()
     ```
     """
+    if verbose:
+        _ensure_verbose_logging()
+
     from metalab.derived import get_func_ref
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
@@ -510,10 +536,18 @@ def run(
 
     # Scope to experiment and connect
     resolved_store: "Store" = config.scoped(experiment.experiment_id).connect()
+    logger.info(
+        "Store: %s (experiment: %s)",
+        type(resolved_store).__name__,
+        experiment.experiment_id,
+    )
 
     # Resolve executor (default: sequential execution)
     if executor is None:
         executor = ThreadExecutor(max_workers=1)
+        logger.info("Executor: sequential (default)")
+    else:
+        logger.info("Executor: %s", type(executor).__name__)
 
     # Convert derived_metrics to references
     derived_metric_refs: list[str] | None = None
@@ -539,12 +573,21 @@ def run(
             derived_metric_refs=derived_metric_refs,
         )
         all_run_ids_count = len(experiment.params) * len(experiment.seeds)
+        logger.info("Runs: %d total (SLURM indexed)", all_run_ids_count)
     else:
         # Standard payload-based submission for other executors
         payloads, all_run_ids = generate_payloads(
             experiment, resolved_store, resume, derived_metric_refs=derived_metric_refs
         )
         all_run_ids_count = len(all_run_ids)
+        skipped = all_run_ids_count - len(payloads)
+        if skipped > 0:
+            logger.info(
+                "Runs: %d total, %d already completed (resume), %d to execute",
+                all_run_ids_count, skipped, len(payloads),
+            )
+        else:
+            logger.info("Runs: %d to execute", all_run_ids_count)
 
         # Submit to executor
         handle = executor.submit(
@@ -685,6 +728,7 @@ def reconnect(
     store: "str | StoreConfig",
     on_event: "EventCallback | None" = None,
     progress: "bool | Progress | None" = None,
+    verbose: bool = True,
     **kwargs,
 ) -> RunHandle:
     """
@@ -708,6 +752,8 @@ def reconnect(
             - True: Auto-detect rich, use simple fallback if not available.
             - False/None: No progress display.
             - Progress(...): Customized progress display with title, metrics, etc.
+        verbose: Log resolved store and executor info to stderr
+            (default: True).  See :func:`run` for details.
         **kwargs: Additional arguments passed to store config (e.g., file_root
             for Postgres stores).
 
@@ -746,6 +792,9 @@ def reconnect(
     results = handle.result()
     ```
     """
+    if verbose:
+        _ensure_verbose_logging()
+
     from metalab.executor.registry import HandleRegistry
     from metalab.progress import Progress as ProgressConfig
     from metalab.progress import create_progress_tracker
