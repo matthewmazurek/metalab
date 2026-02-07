@@ -31,8 +31,21 @@ The config uses [TOML](https://toml.io) and has four top-level sections:
 | Section | Purpose |
 |---------|---------|
 | `[project]` | Project name and default environment |
-| `[services.*]` | Service declarations (Postgres, Atlas) |
-| `[environments.*]` | Named deployment profiles |
+| `[services.*]` | Service declarations (Postgres, Atlas) -- app config only |
+| `[environments.*]` | Named deployment profiles (identity, connectivity, resources) |
+
+### Configuration layers
+
+metalab separates configuration into three layers, each with a single responsibility:
+
+| Layer | Example section | What it contains | Who consumes it |
+|-------|----------------|------------------|-----------------|
+| **Identity** | `[environments.slurm]` | Gateway, user, file_root | Orchestrator, SSH tunnel |
+| **Services resources** | `[environments.slurm.services]` | Partition, time, memory for the services node | Environment implementation |
+| **Executor resources** | `[environments.slurm.executor]` | Partition, time, memory, GPUs for experiment jobs | `resolve_executor()` |
+| **App config** | `[services.postgres]` | Ports, auth, database names | Orchestrator, service code |
+
+The `[services.*]` section is backend-agnostic and portable across all environments. Scheduler-specific resources live under the environment profile as nested sub-tables, so they only appear for backends that need them.
 
 ### Full example
 
@@ -41,6 +54,7 @@ The config uses [TOML](https://toml.io) and has four top-level sections:
 name = "my-project"
 default_env = "slurm"
 
+# Backend-agnostic service config (ports, auth, databases)
 [services.postgres]
 auth_method = "scram-sha-256"
 database = "metalab"
@@ -48,18 +62,33 @@ database = "metalab"
 [services.atlas]
 port = 8000
 
+# Local environment -- no resource specs needed
 [environments.local]
 type = "local"
 file_root = "./runs"
 
+# SLURM environment -- identity and connectivity
 [environments.slurm]
 type = "slurm"
 gateway = "hpc.university.edu"
 user = "researcher"
-partition = "cpu2019"
-time = "1-00:00:00"
-memory = "1G"
 file_root = "/shared/experiments"
+
+# SLURM allocation for the services node (postgres + atlas co-located)
+[environments.slurm.services]
+partition = "cpu2019"
+time = "7-00:00:00"
+memory = "10G"
+
+# SLURM allocation for experiment array jobs
+[environments.slurm.executor]
+partition = "gpu"
+time = "1:00:00"
+memory = "32G"
+gpus = 1
+modules = ["cuda/12.0"]
+conda_env = "ml-env"
+max_concurrent = 200
 ```
 
 ### Local overrides (`.metalab.local.toml`)
@@ -71,6 +100,14 @@ Personal or sensitive values go in `.metalab.local.toml`, which sits next to `.m
 [environments.slurm]
 user = "jsmith"
 ssh_key = "~/.ssh/cluster_key"
+
+[environments.slurm.services]
+partition = "my-lab-partition"
+
+[environments.slurm.executor]
+setup = ["source ~/my_setup.sh"]
+mail_user = "jsmith@university.edu"
+mail_type = "end,fail"
 
 [services.postgres]
 password = "my-secret-password"
@@ -118,9 +155,8 @@ Environment: slurm
   Config:
     gateway: hpc.university.edu
     user: researcher
-    partition: cpu2019
-    time: 1-00:00:00
-    memory: 1G
+    services: {'partition': 'cpu2019', 'time': '7-00:00:00', 'memory': '10G'}
+    executor: {'partition': 'gpu', 'time': '1:00:00', 'memory': '32G', 'gpus': 1, ...}
   Services:
     postgres: {'auth_method': 'scram-sha-256', 'database': 'metalab'}
     atlas: {'port': 8000}
@@ -370,9 +406,9 @@ metalab tunnel
 
 ## Executor Configuration
 
-Executors (which run experiment tasks) can be created from configuration dicts using the `executor_from_config()` factory. This enables a clean split:
+Executors (which run experiment tasks) can be created from configuration dicts using the `executor_from_config()` factory. Executor defaults live in the `[environments.*.executor]` sub-table of your environment profile:
 
-- **TOML** (`.metalab.toml`) defines infrastructure defaults -- partitions, walltime, memory.
+- **TOML** (`[environments.slurm.executor]`) defines infrastructure defaults -- partitions, walltime, memory.
 - **YAML** (per-experiment) specifies only what varies per experiment -- worker counts, GPUs.
 
 ### `executor_from_config()`
@@ -430,7 +466,7 @@ executor:
 store: discover
 ```
 
-The executor inherits partition, memory, and other defaults from `.metalab.toml`, while the experiment only overrides what it needs.
+The executor inherits partition, memory, and other defaults from `[environments.*.executor]` in `.metalab.toml`, while the experiment only overrides what it needs.
 
 ---
 
@@ -463,11 +499,12 @@ The `store` argument accepts several forms:
 
 1. Auto-discovers `.metalab.toml` (walks up from cwd)
 2. Resolves the environment profile matching `platform`
-3. Deep-merges TOML defaults with the `overrides` dict
-4. Creates the executor via the plugin registry
+3. Reads the `[environments.*.executor]` sub-table as defaults
+4. Merges per-experiment overrides on top (overrides win)
+5. Creates the executor via the plugin registry
 
 ```python
-# .metalab.toml provides partition, time, memory, modules, conda_env...
+# [environments.slurm.executor] provides partition, time, memory, modules, conda_env...
 # Your experiment only overrides what differs:
 executor = metalab.resolve_executor("slurm", {"gpus": 1, "time": "4:00:00"})
 ```

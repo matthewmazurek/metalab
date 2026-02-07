@@ -164,15 +164,7 @@ class ServiceOrchestrator:
             pg_config = self.config.get_service("postgres")
             pg_config["file_root"] = self.config.file_root
 
-            spec = ServiceSpec(
-                name="postgres",
-                config=pg_config,
-                resources={
-                    "partition": self.config.env_config.get("partition"),
-                    "time": self.config.env_config.get("time"),
-                    "memory": self.config.env_config.get("memory"),
-                },
-            )
+            spec = ServiceSpec(name="postgres", config=pg_config)
 
             pg_handle = env.start_service(spec)
             bundle.add("postgres", pg_handle)
@@ -198,26 +190,18 @@ class ServiceOrchestrator:
             )
             atlas_config["file_root"] = self.config.file_root
 
-            # Co-locate with postgres if on SLURM
+            # Pass postgres host so environment can co-locate if appropriate
             pg_handle = bundle.get("postgres")
-            if pg_handle and self.config.env_type == "slurm":
-                atlas_config["nodelist"] = pg_handle.host
+            if pg_handle:
+                atlas_config["pg_host"] = pg_handle.host
 
-            spec = ServiceSpec(
-                name="atlas",
-                config=atlas_config,
-                resources={
-                    "partition": self.config.env_config.get("partition"),
-                    "time": self.config.env_config.get("time"),
-                    "memory": "1G",
-                },
-            )
+            spec = ServiceSpec(name="atlas", config=atlas_config)
 
             atlas_handle = env.start_service(spec)
             bundle.add("atlas", atlas_handle)
 
-            # Set up tunnel target (only for remote environments)
-            if self.config.env_type != "local":
+            # Set up tunnel target for remote environments (gateway present)
+            if self.config.env_config.get("gateway"):
                 bundle.tunnel_targets.append(
                     {
                         "host": atlas_handle.host,
@@ -452,20 +436,21 @@ class ServiceOrchestrator:
         """
         Get the appropriate connector for this environment type.
 
-        Local environments use :class:`DirectConnector` (a passthrough);
-        all others use :class:`SSHTunnelConnector` for SSH ``-L`` tunneling.
+        Environments with a ``gateway`` configured use
+        :class:`SSHTunnelConnector` for SSH ``-L`` tunneling; all others
+        use :class:`DirectConnector` (a passthrough).
 
         Returns:
             A :class:`Connector` implementation.
         """
-        if self.config.env_type == "local":
-            from metalab.environment.direct import DirectConnector
-
-            return DirectConnector()
-        else:
+        if self.config.env_config.get("gateway"):
             from metalab.environment.ssh_tunnel import SSHTunnelConnector
 
             return SSHTunnelConnector()
+        else:
+            from metalab.environment.direct import DirectConnector
+
+            return DirectConnector()
 
     @staticmethod
     def _ensure_environments_registered() -> None:

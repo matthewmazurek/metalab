@@ -138,8 +138,9 @@ def resolve_executor(
     Create an executor from ``.metalab.toml`` defaults + per-experiment overrides.
 
     Loads the project config (if present), resolves the named environment
-    profile matching *platform*, merges its settings with *overrides*,
-    and creates the executor via :class:`ExecutorConfigRegistry`.
+    profile, reads the ``[environments.*.executor]`` sub-table, merges it
+    with *overrides*, and creates the executor via
+    :class:`ExecutorConfigRegistry`.
 
     Falls back to *overrides*-only if no ``.metalab.toml`` is found or the
     platform name does not match a configured environment.
@@ -163,7 +164,7 @@ def resolve_executor(
 
         project_config = ProjectConfig.load()
         resolved = project_config.resolve(platform)
-        defaults = dict(resolved.env_config)
+        defaults = dict(resolved.executor_resources)
         logger.info(
             "Loaded executor defaults from .metalab.toml [%s] (%d settings)",
             platform,

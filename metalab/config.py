@@ -166,6 +166,26 @@ class ResolvedConfig:
     services: dict[str, dict[str, Any]]
     file_root: str | None
 
+    @property
+    def services_resources(self) -> dict[str, Any]:
+        """Scheduler-specific resources for the services node.
+
+        Returns the ``services`` sub-table from the environment config
+        (e.g., ``[environments.slurm.services]``).  Returns an empty dict
+        when no sub-table is present (typical for local environments).
+        """
+        return self.env_config.get("services", {})
+
+    @property
+    def executor_resources(self) -> dict[str, Any]:
+        """Scheduler-specific resources for experiment jobs.
+
+        Returns the ``executor`` sub-table from the environment config
+        (e.g., ``[environments.slurm.executor]``).  Returns an empty dict
+        when no sub-table is present (typical for local environments).
+        """
+        return self.env_config.get("executor", {})
+
     def has_service(self, name: str) -> bool:
         """Return ``True`` if a service named *name* is configured."""
         return name in self.services

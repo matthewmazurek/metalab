@@ -238,13 +238,30 @@ default_env = "local"
 [environments.local]
 type = "local"
 file_root = "./runs"
+
+[environments.slurm]
+type = "slurm"
+gateway = "hpc.university.edu"
+file_root = "/shared/experiments"
+
+# Resources for infrastructure services (postgres + atlas)
+[environments.slurm.services]
+partition = "cpu2019"
+time = "7-00:00:00"
+memory = "10G"
+
+# Resources for experiment jobs
+[environments.slurm.executor]
+partition = "gpu"
+time = "1:00:00"
+memory = "32G"
 ```
 
 Key features:
 
 - **Auto-discovery**: metalab walks up from your working directory to find `.metalab.toml` — no explicit paths needed.
 - **Local overrides**: `.metalab.local.toml` (gitignored) is deep-merged on top for machine-specific or sensitive values like credentials.
-- **Executor defaults**: Infrastructure settings (SLURM partition, memory, modules) live in the TOML file; experiments only override what they need.
+- **Separated resource specs**: Service infrastructure and experiment job resources are configured independently under `[environments.*.services]` and `[environments.*.executor]`.
 - **Store discovery**: With services running (`metalab services up`), use `store="discover"` to auto-connect to the provisioned database.
 
 ```python

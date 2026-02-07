@@ -442,6 +442,17 @@ def main() -> int:
         help="Show only the last N lines (0 = all)",
     )
 
+    # services rebuild-index
+    services_rebuild_parser = services_subparsers.add_parser(
+        "rebuild-index",
+        help="Rebuild the Postgres query index from the FileStore",
+    )
+    services_rebuild_parser.add_argument(
+        "--env",
+        default=None,
+        help="Environment profile name (default: project default, or METALAB_ENV)",
+    )
+
     # Tunnel command
     tunnel_parser = subparsers.add_parser(
         "tunnel",
@@ -893,8 +904,47 @@ def handle_services(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
+    elif args.services_command == "rebuild-index":
+        try:
+            from metalab.environment import ServiceBundle
+            from metalab.store.locator import create_store
+            from metalab.store.postgres import PostgresStore
+
+            if not orch._bundle_path.exists():
+                print(
+                    "No running services found. Start them with 'metalab services up' first.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            bundle = ServiceBundle.load(orch._bundle_path)
+            locator = bundle.store_locator
+            if not locator:
+                print(
+                    "No store locator in service bundle. "
+                    "Is Postgres configured in your environment?",
+                    file=sys.stderr,
+                )
+                return 1
+
+            store = create_store(locator)
+            if not isinstance(store, PostgresStore):
+                print(
+                    f"rebuild-index requires a PostgresStore, but got {type(store).__name__}.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            print("Rebuilding Postgres index from FileStore...")
+            count = store.rebuild_index()
+            print(f"Done. Indexed {count} records.")
+            return 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     else:
-        print("Usage: metalab services {up|down|status|logs}", file=sys.stderr)
+        print("Usage: metalab services {up|down|status|logs|rebuild-index}", file=sys.stderr)
         return 1
 
 

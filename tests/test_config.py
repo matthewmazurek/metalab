@@ -18,8 +18,18 @@ SAMPLE_CONFIG = {
             "type": "slurm",
             "gateway": "hpc.example.com",
             "user": "testuser",
-            "partition": "gpu",
             "file_root": "/shared/experiments",
+            "services": {
+                "partition": "cpu2019",
+                "time": "7-00:00:00",
+                "memory": "10G",
+            },
+            "executor": {
+                "partition": "gpu",
+                "time": "1:00:00",
+                "memory": "32G",
+                "gpus": 1,
+            },
         },
     },
 }
@@ -100,6 +110,9 @@ class TestFromDict:
         # 'type' is popped from the config dict
         assert "type" not in config.environments["slurm"].config
         assert config.environments["slurm"].config["gateway"] == "hpc.example.com"
+        # nested sub-tables survive in config
+        assert config.environments["slurm"].config["services"]["partition"] == "cpu2019"
+        assert config.environments["slurm"].config["executor"]["partition"] == "gpu"
 
     def test_services_parsed(self):
         config = ProjectConfig.from_dict(SAMPLE_CONFIG)
@@ -138,6 +151,9 @@ class TestResolve:
         assert resolved.env_type == "slurm"
         assert resolved.file_root == "/shared/experiments"
         assert resolved.env_config["gateway"] == "hpc.example.com"
+        # nested sub-tables accessible via env_config
+        assert resolved.env_config["services"]["partition"] == "cpu2019"
+        assert resolved.env_config["executor"]["partition"] == "gpu"
 
     def test_unknown_env_raises(self):
         config = ProjectConfig.from_dict(SAMPLE_CONFIG)
@@ -195,6 +211,38 @@ class TestLocalOverrides:
         config = ProjectConfig.from_dict(SAMPLE_CONFIG, local_overrides=local)
         resolved = config.resolve("local")
         assert resolved.project.name == "overridden-name"
+
+    def test_local_override_nested_services_resources(self):
+        local = {
+            "environments": {
+                "slurm": {
+                    "services": {"partition": "overridden-partition"},
+                }
+            }
+        }
+        config = ProjectConfig.from_dict(SAMPLE_CONFIG, local_overrides=local)
+        resolved = config.resolve("slurm")
+        # overridden key wins
+        assert resolved.services_resources["partition"] == "overridden-partition"
+        # other keys preserved from base
+        assert resolved.services_resources["time"] == "7-00:00:00"
+        assert resolved.services_resources["memory"] == "10G"
+
+    def test_local_override_nested_executor_resources(self):
+        local = {
+            "environments": {
+                "slurm": {
+                    "executor": {"memory": "64G", "modules": ["cuda/12.0"]},
+                }
+            }
+        }
+        config = ProjectConfig.from_dict(SAMPLE_CONFIG, local_overrides=local)
+        resolved = config.resolve("slurm")
+        assert resolved.executor_resources["memory"] == "64G"
+        assert resolved.executor_resources["modules"] == ["cuda/12.0"]
+        # base keys preserved
+        assert resolved.executor_resources["partition"] == "gpu"
+        assert resolved.executor_resources["gpus"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +310,32 @@ class TestResolvedConfigHelpers:
         resolved = config.resolve("local")
         with pytest.raises(KeyError, match="No service 'redis'"):
             resolved.get_service("redis")
+
+    def test_services_resources(self):
+        config = ProjectConfig.from_dict(SAMPLE_CONFIG)
+        resolved = config.resolve("slurm")
+        assert resolved.services_resources == {
+            "partition": "cpu2019",
+            "time": "7-00:00:00",
+            "memory": "10G",
+        }
+
+    def test_executor_resources(self):
+        config = ProjectConfig.from_dict(SAMPLE_CONFIG)
+        resolved = config.resolve("slurm")
+        assert resolved.executor_resources == {
+            "partition": "gpu",
+            "time": "1:00:00",
+            "memory": "32G",
+            "gpus": 1,
+        }
+
+    def test_services_resources_empty_for_local(self):
+        config = ProjectConfig.from_dict(SAMPLE_CONFIG)
+        resolved = config.resolve("local")
+        assert resolved.services_resources == {}
+
+    def test_executor_resources_empty_for_local(self):
+        config = ProjectConfig.from_dict(SAMPLE_CONFIG)
+        resolved = config.resolve("local")
+        assert resolved.executor_resources == {}

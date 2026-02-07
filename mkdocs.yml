@@ -1,5 +1,5 @@
 site_name: metalab
-site_description: A general experiment runner framework
+site_description: A lightweight, backend-agnostic framework for reproducible experiments
 repo_url: https://github.com/matthewmazurek/metalab
 repo_name: matthewmazurek/metalab
 

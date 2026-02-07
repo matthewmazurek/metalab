@@ -29,11 +29,13 @@ class SlurmEnvironment:
 
     def __init__(self, **config: Any) -> None:
         self.config = config
-        self.partition = config.get("partition", "default")
-        self.time = config.get("time", "24:00:00")
-        self.memory = config.get("memory", "4G")
         self.gateway = config.get("gateway")
         self.user = config.get("user", os.environ.get("USER", ""))
+        # Service node resources from [environments.slurm.services]
+        svc_res = config.get("services", {})
+        self.svc_partition = svc_res.get("partition", "default")
+        self.svc_time = svc_res.get("time", "24:00:00")
+        self.svc_memory = svc_res.get("memory", "4G")
 
     def start_service(self, spec: ServiceSpec) -> ServiceHandle:
         if spec.name == "postgres":
@@ -73,16 +75,12 @@ class SlurmEnvironment:
             listen_addresses="*",  # Network access from other nodes
         )
 
-        partition = spec.resources.get("partition", self.partition)
-        slurm_time = spec.resources.get("time", self.time)
-        slurm_memory = spec.resources.get("memory", self.memory)
-
         service = start_postgres_slurm(
             pg_config,
             store_root=store_root,
-            slurm_partition=partition,
-            slurm_time=slurm_time,
-            slurm_memory=slurm_memory,
+            slurm_partition=self.svc_partition,
+            slurm_time=self.svc_time,
+            slurm_memory=self.svc_memory,
         )
 
         return ServiceHandle(
@@ -104,23 +102,19 @@ class SlurmEnvironment:
     def _start_atlas(self, spec: ServiceSpec) -> ServiceHandle:
         """Start Atlas dashboard via SLURM job.
 
-        Submits a lightweight SLURM job. If a postgres handle is available
-        in spec.config, co-locates Atlas on the same node via --nodelist.
+        Submits a lightweight SLURM job.  If ``pg_host`` is present in
+        ``spec.config``, co-locates Atlas on the same node via ``--nodelist``.
         """
         port = spec.config.get("port", 8000)
         store = spec.config.get("store", "")
         file_root = spec.config.get("file_root") or self.config.get("file_root", "")
-        nodelist = spec.config.get("nodelist")  # co-locate with PG
-
-        partition = spec.resources.get("partition", self.partition)
-        slurm_time = spec.resources.get("time", self.time)
-        slurm_memory = spec.resources.get("memory", "1G")
+        nodelist = spec.config.get("pg_host")  # co-locate with PG
 
         script = f"""#!/bin/bash
 #SBATCH --job-name=metalab-atlas
-#SBATCH --partition={partition}
-#SBATCH --time={slurm_time}
-#SBATCH --mem={slurm_memory}
+#SBATCH --partition={self.svc_partition}
+#SBATCH --time={self.svc_time}
+#SBATCH --mem={self.svc_memory}
 #SBATCH --cpus-per-task=1
 """
         if nodelist:
