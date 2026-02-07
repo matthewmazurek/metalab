@@ -137,6 +137,16 @@ class ProgressRunHandle:
         """True if all runs have finished (success or failure)."""
         return self._handle.is_complete
 
+    @property
+    def can_reconnect(self) -> bool:
+        """Delegate to inner handle."""
+        return self._handle.can_reconnect
+
+    @property
+    def reconnect_locator(self) -> str | None:
+        """Delegate to inner handle."""
+        return self._handle.reconnect_locator
+
     def result(self, timeout: float | None = None) -> Results:
         """
         Block until all runs complete and return Results.
@@ -384,6 +394,7 @@ def run(
     experiment: "Experiment",
     store: "str | StoreConfig | None" = None,
     executor: "Executor | None" = None,
+    file_root: str | None = None,
     resume: bool = True,
     progress: "bool | Progress | None" = None,
     on_event: "EventCallback | None" = None,
@@ -409,6 +420,10 @@ def run(
             - ThreadExecutor(max_workers=N) for thread-based parallelism
             - ProcessExecutor(max_workers=N) for process-based parallelism
             - SlurmExecutor(...) for cluster execution
+        file_root: Optional filesystem root for artifact/log storage when
+            *store* is a locator string (e.g. a Postgres DSN).  Passed through
+            to ``parse_to_config(store, file_root=file_root)``.  Ignored when
+            *store* is already a :class:`StoreConfig` or ``None``.
         resume: Skip existing successful runs (default: True).
         progress: Enable progress display. Options:
             - True: Auto-detect rich, use simple fallback if not available.
@@ -485,7 +500,11 @@ def run(
         store = DEFAULT_STORE_ROOT
 
     if isinstance(store, str):
-        config = parse_to_config(store)
+        config = (
+            parse_to_config(store, file_root=file_root)
+            if file_root
+            else parse_to_config(store)
+        )
     else:
         config = store
 

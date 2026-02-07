@@ -773,6 +773,11 @@ rich = [
     { name = "rich" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "metalab-atlas", marker = "extra == 'atlas'", editable = "atlas" },
@@ -799,6 +804,9 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
 ]
 provides-extras = ["numpy", "pandas", "rich", "postgres", "atlas", "full", "dev", "docs"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.2" }]
 
 [[package]]
 name = "metalab-atlas"

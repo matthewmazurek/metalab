@@ -79,3 +79,8 @@ members = ["atlas"]
 [tool.uv.sources]
 metalab = { workspace = true }
 metalab-atlas = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

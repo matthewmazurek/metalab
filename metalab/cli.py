@@ -4,6 +4,9 @@ MetaLab CLI: Command-line interface for metalab utilities.
 Provides commands for:
 - postgres: Manage PostgreSQL services
 - store: Transfer data between stores, list experiments
+- env: Manage environment profiles
+- atlas: Provision and manage services
+- tunnel: Open SSH tunnels to services
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -333,6 +337,128 @@ def main() -> int:
         help="Output as JSON",
     )
 
+    # Env commands
+    env_parser = subparsers.add_parser(
+        "env",
+        help="Manage environment profiles",
+    )
+    env_subparsers = env_parser.add_subparsers(
+        dest="env_command",
+        help="Environment commands",
+    )
+
+    # env list
+    env_subparsers.add_parser(
+        "list",
+        help="List all environment profiles",
+    )
+
+    # env show
+    env_show_parser = env_subparsers.add_parser(
+        "show",
+        help="Show resolved config for an environment profile",
+    )
+    env_show_parser.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Environment profile name (default: project default)",
+    )
+
+    # Atlas commands
+    atlas_parser = subparsers.add_parser(
+        "atlas",
+        help="Provision and manage services",
+    )
+    atlas_subparsers = atlas_parser.add_subparsers(
+        dest="atlas_command",
+        help="Atlas commands",
+    )
+
+    # atlas up
+    atlas_up_parser = atlas_subparsers.add_parser(
+        "up",
+        help="Provision services per the selected environment profile",
+    )
+    atlas_up_parser.add_argument(
+        "--env",
+        default=None,
+        help="Environment profile name (default: project default, or METALAB_ENV)",
+    )
+    atlas_up_parser.add_argument(
+        "--tunnel",
+        action="store_true",
+        help="Also open a tunnel after provisioning",
+    )
+
+    # atlas down
+    atlas_down_parser = atlas_subparsers.add_parser(
+        "down",
+        help="Stop all services and clean up",
+    )
+    atlas_down_parser.add_argument(
+        "--env",
+        default=None,
+        help="Environment profile name (default: project default, or METALAB_ENV)",
+    )
+
+    # atlas status
+    atlas_status_parser = atlas_subparsers.add_parser(
+        "status",
+        help="Check health of running services",
+    )
+    atlas_status_parser.add_argument(
+        "--env",
+        default=None,
+        help="Environment profile name (default: project default, or METALAB_ENV)",
+    )
+    atlas_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output as JSON",
+    )
+
+    # atlas logs
+    atlas_logs_parser = atlas_subparsers.add_parser(
+        "logs",
+        help="Show service logs",
+    )
+    atlas_logs_parser.add_argument(
+        "--env",
+        default=None,
+        help="Environment profile name (default: project default, or METALAB_ENV)",
+    )
+    atlas_logs_parser.add_argument(
+        "service",
+        nargs="?",
+        default=None,
+        help="Service name (e.g. atlas, postgres). Omit for all services.",
+    )
+    atlas_logs_parser.add_argument(
+        "-n", "--tail",
+        type=int,
+        default=0,
+        help="Show only the last N lines (0 = all)",
+    )
+
+    # Tunnel command
+    tunnel_parser = subparsers.add_parser(
+        "tunnel",
+        help="Open a managed SSH tunnel to running services",
+    )
+    tunnel_parser.add_argument(
+        "--env",
+        default=None,
+        help="Environment profile name (default: project default, or METALAB_ENV)",
+    )
+    tunnel_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Local port for the tunnel",
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -346,6 +472,12 @@ def main() -> int:
         return handle_postgres(args)
     elif args.command == "store":
         return handle_store(args)
+    elif args.command == "env":
+        return handle_env(args)
+    elif args.command == "atlas":
+        return handle_atlas(args)
+    elif args.command == "tunnel":
+        return handle_tunnel(args)
     else:
         parser.print_help()
         return 0
@@ -616,6 +748,199 @@ def handle_store(args: argparse.Namespace) -> int:
     else:
         print("Usage: metalab store {export|import|list}", file=sys.stderr)
         return 1
+
+
+def handle_env(args: argparse.Namespace) -> int:
+    """Handle env subcommands."""
+    from metalab.config import ProjectConfig
+
+    try:
+        config = ProjectConfig.load()
+    except FileNotFoundError:
+        print("No .metalab.toml found. Create one in your project root.")
+        print("See: https://metalab.readthedocs.io/en/latest/services/")
+        return 1
+
+    if args.env_command == "list":
+        envs = config.list_environments()
+        default = config.project.default_env
+        if not envs:
+            print("No environments defined in .metalab.toml")
+            return 0
+        h = "─"
+        print(f"  {'NAME':<20} {'TYPE':<12} {'DEFAULT'}")
+        print(f"  {h * 20} {h * 12} {h * 7}")
+        for name in envs:
+            profile = config.environments[name]
+            marker = "*" if name == default else ""
+            print(f"  {name:<20} {profile.type:<12} {marker}")
+        return 0
+
+    elif args.env_command == "show":
+        try:
+            resolved = config.resolve(args.name)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        print(f"Environment: {resolved.env_name}")
+        print(f"  Type: {resolved.env_type}")
+        if resolved.file_root:
+            print(f"  File root: {resolved.file_root}")
+        if resolved.env_config:
+            print(f"  Config:")
+            for k, v in resolved.env_config.items():
+                print(f"    {k}: {v}")
+        if resolved.services:
+            print(f"  Services:")
+            for svc_name, svc_config in resolved.services.items():
+                print(f"    {svc_name}: {svc_config}")
+        return 0
+
+    else:
+        print("Usage: metalab env {list|show}", file=sys.stderr)
+        return 1
+
+
+def handle_atlas(args: argparse.Namespace) -> int:
+    """Handle atlas subcommands."""
+    import json as json_mod
+
+    from metalab.config import ProjectConfig
+    from metalab.environment.orchestrator import ServiceOrchestrator
+
+    try:
+        config = ProjectConfig.load()
+    except FileNotFoundError:
+        print("No .metalab.toml found. Create one in your project root.")
+        print("See: https://metalab.readthedocs.io/en/latest/services/")
+        return 1
+
+    env_name = getattr(args, "env", None) or os.environ.get("METALAB_ENV")
+
+    try:
+        resolved = config.resolve(env_name)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    orch = ServiceOrchestrator(resolved)
+
+    if args.atlas_command == "up":
+        try:
+            tunnel = getattr(args, "tunnel", False)
+            bundle = orch.up(tunnel=tunnel)
+            print(f"Services started ({resolved.env_name}):")
+            for name, handle in bundle.services.items():
+                print(f"  {name}: {handle.host}:{handle.port}")
+            if bundle.store_locator:
+                print(f"  Store: {bundle.store_locator}")
+
+            atlas = bundle.get("atlas")
+            if atlas:
+                print(f"\n  Atlas UI: http://{atlas.host}:{atlas.port}")
+
+            if bundle.tunnel_targets and not tunnel:
+                print(f"\nTo access locally, run:")
+                print(f"  metalab tunnel")
+            return 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    elif args.atlas_command == "down":
+        try:
+            orch.down()
+            print("All services stopped.")
+            return 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    elif args.atlas_command == "status":
+        try:
+            status = orch.status()
+            if not status.bundle_found:
+                print("No services running.")
+                return 0
+            use_json = getattr(args, "json_output", False)
+            if use_json:
+                print(json_mod.dumps(status.services, indent=2))
+            else:
+                for name, info in status.services.items():
+                    symbol = "\u2713" if info["available"] else "\u2717"
+                    print(
+                        f"  {symbol} {name}: {info['host']}:{info['port']} ({info['status']})"
+                    )
+            return 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    elif args.atlas_command == "logs":
+        try:
+            service = getattr(args, "service", None)
+            tail = getattr(args, "tail", 0)
+            logs = orch.logs(service_name=service, tail=tail)
+            if not logs:
+                print("No service logs found.", file=sys.stderr)
+                return 1
+            for name, content in logs.items():
+                if len(logs) > 1:
+                    print(f"=== {name} ===")
+                print(content)
+            return 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    else:
+        print("Usage: metalab atlas {up|down|status|logs}", file=sys.stderr)
+        return 1
+
+
+def handle_tunnel(args: argparse.Namespace) -> int:
+    """Handle tunnel command."""
+    import signal
+
+    from metalab.config import ProjectConfig
+    from metalab.environment.orchestrator import ServiceOrchestrator
+
+    try:
+        config = ProjectConfig.load()
+    except FileNotFoundError:
+        print("No .metalab.toml found. Create one in your project root.")
+        print("See: https://metalab.readthedocs.io/en/latest/services/")
+        return 1
+
+    env_name = getattr(args, "env", None) or os.environ.get("METALAB_ENV")
+
+    try:
+        resolved = config.resolve(env_name)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    orch = ServiceOrchestrator(resolved)
+
+    try:
+        handle = orch.tunnel()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if handle is None:
+        print("No tunnel needed (services are local)")
+        return 0
+
+    print(f"Tunnel established: {handle.local_url}")
+    print("Press Ctrl+C to close.")
+
+    try:
+        signal.pause()
+    except KeyboardInterrupt:
+        print("\nClosing tunnel...")
+
+    return 0
 
 
 if __name__ == "__main__":

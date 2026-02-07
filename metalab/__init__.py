@@ -89,6 +89,9 @@ def __getattr__(name: str):
 # Utilities / File hashing
 from metalab._ids import DirPath, FilePath, Fingerprintable, dir_hash, file_hash
 
+# Executor config helpers
+from metalab.executor.config import resolve_executor
+
 # Experiment
 from metalab.experiment import Experiment
 
@@ -215,6 +218,8 @@ __all__ = [
     "SlurmExecutor",
     "SlurmConfig",
     "SlurmRunHandle",
+    # Executor config helpers
+    "resolve_executor",
     # Progress
     "MetricDisplay",
     "Progress",

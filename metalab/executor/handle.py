@@ -130,6 +130,16 @@ class RunHandle(Protocol):
         """Cancel pending and running jobs."""
         ...
 
+    @property
+    def can_reconnect(self) -> bool:
+        """True if this handle supports reconnection (e.g., SLURM)."""
+        ...
+
+    @property
+    def reconnect_locator(self) -> str | None:
+        """Store locator string for reconnecting to this run, or None."""
+        ...
+
     def set_event_callback(self, callback: "EventCallback | None") -> None:
         """
         Set the event callback for progress tracking.
@@ -252,6 +262,16 @@ class LocalRunHandle:
     def store(self) -> "Store":
         """The store used for this execution."""
         return self._store
+
+    @property
+    def can_reconnect(self) -> bool:
+        """Local handles do not support reconnection."""
+        return False
+
+    @property
+    def reconnect_locator(self) -> str | None:
+        """Local handles have no reconnect locator."""
+        return None
 
     @property
     def status(self) -> RunStatus:

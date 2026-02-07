@@ -67,6 +67,7 @@ nav:
     - Preprocessing: preprocessing.md
     - Execution: execution.md
     - Storage: storage.md
+    - Services & Environments: services.md
     - Remote Analysis: remote-analysis-workflow.md
   - API Reference:
     - Overview: api/index.md

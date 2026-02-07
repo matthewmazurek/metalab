@@ -5,6 +5,7 @@ Supported locator schemes:
 - file:///path/to/store           → FileStoreConfig
 - /path/to/store                  → FileStoreConfig (implicit file://)
 - postgresql://user@host:port/db  → PostgresStoreConfig (requires file_root)
+- discover                        → auto-detect from nearest ServiceBundle
 
 The locator abstraction allows stores to be passed as strings across
 process/cluster boundaries while supporting multiple storage backends.
@@ -61,6 +62,42 @@ class LocatorInfo:
             self.params = {}
 
 
+def _resolve_discover_locator() -> LocatorInfo:
+    """Resolve a 'discover' locator by finding the nearest service bundle.
+
+    Looks for a running service bundle (services/bundle.json) by walking
+    up from the current directory. If found, uses its store_locator field.
+
+    Returns:
+        LocatorInfo from the discovered store locator.
+
+    Raises:
+        ValueError: If no service bundle found or it has no store_locator.
+    """
+    try:
+        from metalab.environment.bundle import ServiceBundle
+    except ImportError:
+        raise ValueError(
+            "Store discovery requires the metalab environment module. "
+            "Install metalab with environment support."
+        )
+
+    bundle = ServiceBundle.find_nearest()
+    if bundle is None:
+        raise ValueError(
+            "No active service bundle found. "
+            "Start services with 'metalab atlas up' first, "
+            "or specify an explicit store locator."
+        )
+    if not bundle.store_locator:
+        raise ValueError(
+            "Service bundle found but has no store_locator. "
+            "The bundle may not have a database service configured."
+        )
+    # Recursively parse the discovered locator (it will be a real URI)
+    return parse_locator(bundle.store_locator)
+
+
 def parse_locator(locator: str) -> LocatorInfo:
     """
     Parse a store locator string into its components.
@@ -81,6 +118,10 @@ def parse_locator(locator: str) -> LocatorInfo:
         >>> parse_locator("postgresql://user@localhost:5432/metalab")
         LocatorInfo(scheme='postgresql', path='/metalab', host='localhost', ...)
     """
+    # Handle "discover" special locator — auto-detect from service bundle
+    if locator.strip().lower() == "discover":
+        return _resolve_discover_locator()
+
     # Handle plain filesystem paths
     if locator.startswith("/") or locator.startswith("./") or locator.startswith(".."):
         return LocatorInfo(

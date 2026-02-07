@@ -970,6 +970,20 @@ class SlurmRunHandle:
         """The store used for this execution."""
         return self._store
 
+    @property
+    def can_reconnect(self) -> bool:
+        """SLURM handles support reconnection."""
+        return True
+
+    @property
+    def reconnect_locator(self) -> str | None:
+        """Return the store working directory for reconnection."""
+        from metalab.store.capabilities import SupportsWorkingDirectory
+
+        if isinstance(self._store, SupportsWorkingDirectory):
+            return self._store.get_working_directory()
+        return None
+
     def _count_done_markers(self) -> int:
         """
         Count completed runs via .done markers (cached).
