@@ -7,11 +7,11 @@ metalab requires **Python 3.11 or higher**.
 Install metalab using [uv](https://github.com/astral-sh/uv) (recommended) or pip:
 
 ```bash
-# Using uv
-uv add metalab
+# Using uv (recommended)
+uv add git+https://github.com/matthewmazurek/metalab.git
 
 # Using pip
-pip install metalab
+pip install git+https://github.com/matthewmazurek/metalab.git
 ```
 
 The base package has no required dependencies—it's lightweight by design.
@@ -26,30 +26,33 @@ metalab provides optional extras for extended functionality:
 | `pandas` | pandas ≥2.0 | DataFrame export helpers (`results.to_dataframe()`, `results.to_csv()`) |
 | `rich` | rich ≥13.0 | Rich progress bars and nicer CLI output |
 | `postgres` | psycopg ≥3.0, psycopg-pool ≥3.0 | PostgreSQL store backend for large experiments |
+| `atlas` | metalab-atlas | Atlas web UI for browsing experiment results |
 | `full` | All of the above | Everything bundled together |
 
 Install extras with brackets:
 
 ```bash
 # Using uv
-uv add metalab[numpy]
-uv add metalab[pandas]
-uv add metalab[rich]
-uv add metalab[postgres]
-uv add metalab[full]
+uv add "metalab[numpy] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[pandas] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[rich] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[postgres] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[atlas] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[full] @ git+https://github.com/matthewmazurek/metalab.git"
 
 # Using pip
-pip install metalab[numpy]
-pip install metalab[pandas]
-pip install metalab[rich]
-pip install metalab[postgres]
-pip install metalab[full]
+pip install "metalab[numpy] @ git+https://github.com/matthewmazurek/metalab.git"
+pip install "metalab[pandas] @ git+https://github.com/matthewmazurek/metalab.git"
+pip install "metalab[rich] @ git+https://github.com/matthewmazurek/metalab.git"
+pip install "metalab[postgres] @ git+https://github.com/matthewmazurek/metalab.git"
+pip install "metalab[atlas] @ git+https://github.com/matthewmazurek/metalab.git"
+pip install "metalab[full] @ git+https://github.com/matthewmazurek/metalab.git"
 ```
 
 You can combine multiple extras:
 
 ```bash
-uv add metalab[numpy,pandas,rich]
+uv add "metalab[numpy,pandas,rich] @ git+https://github.com/matthewmazurek/metalab.git"
 ```
 
 ### When to Use Each Extra
@@ -58,11 +61,12 @@ uv add metalab[numpy,pandas,rich]
 - **pandas**: Required if you want to export results as DataFrames with `results.to_dataframe()`
 - **rich**: Recommended for better visual feedback during experiment runs
 - **postgres**: Required for large-scale experiments where you need fast queries across many runs
+- **atlas**: Installs the Atlas web UI for browsing and visualizing experiment results
 
 For most users getting started, we recommend:
 
 ```bash
-uv add metalab[pandas,rich]
+uv add "metalab[pandas,rich] @ git+https://github.com/matthewmazurek/metalab.git"
 ```
 
 This gives you nice progress output and easy DataFrame exports for analysis.

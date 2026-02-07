@@ -5,7 +5,6 @@ repo_name: matthewmazurek/metalab
 
 theme:
   name: material
-  custom_dir: docs/overrides
   features:
     - content.code.copy
     - navigation.sections
@@ -24,9 +23,7 @@ theme:
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
-  font:
-    text: Inter
-    code: JetBrains Mono
+  font: false
 
 plugins:
   - search

@@ -1,319 +1,105 @@
-/* 
- * Atlas-matching color scheme for MkDocs Material
- * 
- * Atlas colors (from atlas/frontend/src/index.css):
- * - Ring/accent: oklch(0.62 0.18 264) ≈ #5c6bc0 (indigo-400)
- * - Background: oklch(0.985 0.008 264) ≈ #fafafa with cool tint
- * - Border: oklch(0.91 0.01 264) ≈ #e5e7eb with cool tint
+/* Atlas "Bold / Modern" theme for MkDocs Material
+ *
+ * Brand:     #E8735A (Coral)
+ * Secondary: #2E8B57 (Emerald)
+ * Tertiary:  #3D4F7C (Deep Indigo)
+ *
+ * Fonts: Plus Jakarta Sans (body), IBM Plex Mono (code)
  */
 
-/* ============================================
-   Hero Gradient Background (matches Atlas)
-   ============================================ */
-
-/* Light mode gradient */
-[data-md-color-scheme="default"] .md-main {
-  position: relative;
-}
-
-[data-md-color-scheme="default"] .md-main::before {
-  content: "";
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 360px;
-  pointer-events: none;
-  z-index: -1;
-  background:
-    radial-gradient(900px circle at 20% 15%, rgba(99, 102, 241, 0.14), transparent 60%),
-    radial-gradient(800px circle at 80% 25%, rgba(236, 72, 153, 0.11), transparent 62%),
-    radial-gradient(900px circle at 60% 95%, rgba(14, 165, 233, 0.09), transparent 60%),
-    linear-gradient(180deg, rgba(252, 252, 255, 1) 0%, rgba(244, 246, 252, 1) 45%, rgba(238, 236, 248, 1) 100%);
-}
-
-[data-md-color-scheme="default"] .md-main::after {
-  content: "";
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 360px;
-  pointer-events: none;
-  z-index: -1;
-  background: linear-gradient(180deg, transparent 0%, transparent 60%, var(--md-default-bg-color) 100%);
-}
-
-/* Dark mode gradient */
-[data-md-color-scheme="slate"] .md-main::before {
-  content: "";
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 360px;
-  pointer-events: none;
-  z-index: -1;
-  background:
-    radial-gradient(900px circle at 20% 18%, rgba(56, 189, 248, 0.16), transparent 60%),
-    radial-gradient(850px circle at 78% 24%, rgba(168, 85, 247, 0.18), transparent 62%),
-    radial-gradient(950px circle at 60% 95%, rgba(244, 63, 94, 0.12), transparent 60%),
-    linear-gradient(180deg, rgba(10, 16, 31, 1) 0%, rgba(15, 23, 42, 1) 50%, rgba(28, 20, 48, 1) 100%);
-}
-
-[data-md-color-scheme="slate"] .md-main::after {
-  content: "";
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 360px;
-  pointer-events: none;
-  z-index: -1;
-  background: linear-gradient(180deg, transparent 0%, transparent 60%, var(--md-default-bg-color) 100%);
-}
-
-/* Make header semi-transparent to show gradient through */
-.md-header {
-  background: rgba(250, 251, 252, 0.85) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-/* Header text colors for readability */
-[data-md-color-scheme="default"] .md-header {
-  --md-primary-bg-color: transparent;
-  --md-primary-fg-color: #1a1a2e;
-}
-
-[data-md-color-scheme="default"] .md-header .md-header__title,
-[data-md-color-scheme="default"] .md-header .md-header__button,
-[data-md-color-scheme="default"] .md-header .md-search__input::placeholder,
-[data-md-color-scheme="default"] .md-header a {
-  color: #1a1a2e !important;
-}
-
-[data-md-color-scheme="default"] .md-header .md-search__form {
-  /* Material typically colors the form, not the input */
-  background: rgba(26, 26, 46, 0.06) !important;
-  border: 1px solid rgba(92, 107, 192, 0.16) !important;
-  box-shadow: none !important;
-}
-
-[data-md-color-scheme="default"] .md-header .md-search__input {
-  background: transparent !important;
-  color: #1a1a2e;
-}
-
-[data-md-color-scheme="default"] .md-header .md-search__icon,
-[data-md-color-scheme="default"] .md-header .md-search__options,
-[data-md-color-scheme="default"] .md-header .md-search__icon svg,
-[data-md-color-scheme="default"] .md-header .md-search__options svg {
-  color: rgba(26, 26, 46, 0.75) !important;
-  fill: currentColor !important;
-}
-
-[data-md-color-scheme="slate"] .md-header {
-  background: rgba(26, 27, 46, 0.85) !important;
-}
-
-[data-md-color-scheme="slate"] .md-header .md-header__title,
-[data-md-color-scheme="slate"] .md-header .md-header__button,
-[data-md-color-scheme="slate"] .md-header a {
-  color: #f5f5f5 !important;
-}
-
-[data-md-color-scheme="slate"] .md-header .md-search__form {
-  /* Prevent the search field from going near-black in dark mode */
-  background: rgba(255, 255, 255, 0.08) !important;
-  border: 1px solid rgba(255, 255, 255, 0.12) !important;
-  box-shadow: none !important;
-}
-
-[data-md-color-scheme="slate"] .md-header .md-search__input {
-  background: transparent !important;
-  color: #f5f5f5 !important;
-}
-
-[data-md-color-scheme="slate"] .md-header .md-search__input::placeholder {
-  color: rgba(245, 245, 245, 0.72) !important;
-}
-
-[data-md-color-scheme="slate"] .md-header .md-search__icon,
-[data-md-color-scheme="slate"] .md-header .md-search__options,
-[data-md-color-scheme="slate"] .md-header .md-search__icon svg,
-[data-md-color-scheme="slate"] .md-header .md-search__options svg {
-  color: rgba(245, 245, 245, 0.82) !important;
-  fill: currentColor !important;
-}
-
-/* Remove default primary color backgrounds from headers */
-.md-header__inner {
-  background: transparent !important;
-}
-
-.md-tabs {
-  background: transparent !important;
-}
-
-/* Sidebar / TOC: avoid masks (they break sticky + clip titles).
-   Instead, give the sticky nav titles a tinted fade so scrolled items
-   disappear underneath without a harsh white gradient. */
-
-/* Let the hero gradient show behind the sidebars, like the header */
-.md-sidebar,
-.md-sidebar__scrollwrap {
-  background: transparent !important;
-}
-
-/* Sidebar titles
-   - No background on the title itself
-   - A masked fade layer hides scrolled items smoothly
-   - Content scrolls "under" the title without visually interfering */
-
-.md-nav__title {
-  box-shadow: none !important;
-  background: transparent !important;
-  /* Prevent 1–2px descender clipping (sticky + overflow contexts) */
-  line-height: 1.25 !important;
-  padding-bottom: 2px !important;
-}
-
-/* Sidebar scrolling + fade
-   Move scrolling to the nav list (not the whole sidebar), so titles stay
-   clean (no background) and content never draws underneath them. */
-.md-sidebar__scrollwrap {
-  overflow: hidden !important;
-}
-
-.md-sidebar__inner {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.md-sidebar__inner>nav.md-nav {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  /* allow flex children to scroll */
-}
-
-/* The actual scrolling region */
-.md-sidebar__inner>nav.md-nav>.md-nav__list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  /* Start content below the fade zone so first item is readable */
-  padding-top: 0.5rem;
-  scroll-padding-top: 0.5rem;
-  /* Fade content near the top edge as it scrolls upward */
-  -webkit-mask-image: -webkit-gradient(linear,
-      left top,
-      left bottom,
-      from(transparent),
-      color-stop(0.03, #000),
-      to(#000));
-}
-
-[data-md-color-scheme="default"] .md-nav__title {
-  color: #1a1a2e !important;
-}
-
-[data-md-color-scheme="slate"] .md-nav__title {
-  color: #f5f5f5 !important;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
-}
-
-/* Remove gradient from site name / logo area */
-.md-header__button.md-logo,
-.md-header__topic,
-.md-header__title,
-.md-header__ellipsis {
-  background: transparent !important;
-  background-image: none !important;
-}
-
-/* Remove pseudo-element gradients from header title */
-.md-header__topic::before,
-.md-header__topic::after,
-.md-header__title::before,
-.md-header__title::after,
-.md-header__ellipsis::before,
-.md-header__ellipsis::after {
-  display: none !important;
-  background: transparent !important;
-  background-image: none !important;
-}
-
-/* Ensure the ellipsis fade effect doesn't show odd colors */
-.md-ellipsis {
-  background: transparent !important;
-  background-image: none !important;
-}
-
-.md-ellipsis::before,
-.md-ellipsis::after {
-  background: transparent !important;
-  background-image: none !important;
-  display: none !important;
-}
-
-/* Fix any lingering primary-colored backgrounds */
-.md-header--shadow {
-  box-shadow: 0 0 0.2rem rgba(0, 0, 0, .1), 0 0.2rem 0.4rem rgba(0, 0, 0, .2) !important;
-}
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap');
 
 /* ============================================
-   Color Variables
+   Shared variables
    ============================================ */
 
 :root {
-  /* Primary colors - indigo matching Atlas hue 264 */
-  --md-primary-fg-color: #5c6bc0;
-  --md-primary-fg-color--light: #7986cb;
-  --md-primary-fg-color--dark: #3f51b5;
-  --md-primary-bg-color: #ffffff;
-  --md-primary-bg-color--light: #fafbfc;
+  --md-text-font: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --md-code-font: "IBM Plex Mono", "Fira Code", monospace;
+}
 
-  /* Accent color - same indigo family */
-  --md-accent-fg-color: #5c6bc0;
-  --md-accent-fg-color--transparent: rgba(92, 107, 192, 0.1);
+/* ============================================
+   Light mode
+   ============================================ */
+
+[data-md-color-scheme="default"] {
+  /* Primary — coral brand for header / top bar */
+  --md-primary-fg-color: #E8735A;
+  --md-primary-fg-color--light: #ed9480;
+  --md-primary-fg-color--dark: #C45D3E;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffff;
+
+  /* Accent — emerald for links & interactive elements */
+  --md-accent-fg-color: #2E8B57;
+  --md-accent-fg-color--transparent: rgba(46, 139, 87, 0.1);
   --md-accent-bg-color: #ffffff;
 
-  /* Typography - match Atlas's clean look */
-  --md-text-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --md-code-font: "JetBrains Mono", "Fira Code", monospace;
+  /* Page */
+  --md-default-bg-color: #f6f7ed;
+  --md-default-fg-color: #1f1f1f;
+  --md-default-fg-color--light: #737373;
+  --md-default-fg-color--lighter: #a3a3a3;
+  --md-default-fg-color--lightest: #e8e8e8;
+
+  /* Typeset */
+  --md-typeset-color: #1f1f1f;
+  --md-typeset-a-color: #3D4F7C;
+  --md-typeset-table-color: rgba(31, 31, 31, 0.06);
+
+  /* Code */
+  --md-code-bg-color: #ffffff;
 }
 
-/* Light mode refinements */
-[data-md-color-scheme="default"] {
-  /* Softer background like Atlas */
-  --md-default-bg-color: #fafbfc;
+/* ============================================
+   Dark mode
+   ============================================ */
 
-  /* Cool-tinted borders */
-  --md-typeset-table-color: rgba(92, 107, 192, 0.1);
-}
-
-/* Dark mode - match Atlas dark theme */
 [data-md-color-scheme="slate"] {
-  /* Deep blue-gray background (Atlas: oklch(0.13 0.03 264)) */
-  --md-default-bg-color: #1a1b2e;
-  --md-default-fg-color: #f5f5f5;
+  /* Primary — lighter coral for dark backgrounds */
+  --md-primary-fg-color: #E8735A;
+  --md-primary-fg-color--light: #ed9480;
+  --md-primary-fg-color--dark: #C45D3E;
+  --md-primary-bg-color: #0f0f0f;
+  --md-primary-bg-color--light: #1a1a1a;
 
-  /* Card/surface color (Atlas: oklch(0.17 0.03 264)) */
-  --md-code-bg-color: #242540;
+  /* Accent — brighter emerald for dark mode */
+  --md-accent-fg-color: #3cb371;
+  --md-accent-fg-color--transparent: rgba(60, 179, 113, 0.1);
 
-  /* Primary adjusts for dark mode */
-  --md-primary-fg-color: #7986cb;
-  --md-primary-bg-color: #1a1b2e;
+  /* Page */
+  --md-default-bg-color: #0f0f0f;
+  --md-default-fg-color: #f0f0f0;
+  --md-default-fg-color--light: #a3a3a3;
+  --md-default-fg-color--lighter: #737373;
+  --md-default-fg-color--lightest: #333333;
 
-  /* Accent for dark mode */
-  --md-accent-fg-color: #9fa8da;
+  /* Typeset */
+  --md-typeset-color: #f0f0f0;
+  --md-typeset-a-color: #5a6f9a;
+  --md-typeset-table-color: rgba(255, 255, 255, 0.06);
+
+  /* Code */
+  --md-code-bg-color: #1a1a1a;
 }
 
-/* Code block styling */
+/* ============================================
+   Header
+   ============================================ */
+
+.md-header {
+  box-shadow: none;
+}
+
+.md-header--shadow {
+  box-shadow: 0 0 0.2rem rgba(0, 0, 0, 0.08),
+    0 0.2rem 0.4rem rgba(0, 0, 0, 0.1);
+}
+
+/* ============================================
+   Code blocks & admonitions
+   ============================================ */
+
 .md-typeset code {
   border-radius: 0.375rem;
 }
@@ -322,24 +108,15 @@
   border-radius: 0.5rem;
 }
 
-
-/* Admonition styling - subtle borders like Atlas cards */
 .md-typeset .admonition {
   border-radius: 0.5rem;
   border-left-width: 3px;
 }
 
-/* Navigation - cleaner hover states */
+/* ============================================
+   Navigation link hover
+   ============================================ */
+
 .md-nav__link:hover {
   color: var(--md-accent-fg-color);
-}
-
-/* Header - subtle bottom border (complements the gradient header above) */
-.md-header {
-  border-bottom: 1px solid rgba(92, 107, 192, 0.1) !important;
-  box-shadow: none !important;
-}
-
-[data-md-color-scheme="slate"] .md-header {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
 }

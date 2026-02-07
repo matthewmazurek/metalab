@@ -86,14 +86,15 @@ This runs **18 experiments** (3 learning rates × 2 epoch counts × 3 replicates
 ## Installation
 
 ```bash
-uv add metalab
+uv add git+https://github.com/matthewmazurek/metalab.git
 
 # Optional extras
-uv add metalab[numpy]    # Array serialization
-uv add metalab[pandas]   # DataFrame export
-uv add metalab[rich]     # Rich progress bars
-uv add metalab[postgres] # PostgreSQL store
-uv add metalab[full]     # All of the above
+uv add "metalab[numpy] @ git+https://github.com/matthewmazurek/metalab.git"    # Array serialization
+uv add "metalab[pandas] @ git+https://github.com/matthewmazurek/metalab.git"   # DataFrame export
+uv add "metalab[rich] @ git+https://github.com/matthewmazurek/metalab.git"     # Rich progress bars
+uv add "metalab[postgres] @ git+https://github.com/matthewmazurek/metalab.git" # PostgreSQL store
+uv add "metalab[atlas] @ git+https://github.com/matthewmazurek/metalab.git"   # Atlas web UI
+uv add "metalab[full] @ git+https://github.com/matthewmazurek/metalab.git"    # All of the above
 ```
 
 ---

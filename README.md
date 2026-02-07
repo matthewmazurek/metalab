@@ -7,14 +7,15 @@ metalab is a lightweight, backend-agnostic framework for reproducible experiment
 ## Installation
 
 ```bash
-uv add metalab
+uv add git+https://github.com/matthewmazurek/metalab.git
 
 # Optional extras
-uv add metalab[numpy]    # Array serialization for capture.data()/capture.artifact()
-uv add metalab[pandas]   # DataFrame export helpers (results.to_dataframe / to_csv)
-uv add metalab[rich]     # Rich progress bars and nicer CLI output
-uv add metalab[postgres] # PostgreSQL store backend for large experiments
-uv add metalab[full]     # Installs numpy + pandas + rich + postgres
+uv add "metalab[numpy] @ git+https://github.com/matthewmazurek/metalab.git"    # Array serialization for capture.data()/capture.artifact()
+uv add "metalab[pandas] @ git+https://github.com/matthewmazurek/metalab.git"   # DataFrame export helpers (results.to_dataframe / to_csv)
+uv add "metalab[rich] @ git+https://github.com/matthewmazurek/metalab.git"     # Rich progress bars and nicer CLI output
+uv add "metalab[postgres] @ git+https://github.com/matthewmazurek/metalab.git" # PostgreSQL store backend for large experiments
+uv add "metalab[atlas] @ git+https://github.com/matthewmazurek/metalab.git"   # Atlas web UI for browsing experiment results
+uv add "metalab[full] @ git+https://github.com/matthewmazurek/metalab.git"    # All of the above
 ```
 
 ## Getting Started (Minimal Project)
