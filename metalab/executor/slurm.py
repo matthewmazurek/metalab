@@ -32,6 +32,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from uuid import uuid4
+
+from metalab.events import Event, emit_event
 from metalab.executor.handle import RunStatus
 from metalab.executor.payload import RunPayload
 from metalab.result import Results
@@ -1190,6 +1193,8 @@ class SlurmRunHandle:
         Block until all jobs complete and return Results.
 
         Includes a settling loop to handle sacct accounting lag.
+        Emits progress events so that progress trackers can update
+        in real time.
 
         Args:
             timeout: Maximum seconds to wait. None means wait forever.
@@ -1204,9 +1209,50 @@ class SlurmRunHandle:
         poll_interval = 5.0
         settle_seconds = 10.0
         settled_at: float | None = None
+        prev_completed = 0
+        prev_failed = 0
+
+        # Emit skip events for runs already completed before submission
+        for _ in range(self._skipped_count):
+            emit_event(
+                self._on_event,
+                Event.run_skipped(f"slurm-skip-{uuid4().hex[:8]}"),
+            )
 
         while True:
             status = self.status
+
+            # Emit events for newly completed runs
+            new_completed = status.completed - prev_completed
+            for _ in range(new_completed):
+                emit_event(
+                    self._on_event,
+                    Event.run_finished(f"slurm-{uuid4().hex[:8]}"),
+                )
+
+            # Emit events for newly failed runs
+            new_failed = status.failed - prev_failed
+            for _ in range(new_failed):
+                emit_event(
+                    self._on_event,
+                    Event.run_failed(
+                        f"slurm-{uuid4().hex[:8]}", error="slurm job failed"
+                    ),
+                )
+
+            prev_completed = status.completed
+            prev_failed = status.failed
+
+            # Report running count to tracker via PROGRESS event
+            emit_event(
+                self._on_event,
+                Event.progress(
+                    None,
+                    current=status.completed,
+                    total=status.total,
+                    running=status.running,
+                ),
+            )
 
             if status.done == status.total:
                 # All done according to SLURM - start settling

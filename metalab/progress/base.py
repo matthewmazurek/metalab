@@ -189,6 +189,7 @@ class ProgressTracker(Protocol):
     completed: int
     failed: int
     skipped: int
+    running: int
     
     def __call__(self, event: Event) -> None:
         """Handle an event from the runner."""
@@ -254,6 +255,7 @@ class SimpleProgressTracker:
         self.completed = 0
         self.failed = 0
         self.skipped = 0
+        self.running = 0
         self.start_time = time.time()
         self._update_counter = 0
         self._last_metrics: dict[str, Any] = {}
@@ -285,6 +287,7 @@ class SimpleProgressTracker:
         elif event.kind == EventKind.PROGRESS:
             if event.payload:
                 self.total = event.payload.get("total", self.total)
+                self.running = event.payload.get("running", self.running)
 
     def _print_progress(self) -> None:
         """Print current progress to stdout."""
@@ -320,7 +323,7 @@ class SimpleProgressTracker:
         print(
             f"  [{self.title}] {done}/{self.total} ({pct:.0f}%) "
             f"ok={self.completed} fail={self.failed} skip={self.skipped} "
-            f"ETA: {eta_str}{metrics_str}"
+            f"running={self.running} ETA: {eta_str}{metrics_str}"
         )
 
     def __enter__(self) -> "SimpleProgressTracker":
@@ -331,9 +334,13 @@ class SimpleProgressTracker:
 
     def __exit__(self, *args: Any) -> None:
         """Finish tracking."""
+        exc_type = args[0] if args else None
         elapsed = time.time() - self.start_time
         print("-" * 60)
-        print(f"Completed in {elapsed:.1f}s")
+        if exc_type is KeyboardInterrupt:
+            print(f"Interrupted after {elapsed:.1f}s")
+        else:
+            print(f"Completed in {elapsed:.1f}s")
         print(f"  Success: {self.completed}")
         print(f"  Failed: {self.failed}")
         print(f"  Skipped: {self.skipped}")

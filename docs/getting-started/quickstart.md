@@ -223,6 +223,41 @@ Without any extra configuration, metalab provides:
 - **Resume support**: Interrupted experiments continue where they left off
 - **Parallel execution**: Runs execute concurrently by default
 
+## Project Configuration
+
+As your experiments grow, you'll want shared infrastructure settings (executor defaults, store locations) that don't clutter each experiment file.
+
+metalab uses a layered configuration system driven by `.metalab.toml`:
+
+```toml
+# .metalab.toml (project root, committed to git)
+[project]
+name = "my-project"
+default_env = "local"
+
+[environments.local]
+type = "local"
+file_root = "./runs"
+```
+
+Key features:
+
+- **Auto-discovery**: metalab walks up from your working directory to find `.metalab.toml` — no explicit paths needed.
+- **Local overrides**: `.metalab.local.toml` (gitignored) is deep-merged on top for machine-specific or sensitive values like credentials.
+- **Executor defaults**: Infrastructure settings (SLURM partition, memory, modules) live in the TOML file; experiments only override what they need.
+- **Store discovery**: With services running (`metalab services up`), use `store="discover"` to auto-connect to the provisioned database.
+
+```python
+# Your experiment only specifies overrides — defaults come from .metalab.toml
+handle = metalab.run(
+    exp,
+    store="discover",
+    executor=metalab.resolve_executor("slurm", {"gpus": 1}),
+)
+```
+
+See [Services and Environments](../services.md) for the full configuration guide, including environment profiles, SSH tunneling, and service provisioning.
+
 ## Next Steps
 
 Now that you've run your first experiment, explore more:

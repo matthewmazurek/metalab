@@ -129,11 +129,14 @@ class ProgressRunHandle:
         self._handle.set_event_callback(self._tracker)
         self._tracker_started = True
 
-    def _stop_tracker(self) -> None:
-        """Stop the progress tracker."""
+    def _stop_tracker(
+        self,
+        exc_info: tuple[type | None, BaseException | None, object] = (None, None, None),
+    ) -> None:
+        """Stop the progress tracker, passing exception info for clean summary."""
         if self._tracker_stopped or not self._tracker_started:
             return
-        self._tracker.__exit__(None, None, None)
+        self._tracker.__exit__(*exc_info)
         self._tracker_stopped = True
 
     @property
@@ -171,9 +174,17 @@ class ProgressRunHandle:
         Block until all runs complete and return Results.
 
         Also stops the progress tracker display.
+        Handles KeyboardInterrupt gracefully by cancelling remaining runs
+        and displaying an interrupted summary instead of a traceback.
         """
         try:
             return self._handle.result(timeout=timeout)
+        except KeyboardInterrupt:
+            self._handle.cancel()
+            self._stop_tracker(
+                exc_info=(KeyboardInterrupt, KeyboardInterrupt(), None),
+            )
+            raise
         finally:
             self._stop_tracker()
 
@@ -364,12 +375,30 @@ def _run_slurm_indexed(
     # Count existing successful runs if resuming
     skipped_count = 0
     if resume:
-        # For SLURM indexed, we can't easily pre-scan all run_ids without
-        # enumerating them (which defeats the purpose). Instead, we let
-        # the worker skip at runtime. We could optionally do a store scan
-        # here for existing runs.
-        # For now, we set skipped_count to 0 and let workers skip.
-        pass
+        for param_case in experiment.params:
+            if experiment.param_resolver is not None:
+                resolver = experiment.param_resolver
+                if hasattr(resolver, "resolve"):
+                    resolved_params = resolver.resolve({}, param_case.params)
+                else:
+                    resolved_params = resolver({}, param_case.params)
+            else:
+                resolved_params = param_case.params
+
+            params_fp = fingerprint_params(resolved_params)
+            for seed_bundle in experiment.seeds:
+                seed_fp = fingerprint_seeds(seed_bundle)
+                run_id = compute_run_id(
+                    experiment_id=experiment.experiment_id,
+                    context_fp=ctx_fp,
+                    params_fp=params_fp,
+                    seed_fp=seed_fp,
+                    code_fp=experiment.operation.code_hash,
+                )
+                if store.run_exists(run_id):
+                    existing = store.get_run_record(run_id)
+                    if existing and existing.status == Status.SUCCESS:
+                        skipped_count += 1
 
     # Optionally persist the resolved manifest for auditability
     if manifest and isinstance(store, SupportsWorkingDirectory):

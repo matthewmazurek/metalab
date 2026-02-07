@@ -354,7 +354,7 @@ class ServiceOrchestrator:
         """
         if not self._bundle_path.exists():
             raise RuntimeError(
-                "No service bundle found. Run 'metalab atlas up' first."
+                "No service bundle found. Run 'metalab services up' first."
             )
 
         bundle = ServiceBundle.load(self._bundle_path)

@@ -7,7 +7,7 @@ metalab includes an environment system for provisioning and managing infrastruct
 The environment system handles three concerns:
 
 1. **Configuration** -- `.metalab.toml` defines project-level settings, named environment profiles, and service declarations.
-2. **Provisioning** -- `metalab atlas up` starts the right services for the selected environment (subprocess locally, SLURM jobs on a cluster).
+2. **Provisioning** -- `metalab services up` starts the right services for the selected environment (subprocess locally, SLURM jobs on a cluster).
 3. **Connectivity** -- `metalab tunnel` opens SSH tunnels so remote services appear on `localhost`.
 
 Supported deployment targets:
@@ -136,28 +136,28 @@ The active environment is determined by (in priority order):
 
 ```bash
 # Explicit flag
-metalab atlas up --env local
+metalab services up --env local
 
 # Environment variable
 export METALAB_ENV=slurm
-metalab atlas up
+metalab services up
 
 # Falls back to default_env in .metalab.toml
-metalab atlas up
+metalab services up
 ```
 
 ---
 
 ## Service Provisioning
 
-The `metalab atlas` commands manage the full service lifecycle. The orchestrator reads your resolved config and provisions only the services you have declared.
+The `metalab services` commands manage the full service lifecycle. The orchestrator reads your resolved config and provisions only the services you have declared.
 
-### `metalab atlas up`
+### `metalab services up`
 
 Provisions services for the selected environment.
 
 ```bash
-metalab atlas up --env slurm
+metalab services up --env slurm
 ```
 
 What happens:
@@ -171,7 +171,7 @@ What happens:
 The `--tunnel` flag opens an SSH tunnel immediately after provisioning:
 
 ```bash
-metalab atlas up --env slurm --tunnel
+metalab services up --env slurm --tunnel
 ```
 
 ### Three provisioning scenarios
@@ -182,12 +182,12 @@ metalab atlas up --env slurm --tunnel
 | **File-only** | `file_root` set, no `[services.postgres]` | Atlas only (reads shared filesystem directly) |
 | **Reuse existing** | Same as above | Nothing new -- existing bundle is reused if healthy |
 
-### `metalab atlas status`
+### `metalab services status`
 
 Check health of running services:
 
 ```bash
-metalab atlas status --env slurm
+metalab services status --env slurm
 ```
 
 ```
@@ -197,12 +197,12 @@ metalab atlas status --env slurm
 
 Use `--json` for machine-readable output.
 
-### `metalab atlas down`
+### `metalab services down`
 
 Stop all services and clean up:
 
 ```bash
-metalab atlas down --env slurm
+metalab services down --env slurm
 ```
 
 Services are stopped in reverse dependency order (Atlas first, then PostgreSQL). On SLURM, jobs are cancelled with `scancel`. The `bundle.json` file is removed.
@@ -215,7 +215,7 @@ When services are running, experiment configs can use `store: "discover"` to aut
 
 ### How it works
 
-1. `metalab atlas up` provisions services and saves a `bundle.json` containing the store locator.
+1. `metalab services up` provisions services and saves a `bundle.json` containing the store locator.
 2. When metalab encounters `store: "discover"`, it walks up from the current directory looking for `services/bundle.json`.
 3. The `store_locator` field from the bundle is used as the store URI.
 
@@ -322,7 +322,7 @@ The tunnel reads `bundle.json` to determine the remote host and port, then forwa
 The simplest setup -- services run as local subprocesses.
 
 ```bash
-metalab atlas up --env local
+metalab services up --env local
 ```
 
 ```
@@ -338,7 +338,7 @@ Full-featured setup with a Postgres query index.
 
 ```bash
 # Provision PostgreSQL and Atlas on a compute node
-metalab atlas up --env slurm
+metalab services up --env slurm
 
 # Open an SSH tunnel to access Atlas locally
 metalab tunnel
@@ -347,13 +347,13 @@ metalab tunnel
 # Run experiments -- they write to the shared filesystem and PG index
 
 # When finished, clean up
-metalab atlas down --env slurm
+metalab services down --env slurm
 ```
 
 Or provision and tunnel in one step:
 
 ```bash
-metalab atlas up --env slurm --tunnel
+metalab services up --env slurm --tunnel
 ```
 
 ### SLURM / HPC with File Store Only
@@ -361,7 +361,7 @@ metalab atlas up --env slurm --tunnel
 If you don't need PostgreSQL (e.g., small experiments where filesystem-only is sufficient), omit the `[services.postgres]` section from your config. Atlas will read the shared filesystem directly.
 
 ```bash
-metalab atlas up --env slurm
+metalab services up --env slurm
 metalab tunnel
 # Atlas reads from file_root on the shared filesystem
 ```
@@ -434,9 +434,62 @@ The executor inherits partition, memory, and other defaults from `.metalab.toml`
 
 ---
 
+## How Configuration Flows into `metalab.run()`
+
+When you call `metalab.run()`, multiple configuration layers merge transparently:
+
+```
+.metalab.toml               shared infrastructure defaults
+  └─ .metalab.local.toml    machine-specific overrides (gitignored)
+      └─ experiment config   per-experiment overrides
+          └─ metalab.run()   final resolution at runtime
+```
+
+### Store resolution
+
+The `store` argument accepts several forms:
+
+| Value | What happens |
+|-------|-------------|
+| `None` (default) | FileStore at `./experiments/{experiment_id}/` |
+| `"runs/"` | FileStore at the given path |
+| `"postgresql://..."` | PostgresStore (pass `file_root` for artifacts) |
+| `"discover"` | Auto-detect from the nearest running service bundle |
+| `StoreConfig` object | Used directly (auto-scoped to experiment) |
+
+### Executor resolution
+
+`metalab.resolve_executor(platform, overrides)` merges TOML defaults with per-experiment overrides:
+
+1. Auto-discovers `.metalab.toml` (walks up from cwd)
+2. Resolves the environment profile matching `platform`
+3. Deep-merges TOML defaults with the `overrides` dict
+4. Creates the executor via the plugin registry
+
+```python
+# .metalab.toml provides partition, time, memory, modules, conda_env...
+# Your experiment only overrides what differs:
+executor = metalab.resolve_executor("slurm", {"gpus": 1, "time": "4:00:00"})
+```
+
+If no `.metalab.toml` exists, only the overrides dict is used — your code still works without a project config file.
+
+### Inspecting the resolved config
+
+Use the CLI to verify what metalab will use before running experiments:
+
+```bash
+metalab env list           # List available environment profiles
+metalab env show slurm     # Show fully merged config for a profile
+```
+
+When `metalab.run()` executes, it logs the resolved store, executor, and run counts at INFO level so you can confirm what was picked up.
+
+---
+
 ## Teardown and Cleanup
 
-### `metalab atlas down`
+### `metalab services down`
 
 Stops all services tracked in the service bundle:
 
@@ -448,14 +501,14 @@ Services are stopped in reverse dependency order (Atlas before PostgreSQL) so th
 
 ### Orphan detection
 
-If a previous session was not cleanly shut down, `metalab atlas status` will detect stale bundles. If the services referenced in the bundle are unreachable, `metalab atlas up` will discard the stale bundle and provision fresh services.
+If a previous session was not cleanly shut down, `metalab services status` will detect stale bundles. If the services referenced in the bundle are unreachable, `metalab services up` will discard the stale bundle and provision fresh services.
 
 ```bash
 # Check for orphaned services
-metalab atlas status --env slurm
+metalab services status --env slurm
 
 # If services show as unreachable, re-provision
-metalab atlas up --env slurm
+metalab services up --env slurm
 ```
 
 ### Bundle location

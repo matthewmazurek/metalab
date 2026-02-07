@@ -86,7 +86,7 @@ def _resolve_discover_locator() -> LocatorInfo:
     if bundle is None:
         raise ValueError(
             "No active service bundle found. "
-            "Start services with 'metalab atlas up' first, "
+            "Start services with 'metalab services up' first, "
             "or specify an explicit store locator."
         )
     if not bundle.store_locator:

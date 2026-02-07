@@ -108,6 +108,7 @@ class Event:
         current: int,
         total: int,
         message: str = "",
+        running: int = 0,
     ) -> Event:
         """Create a progress event."""
         return cls(
@@ -118,6 +119,7 @@ class Event:
                 "current": current,
                 "total": total,
                 "message": message,
+                "running": running,
             },
         )
 

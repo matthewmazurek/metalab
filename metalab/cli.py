@@ -365,77 +365,77 @@ def main() -> int:
         help="Environment profile name (default: project default)",
     )
 
-    # Atlas commands
-    atlas_parser = subparsers.add_parser(
-        "atlas",
+    # Services commands
+    services_parser = subparsers.add_parser(
+        "services",
         help="Provision and manage services",
     )
-    atlas_subparsers = atlas_parser.add_subparsers(
-        dest="atlas_command",
-        help="Atlas commands",
+    services_subparsers = services_parser.add_subparsers(
+        dest="services_command",
+        help="Service commands",
     )
 
-    # atlas up
-    atlas_up_parser = atlas_subparsers.add_parser(
+    # services up
+    services_up_parser = services_subparsers.add_parser(
         "up",
         help="Provision services per the selected environment profile",
     )
-    atlas_up_parser.add_argument(
+    services_up_parser.add_argument(
         "--env",
         default=None,
         help="Environment profile name (default: project default, or METALAB_ENV)",
     )
-    atlas_up_parser.add_argument(
+    services_up_parser.add_argument(
         "--tunnel",
         action="store_true",
         help="Also open a tunnel after provisioning",
     )
 
-    # atlas down
-    atlas_down_parser = atlas_subparsers.add_parser(
+    # services down
+    services_down_parser = services_subparsers.add_parser(
         "down",
         help="Stop all services and clean up",
     )
-    atlas_down_parser.add_argument(
+    services_down_parser.add_argument(
         "--env",
         default=None,
         help="Environment profile name (default: project default, or METALAB_ENV)",
     )
 
-    # atlas status
-    atlas_status_parser = atlas_subparsers.add_parser(
+    # services status
+    services_status_parser = services_subparsers.add_parser(
         "status",
         help="Check health of running services",
     )
-    atlas_status_parser.add_argument(
+    services_status_parser.add_argument(
         "--env",
         default=None,
         help="Environment profile name (default: project default, or METALAB_ENV)",
     )
-    atlas_status_parser.add_argument(
+    services_status_parser.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
         help="Output as JSON",
     )
 
-    # atlas logs
-    atlas_logs_parser = atlas_subparsers.add_parser(
+    # services logs
+    services_logs_parser = services_subparsers.add_parser(
         "logs",
         help="Show service logs",
     )
-    atlas_logs_parser.add_argument(
+    services_logs_parser.add_argument(
         "--env",
         default=None,
         help="Environment profile name (default: project default, or METALAB_ENV)",
     )
-    atlas_logs_parser.add_argument(
+    services_logs_parser.add_argument(
         "service",
         nargs="?",
         default=None,
         help="Service name (e.g. atlas, postgres). Omit for all services.",
     )
-    atlas_logs_parser.add_argument(
+    services_logs_parser.add_argument(
         "-n", "--tail",
         type=int,
         default=0,
@@ -474,8 +474,8 @@ def main() -> int:
         return handle_store(args)
     elif args.command == "env":
         return handle_env(args)
-    elif args.command == "atlas":
-        return handle_atlas(args)
+    elif args.command == "services":
+        return handle_services(args)
     elif args.command == "tunnel":
         return handle_tunnel(args)
     else:
@@ -801,8 +801,8 @@ def handle_env(args: argparse.Namespace) -> int:
         return 1
 
 
-def handle_atlas(args: argparse.Namespace) -> int:
-    """Handle atlas subcommands."""
+def handle_services(args: argparse.Namespace) -> int:
+    """Handle services subcommands."""
     import json as json_mod
 
     from metalab.config import ProjectConfig
@@ -825,7 +825,7 @@ def handle_atlas(args: argparse.Namespace) -> int:
 
     orch = ServiceOrchestrator(resolved)
 
-    if args.atlas_command == "up":
+    if args.services_command == "up":
         try:
             tunnel = getattr(args, "tunnel", False)
             bundle = orch.up(tunnel=tunnel)
@@ -847,7 +847,7 @@ def handle_atlas(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
-    elif args.atlas_command == "down":
+    elif args.services_command == "down":
         try:
             orch.down()
             print("All services stopped.")
@@ -856,7 +856,7 @@ def handle_atlas(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
-    elif args.atlas_command == "status":
+    elif args.services_command == "status":
         try:
             status = orch.status()
             if not status.bundle_found:
@@ -876,7 +876,7 @@ def handle_atlas(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
-    elif args.atlas_command == "logs":
+    elif args.services_command == "logs":
         try:
             service = getattr(args, "service", None)
             tail = getattr(args, "tail", 0)
@@ -894,7 +894,7 @@ def handle_atlas(args: argparse.Namespace) -> int:
             return 1
 
     else:
-        print("Usage: metalab atlas {up|down|status|logs}", file=sys.stderr)
+        print("Usage: metalab services {up|down|status|logs}", file=sys.stderr)
         return 1
 
 

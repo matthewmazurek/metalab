@@ -166,7 +166,8 @@ def resolve_executor(
         defaults = dict(resolved.env_config)
         logger.info(
             "Loaded executor defaults from .metalab.toml [%s] (%d settings)",
-            platform, len(defaults),
+            platform,
+            len(defaults),
         )
     except FileNotFoundError:
         logger.debug("No .metalab.toml found; using overrides only")

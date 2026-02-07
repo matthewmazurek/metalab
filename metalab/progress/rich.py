@@ -78,6 +78,7 @@ class RichProgressTracker:
         self.completed = 0
         self.failed = 0
         self.skipped = 0
+        self.running = 0
         self.in_progress: dict[str, dict[str, Any]] = {}
         self.recent_events: deque[tuple[str, str, str]] = deque(maxlen=show_recent)
         self.start_time = time.time()
@@ -119,7 +120,7 @@ class RichProgressTracker:
             str(self.completed), "success",
             str(self.failed), "failed",
             str(self.skipped), "skipped",
-            str(len(self.in_progress)), "running",
+            str(self.running), "running",
         )
 
         # Recent events table
@@ -190,9 +191,12 @@ class RichProgressTracker:
             self.in_progress[event.run_id] = {
                 "start_time": time.time(),
             }
+            self.running += 1
 
         elif event.kind == EventKind.RUN_FINISHED:
             self.completed += 1
+            if self.running > 0:
+                self.running -= 1
             duration = event.payload.get("duration_ms", 0) if event.payload else 0
             metrics = event.payload.get("metrics", {}) if event.payload else {}
             
@@ -205,6 +209,8 @@ class RichProgressTracker:
 
         elif event.kind == EventKind.RUN_FAILED:
             self.failed += 1
+            if self.running > 0:
+                self.running -= 1
             error = event.payload.get("error", "unknown")[:35] if event.payload else "unknown"
             self.recent_events.appendleft(
                 ("failed", event.run_id, error)
@@ -222,6 +228,7 @@ class RichProgressTracker:
 
         elif event.kind == EventKind.PROGRESS:
             if event.payload:
+                self.running = event.payload.get("running", self.running)
                 new_total = event.payload.get("total", self.total)
                 if new_total != self.total:
                     self.total = new_total
@@ -249,20 +256,34 @@ class RichProgressTracker:
 
     def __exit__(self, *args: Any) -> None:
         """Stop the live display."""
+        exc_type = args[0] if args else None
+
+        # Always tear down Live cleanly (don't pass the interrupt to Rich)
         if self.live is not None:
-            self.live.__exit__(*args)
-        
+            self.live.__exit__(None, None, None)
+
         # Print final summary
         elapsed = time.time() - self.start_time
         self.console.print()
-        self.console.print(Panel(
-            f"[green]✓ Completed[/green] in [bold]{elapsed:.1f}s[/bold]\n"
-            f"  Success: [green]{self.completed}[/green]\n"
-            f"  Failed: [red]{self.failed}[/red]\n"
-            f"  Skipped: [yellow]{self.skipped}[/yellow]",
-            title="Execution Complete",
-            border_style="green",
-        ))
+
+        if exc_type is KeyboardInterrupt:
+            self.console.print(Panel(
+                f"[yellow]⚠ Interrupted[/yellow] after [bold]{elapsed:.1f}s[/bold]\n"
+                f"  Success: [green]{self.completed}[/green]\n"
+                f"  Failed: [red]{self.failed}[/red]\n"
+                f"  Skipped: [yellow]{self.skipped}[/yellow]",
+                title="Execution Interrupted",
+                border_style="yellow",
+            ))
+        else:
+            self.console.print(Panel(
+                f"[green]✓ Completed[/green] in [bold]{elapsed:.1f}s[/bold]\n"
+                f"  Success: [green]{self.completed}[/green]\n"
+                f"  Failed: [red]{self.failed}[/red]\n"
+                f"  Skipped: [yellow]{self.skipped}[/yellow]",
+                title="Execution Complete",
+                border_style="green",
+            ))
 
     def get_console(self) -> Console:
         """Get the rich Console instance for output routing."""
