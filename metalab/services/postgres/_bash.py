@@ -24,6 +24,7 @@ class PgBashParams:
     data_dir: Path
     service_dir: Path
     service_file: Path
+    max_connections: int = 200
 
     @property
     def password_literal(self) -> str:
@@ -99,6 +100,7 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "host all all 0.0.0.0/0 {p.auth_method}" >> "$PGDATA/pg_hba.conf"
     echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
     echo "port = {p.port}" >> "$PGDATA/postgresql.conf"
+    echo "max_connections = {p.max_connections}" >> "$PGDATA/postgresql.conf"
 fi
 
 # Start PostgreSQL (background)

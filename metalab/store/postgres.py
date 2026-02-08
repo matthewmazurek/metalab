@@ -60,6 +60,8 @@ class PostgresStoreConfig(StoreConfig):
     schema: str = "public"
     auto_migrate: bool = True
     connect_timeout: float = 10.0
+    pool_min_size: int = 1
+    pool_max_size: int = 2
 
     def __post_init__(self) -> None:
         # Normalize file_root to absolute path
@@ -229,6 +231,8 @@ class PostgresStore:
             config.connection_string,
             schema=config.schema,
             auto_migrate=config.auto_migrate,
+            pool_min_size=config.pool_min_size,
+            pool_max_size=config.pool_max_size,
             connect_timeout=config.connect_timeout,
         )
 

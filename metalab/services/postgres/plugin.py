@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ from metalab.services.postgres.config import (
     DEFAULT_PORT,
     PostgresServiceConfig,
     build_store_locator,
+    resolve_password,
 )
 from metalab.services.postgres.lifecycle import (
     get_service_info,
@@ -47,6 +47,7 @@ class _ResolvedPgConfig:
     data_dir: Path
     service_dir: Path
     service_file: Path
+    max_connections: int = 200
 
 
 class PostgresPlugin(ServicePlugin):
@@ -62,16 +63,22 @@ class PostgresPlugin(ServicePlugin):
     def _resolve_config(
         spec: Any,
         env_config: dict[str, Any],
+        *,
+        auth_method_default: str = "scram-sha-256",
     ) -> _ResolvedPgConfig:
-        """Extract and normalise config from *spec* and *env_config*."""
+        """Extract and normalise config from *spec* and *env_config*.
+
+        Args:
+            spec: The :class:`ServiceSpec` for postgres.
+            env_config: Environment-level configuration dict.
+            auth_method_default: Fallback auth method when *spec* does not
+                specify one.  SLURM uses ``"scram-sha-256"`` (the default);
+                local uses ``"trust"``.
+        """
         user = spec.config.get(
             "user", env_config.get("user", os.environ.get("USER", "postgres"))
         )
-        auth_method = spec.config.get("auth_method", "scram-sha-256")
-        password = spec.config.get("password")
-        if auth_method == "scram-sha-256" and not password:
-            password = secrets.token_urlsafe(16)
-
+        auth_method = spec.config.get("auth_method", auth_method_default)
         port = spec.config.get("port", DEFAULT_PORT)
         database = spec.config.get("database", DEFAULT_DATABASE)
 
@@ -85,6 +92,12 @@ class PostgresPlugin(ServicePlugin):
         if isinstance(data_dir, str):
             data_dir = Path(data_dir)
 
+        password = resolve_password(
+            service_dir, auth_method, spec.config.get("password")
+        )
+
+        max_connections = spec.config.get("max_connections", 200)
+
         return _ResolvedPgConfig(
             user=user,
             password=password,
@@ -95,6 +108,7 @@ class PostgresPlugin(ServicePlugin):
             data_dir=data_dir,
             service_dir=service_dir,
             service_file=service_file,
+            max_connections=max_connections,
         )
 
     @staticmethod
@@ -157,6 +171,7 @@ class PostgresPlugin(ServicePlugin):
             data_dir=cfg.data_dir,
             service_dir=cfg.service_dir,
             service_file=cfg.service_file,
+            max_connections=cfg.max_connections,
         )
 
         setup_bash = render_setup_bash(params)
@@ -228,21 +243,22 @@ class PostgresPlugin(ServicePlugin):
         from metalab.environment.base import ReadinessCheck
         from metalab.environment.local import LocalFragment
 
-        user = spec.config.get("user", os.environ.get("USER", "postgres"))
+        cfg = self._resolve_config(spec, env_config, auth_method_default="trust")
+
         pg_config = PostgresServiceConfig(
-            port=spec.config.get("port", DEFAULT_PORT),
-            database=spec.config.get("database", DEFAULT_DATABASE),
-            user=user,
-            password=spec.config.get("password"),
-            auth_method=spec.config.get("auth_method", "trust"),
+            port=cfg.port,
+            database=cfg.database,
+            user=cfg.user,
+            password=cfg.password,
+            auth_method=cfg.auth_method,
             listen_addresses=spec.config.get("listen_addresses", "localhost"),
+            max_connections=cfg.max_connections,
         )
 
-        file_root = spec.config.get("file_root") or env_config.get("file_root", "")
         service = start_postgres_local(pg_config)
 
         _service = service
-        _file_root = file_root
+        _file_root = cfg.file_root
 
         def _build_handle(pid: str, hostname: str) -> Any:
             conn_string = _service.connection_string

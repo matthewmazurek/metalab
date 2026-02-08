@@ -54,7 +54,9 @@ class ResolvedSource:
     def __init__(
         self,
         source: ParamSource,
-        resolver: ParamResolver | Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
+        resolver: (
+            ParamResolver | Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+        ),
         context_meta: dict[str, Any] | None = None,
     ) -> None:
         """
@@ -113,7 +115,9 @@ class ResolvedSource:
 
 def with_resolver(
     source: ParamSource,
-    resolver: ParamResolver | Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
+    resolver: (
+        ParamResolver | Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+    ),
     context_meta: dict[str, Any] | None = None,
 ) -> ResolvedSource:
     """

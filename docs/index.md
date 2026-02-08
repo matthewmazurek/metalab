@@ -102,6 +102,7 @@ uv add "metalab[full] @ git+https://github.com/matthewmazurek/metalab.git"    # 
 ## Next Steps
 
 - [Key Concepts](key-concepts.md) — Context specs, params, seeds, and capture
+- [Architecture](architecture.md) — How the internals fit together
 - [Execution](execution.md) — Local and SLURM executors
 - [Storage](storage.md) — FileStore and PostgreSQL backends
 - [Remote Analysis](remote-analysis-workflow.md) — Working with remote experiment data

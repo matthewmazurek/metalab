@@ -444,3 +444,238 @@ class TestPluginRegistry:
         assert plugin is not None
         result = plugin.discover(Path("/tmp"), "k8s", {})
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Password persistence
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePassword:
+    """Unit tests for the shared resolve_password helper."""
+
+    def test_generates_and_persists(self, tmp_path):
+        """First call generates a password and writes .pgpass."""
+        from metalab.services.postgres.config import resolve_password
+
+        svc_dir = tmp_path / "svc"
+        svc_dir.mkdir()
+
+        pw = resolve_password(svc_dir, "scram-sha-256")
+        assert pw is not None
+        assert len(pw) > 0
+
+        pgpass = svc_dir / ".pgpass"
+        assert pgpass.exists()
+        assert pgpass.read_text().strip() == pw
+
+    def test_reuses_persisted(self, tmp_path):
+        """Second call returns the same password from .pgpass."""
+        from metalab.services.postgres.config import resolve_password
+
+        svc_dir = tmp_path / "svc"
+        svc_dir.mkdir()
+
+        pw1 = resolve_password(svc_dir, "scram-sha-256")
+        pw2 = resolve_password(svc_dir, "scram-sha-256")
+        assert pw1 == pw2
+
+    def test_explicit_password_returned_as_is(self, tmp_path):
+        """Explicit password is returned without writing .pgpass."""
+        from metalab.services.postgres.config import resolve_password
+
+        svc_dir = tmp_path / "svc"
+        svc_dir.mkdir()
+
+        pw = resolve_password(svc_dir, "scram-sha-256", "my-explicit-pw")
+        assert pw == "my-explicit-pw"
+        assert not (svc_dir / ".pgpass").exists()
+
+    def test_trust_returns_none(self, tmp_path):
+        """Trust auth returns None and does not write .pgpass."""
+        from metalab.services.postgres.config import resolve_password
+
+        svc_dir = tmp_path / "svc"
+        svc_dir.mkdir()
+
+        pw = resolve_password(svc_dir, "trust")
+        assert pw is None
+        assert not (svc_dir / ".pgpass").exists()
+
+    def test_pgpass_permissions(self, tmp_path):
+        """Generated .pgpass file has restrictive permissions."""
+        import stat
+        from metalab.services.postgres.config import resolve_password
+
+        svc_dir = tmp_path / "svc"
+        svc_dir.mkdir()
+
+        resolve_password(svc_dir, "scram-sha-256")
+        pgpass = svc_dir / ".pgpass"
+        mode = pgpass.stat().st_mode & 0o777
+        assert mode == 0o600
+
+
+class TestPasswordPersistence:
+    """Password is persisted to .pgpass and reused across restarts."""
+
+    def test_slurm_generates_and_persists_password(self, tmp_path):
+        """First plan_slurm generates a password and writes .pgpass."""
+        from metalab.services.postgres import PostgresPlugin
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                "auth_method": "scram-sha-256",
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        plugin = PostgresPlugin()
+        frag = plugin.plan(spec, "slurm", env_config)
+
+        pgpass = tmp_path / "services" / "postgres" / ".pgpass"
+        assert pgpass.exists()
+        password = pgpass.read_text().strip()
+        assert len(password) > 0
+
+        # The generated password appears in the setup bash
+        assert password in frag.setup_bash
+
+    def test_slurm_reuses_persisted_password(self, tmp_path):
+        """Second plan_slurm reuses the password from .pgpass."""
+        from metalab.services.postgres import PostgresPlugin
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                "auth_method": "scram-sha-256",
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        plugin = PostgresPlugin()
+
+        # First call — generates and persists
+        frag1 = plugin.plan(spec, "slurm", env_config)
+        pgpass = tmp_path / "services" / "postgres" / ".pgpass"
+        password1 = pgpass.read_text().strip()
+
+        # Second call — should reuse
+        frag2 = plugin.plan(spec, "slurm", env_config)
+        password2 = pgpass.read_text().strip()
+
+        assert password1 == password2
+        assert password1 in frag2.setup_bash
+
+    def test_slurm_explicit_password_skips_persistence(self, tmp_path):
+        """Explicit password in config is used as-is, no .pgpass written."""
+        from metalab.services.postgres import PostgresPlugin
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                "auth_method": "scram-sha-256",
+                "password": "my-explicit-pw",
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        plugin = PostgresPlugin()
+        frag = plugin.plan(spec, "slurm", env_config)
+
+        pgpass = tmp_path / "services" / "postgres" / ".pgpass"
+        assert not pgpass.exists()
+        assert "my-explicit-pw" in frag.setup_bash
+
+    def test_slurm_trust_auth_no_password(self, tmp_path):
+        """Trust auth generates no password and no .pgpass."""
+        from metalab.services.postgres import PostgresPlugin
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                "auth_method": "trust",
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        plugin = PostgresPlugin()
+        plugin.plan(spec, "slurm", env_config)
+
+        pgpass = tmp_path / "services" / "postgres" / ".pgpass"
+        assert not pgpass.exists()
+
+    def test_local_resolve_config_uses_same_password_logic(self, tmp_path):
+        """plan_local goes through _resolve_config with the same .pgpass logic."""
+        from metalab.services.postgres.plugin import PostgresPlugin, _ResolvedPgConfig
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                "auth_method": "scram-sha-256",
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        # Simulate what plan_local does: call _resolve_config with trust default
+        cfg = PostgresPlugin._resolve_config(
+            spec, env_config, auth_method_default="trust"
+        )
+        # auth_method from spec overrides the default
+        assert isinstance(cfg, _ResolvedPgConfig)
+        assert cfg.auth_method == "scram-sha-256"
+
+        pgpass = tmp_path / "services" / "postgres" / ".pgpass"
+        assert pgpass.exists()
+        assert cfg.password == pgpass.read_text().strip()
+
+    def test_local_trust_default_no_password(self, tmp_path):
+        """plan_local defaults to trust when spec has no auth_method."""
+        from metalab.services.postgres.plugin import PostgresPlugin
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                # No auth_method → default should be "trust" for local
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        cfg = PostgresPlugin._resolve_config(
+            spec, env_config, auth_method_default="trust"
+        )
+        assert cfg.auth_method == "trust"
+        assert cfg.password is None
+
+        pgpass = tmp_path / "services" / "postgres" / ".pgpass"
+        assert not pgpass.exists()
+
+    def test_slurm_and_local_share_pgpass(self, tmp_path):
+        """Both slurm and local resolve the same .pgpass for the same file_root."""
+        from metalab.services.postgres.plugin import PostgresPlugin
+
+        spec = ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": str(tmp_path),
+                "auth_method": "scram-sha-256",
+            },
+        )
+        env_config = {"file_root": str(tmp_path), "user": "testuser"}
+
+        # SLURM path (default auth_method_default="scram-sha-256")
+        cfg_slurm = PostgresPlugin._resolve_config(spec, env_config)
+
+        # Local path (auth_method_default="trust", but spec overrides)
+        cfg_local = PostgresPlugin._resolve_config(
+            spec, env_config, auth_method_default="trust"
+        )
+
+        assert cfg_slurm.password == cfg_local.password

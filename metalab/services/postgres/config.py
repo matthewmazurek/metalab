@@ -4,6 +4,7 @@ PostgreSQL service configuration and service-info dataclasses.
 Contains:
 - ``PostgresServiceConfig``: Configuration for starting a PostgreSQL service.
 - ``PostgresService``: Runtime information about a running service.
+- ``resolve_password``: Stable password resolution (config → file → generate).
 - ``build_store_locator``: Construct a PostgresStore locator URI.
 - Default constants (``DEFAULT_PORT``, ``DEFAULT_DATABASE``, etc.).
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,41 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 DEFAULT_LOCAL_SERVICE_DIR = Path.home() / ".metalab" / "services" / "postgres"
 DEFAULT_PORT = 5432
 DEFAULT_DATABASE = "metalab"
+
+
+def resolve_password(
+    service_dir: Path,
+    auth_method: str,
+    explicit_password: str | None = None,
+) -> str | None:
+    """Resolve the PostgreSQL password.
+
+    Resolution order: explicit value > persisted ``.pgpass`` > generate new.
+
+    The password must be stable across restarts because PGDATA may already
+    be initialised with a previous password.  This function is the single
+    source of truth for that invariant, used by both SLURM and local paths.
+
+    Args:
+        service_dir: Directory where ``.pgpass`` is stored.
+        auth_method: PostgreSQL authentication method.
+        explicit_password: Password provided explicitly in config.
+
+    Returns:
+        The resolved password, or ``None`` when *auth_method* does not
+        require a password (e.g. ``"trust"``).
+    """
+    if explicit_password:
+        return explicit_password
+    if auth_method != "scram-sha-256":
+        return None
+    password_file = service_dir / ".pgpass"
+    if password_file.exists():
+        return password_file.read_text().strip()
+    password = secrets.token_urlsafe(16)
+    password_file.write_text(password)
+    os.chmod(password_file, 0o600)
+    return password
 
 
 @dataclass
@@ -46,7 +83,7 @@ class PostgresServiceConfig:
     password: str | None = None
     auth_method: str = "trust"  # 'trust' for dev, 'scram-sha-256' for production
     listen_addresses: str = "localhost"
-    max_connections: int = 100
+    max_connections: int = 200
 
     def __post_init__(self) -> None:
         if self.data_dir is not None:

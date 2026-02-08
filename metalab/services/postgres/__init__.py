@@ -12,6 +12,7 @@ from metalab.services.postgres.config import (
     PostgresService,
     PostgresServiceConfig,
     build_store_locator,
+    resolve_password,
 )
 from metalab.services.postgres.lifecycle import (
     get_service_info,
@@ -29,6 +30,7 @@ __all__ = [
     "PostgresServiceConfig",
     "build_store_locator",
     "get_service_info",
+    "resolve_password",
     "start_postgres_local",
     "stop_postgres",
 ]

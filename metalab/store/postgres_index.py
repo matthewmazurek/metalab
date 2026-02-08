@@ -100,6 +100,10 @@ class PostgresIndex:
         """
         Initialize PostgresIndex.
 
+        If Postgres is temporarily unavailable (e.g. too many clients),
+        initialization succeeds and schema migration is deferred until the
+        first successful connection.
+
         Args:
             connection_string: PostgreSQL connection URL.
             schema: Database schema name.
@@ -118,6 +122,8 @@ class PostgresIndex:
 
         self._connection_string = connection_string
         self._schema = schema
+        self._auto_migrate = auto_migrate
+        self._schema_ensured = False
 
         # Strip metalab-specific params before passing to psycopg
         # (psycopg rejects unknown query parameters like file_root)
@@ -132,7 +138,12 @@ class PostgresIndex:
         )
 
         if auto_migrate:
-            self._ensure_schema()
+            try:
+                self._ensure_schema()
+            except Exception as e:
+                logger.warning(
+                    f"Postgres unavailable at init, deferring schema migration: {e}"
+                )
 
     def __repr__(self) -> str:
         """Return a string representation of the index."""
@@ -155,8 +166,21 @@ class PostgresIndex:
 
     @contextmanager
     def _conn(self) -> Generator[Any, None, None]:
-        """Get a connection from the pool."""
+        """
+        Get a connection from the pool.
+
+        On the first successful connection, runs deferred schema migration
+        if it was not completed during __init__ (e.g. Postgres was temporarily
+        unavailable at startup).
+        """
         with self._pool.connection() as conn:
+            if self._auto_migrate and not self._schema_ensured:
+                try:
+                    self._run_schema_ddl(conn)
+                    self._schema_ensured = True
+                    logger.info("Deferred Postgres schema migration completed")
+                except Exception as e:
+                    logger.debug(f"Deferred schema migration still pending: {e}")
             yield conn
 
     def _table(self, name: str) -> str:
@@ -168,9 +192,23 @@ class PostgresIndex:
     # =========================================================================
 
     def _ensure_schema(self) -> None:
-        """Create schema and tables if they don't exist."""
-        with self._conn() as conn:
-            with conn.cursor() as cur:
+        """
+        Create schema and tables if they don't exist.
+
+        Gets a connection from the pool and runs DDL. May raise if Postgres
+        is unavailable (caller should handle gracefully).
+        """
+        with self._pool.connection() as conn:
+            self._run_schema_ddl(conn)
+            self._schema_ensured = True
+
+    def _run_schema_ddl(self, conn: Any) -> None:
+        """
+        Run schema DDL statements on the given connection.
+
+        This is idempotent—all statements use IF NOT EXISTS / ON CONFLICT.
+        """
+        with conn.cursor() as cur:
                 # Create schema
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
 

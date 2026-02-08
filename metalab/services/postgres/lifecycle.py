@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-import secrets
 import shutil
 import subprocess
 import time
@@ -347,9 +346,9 @@ def start_postgres_local(
             logger.info(f"PostgreSQL already running at {existing.connection_string}")
             return existing
 
+    # Password is expected to arrive already resolved via
+    # config.resolve_password (called by the plugin layer).
     password = config.password
-    if config.auth_method == "scram-sha-256" and password is None:
-        password = secrets.token_urlsafe(16)
 
     docker = shutil.which("docker") or shutil.which("podman")
     if docker:
