@@ -93,16 +93,16 @@ class LocalEnvironment:
         Returns:
             List of :class:`ServiceHandle` in the same order.
         """
-        from metalab.services.registry import get_provider
+        from metalab.services.registry import get_plugin
 
         handles: list[ServiceHandle] = []
         for spec in specs:
-            provider = get_provider(spec.name, self.env_type)
-            if provider is None:
+            plugin = get_plugin(spec.name)
+            if plugin is None:
                 raise ValueError(
-                    f"No local provider registered for service {spec.name!r}"
+                    f"No service plugin registered for {spec.name!r}"
                 )
-            fragment: LocalFragment = provider(spec, self.config)
+            fragment: LocalFragment = plugin.plan(spec, self.env_type, self.config)
             handle = self._start_fragment(fragment)
             handles.append(handle)
         return handles
@@ -178,13 +178,13 @@ class LocalEnvironment:
                 pass
 
     def discover(self, store_root: Path, service_name: str) -> ServiceHandle | None:
-        """Discover a running local service via the provider registry."""
-        from metalab.services.registry import get_discover
+        """Discover a running local service via the plugin registry."""
+        from metalab.services.registry import get_plugin
 
-        discover_fn = get_discover(service_name, self.env_type)
-        if discover_fn is None:
+        plugin = get_plugin(service_name)
+        if plugin is None:
             return None
-        return discover_fn(store_root, self.config)
+        return plugin.discover(store_root, self.env_type, self.config)
 
     def is_available(self, handle: ServiceHandle) -> bool:
         """Check if a service is reachable via TCP."""

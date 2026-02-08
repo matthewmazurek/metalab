@@ -46,15 +46,9 @@ file = "metalab.store.file:FileStoreConfig"
 postgresql = "metalab.store.postgres:PostgresStoreConfig"
 postgres = "metalab.store.postgres:PostgresStoreConfig"
 
-[project.entry-points."metalab.services"]
-postgres_slurm = "metalab.services.postgres:slurm_provider"
-postgres_local = "metalab.services.postgres:local_provider"
-atlas_slurm = "metalab.services.atlas:slurm_provider"
-atlas_local = "metalab.services.atlas:local_provider"
-
-[project.entry-points."metalab.service_discover"]
-postgres_slurm = "metalab.services.postgres:discover_slurm"
-postgres_local = "metalab.services.postgres:discover_local"
+[project.entry-points."metalab.service_plugins"]
+postgres = "metalab.services.postgres:PostgresPlugin"
+atlas = "metalab.services.atlas:AtlasPlugin"
 
 [build-system]
 requires = ["hatchling"]

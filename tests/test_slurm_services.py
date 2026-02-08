@@ -1,4 +1,4 @@
-"""Tests for service providers and SLURM fragment composition."""
+"""Tests for service plugins and SLURM fragment composition."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from metalab.environment.slurm import SlurmEnvironment, SlurmFragment
 
 
 # ---------------------------------------------------------------------------
-# Postgres slurm_provider
+# Postgres plugin — plan_slurm
 # ---------------------------------------------------------------------------
 
 
 class TestPostgresSlurmProvider:
-    """Test metalab.services.postgres.slurm_provider returns a valid SlurmFragment."""
+    """Test PostgresPlugin.plan_slurm returns a valid SlurmFragment."""
 
     @pytest.fixture
     def pg_spec(self):
@@ -38,24 +38,26 @@ class TestPostgresSlurmProvider:
         }
 
     def test_returns_slurm_fragment(self, pg_spec, env_config, tmp_path):
-        from metalab.services.postgres import slurm_provider
+        from metalab.services.postgres import PostgresPlugin
 
         pg_spec.config["file_root"] = str(tmp_path)
         env_config["file_root"] = str(tmp_path)
 
-        frag = slurm_provider(pg_spec, env_config)
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", env_config)
 
         assert isinstance(frag, SlurmFragment)
         assert frag.name == "postgres"
         assert frag.cpus == 2
 
     def test_setup_bash_has_pg_commands(self, pg_spec, env_config, tmp_path):
-        from metalab.services.postgres import slurm_provider
+        from metalab.services.postgres import PostgresPlugin
 
         pg_spec.config["file_root"] = str(tmp_path)
         env_config["file_root"] = str(tmp_path)
 
-        frag = slurm_provider(pg_spec, env_config)
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", env_config)
 
         assert "pg_ctl" in frag.setup_bash
         assert "initdb" in frag.setup_bash
@@ -64,36 +66,39 @@ class TestPostgresSlurmProvider:
         assert "service.json" in frag.setup_bash
 
     def test_cleanup_bash_stops_postgres(self, pg_spec, env_config, tmp_path):
-        from metalab.services.postgres import slurm_provider
+        from metalab.services.postgres import PostgresPlugin
 
         pg_spec.config["file_root"] = str(tmp_path)
         env_config["file_root"] = str(tmp_path)
 
-        frag = slurm_provider(pg_spec, env_config)
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", env_config)
 
         assert "pg_ctl" in frag.cleanup_bash
         assert "stop" in frag.cleanup_bash
         assert "-m fast" in frag.cleanup_bash
 
     def test_readiness_has_port_and_file(self, pg_spec, env_config, tmp_path):
-        from metalab.services.postgres import slurm_provider
+        from metalab.services.postgres import PostgresPlugin
 
         pg_spec.config["file_root"] = str(tmp_path)
         env_config["file_root"] = str(tmp_path)
 
-        frag = slurm_provider(pg_spec, env_config)
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", env_config)
 
         assert frag.readiness.port == 5432
         assert frag.readiness.file is not None
         assert frag.readiness.file.name == "service.json"
 
     def test_build_handle_sets_store_locator(self, pg_spec, env_config, tmp_path):
-        from metalab.services.postgres import slurm_provider
+        from metalab.services.postgres import PostgresPlugin
 
         pg_spec.config["file_root"] = str(tmp_path)
         env_config["file_root"] = str(tmp_path)
 
-        frag = slurm_provider(pg_spec, env_config)
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", env_config)
         handle = frag.build_handle("12345", "node01")
 
         assert handle.name == "postgres"
@@ -102,15 +107,16 @@ class TestPostgresSlurmProvider:
         assert handle.process_id == "12345"
         assert "store_locator" in handle.metadata
         assert "postgresql://" in handle.metadata["store_locator"]
+        assert "file_root=" in handle.metadata["store_locator"]
 
 
 # ---------------------------------------------------------------------------
-# Atlas slurm_provider
+# Atlas plugin — plan_slurm
 # ---------------------------------------------------------------------------
 
 
 class TestAtlasSlurmProvider:
-    """Test metalab.services.atlas.slurm_provider returns a valid SlurmFragment."""
+    """Test AtlasPlugin.plan_slurm returns a valid SlurmFragment."""
 
     @pytest.fixture
     def atlas_spec(self):
@@ -124,18 +130,20 @@ class TestAtlasSlurmProvider:
         )
 
     def test_returns_slurm_fragment(self, atlas_spec):
-        from metalab.services.atlas import slurm_provider
+        from metalab.services.atlas import AtlasPlugin
 
-        frag = slurm_provider(atlas_spec, {"file_root": "/shared"})
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {"file_root": "/shared"})
 
         assert isinstance(frag, SlurmFragment)
         assert frag.name == "atlas"
         assert frag.cpus == 1
 
     def test_setup_bash_has_uvicorn(self, atlas_spec):
-        from metalab.services.atlas import slurm_provider
+        from metalab.services.atlas import AtlasPlugin
 
-        frag = slurm_provider(atlas_spec, {})
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {})
 
         assert "uvicorn atlas.main:app" in frag.setup_bash
         assert "ATLAS_STORE_PATH" in frag.setup_bash
@@ -144,21 +152,24 @@ class TestAtlasSlurmProvider:
 
     def test_cleanup_bash_empty(self, atlas_spec):
         """Atlas is foreground; no cleanup needed."""
-        from metalab.services.atlas import slurm_provider
+        from metalab.services.atlas import AtlasPlugin
 
-        frag = slurm_provider(atlas_spec, {})
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {})
         assert frag.cleanup_bash.strip() == ""
 
     def test_readiness_has_port(self, atlas_spec):
-        from metalab.services.atlas import slurm_provider
+        from metalab.services.atlas import AtlasPlugin
 
-        frag = slurm_provider(atlas_spec, {})
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {})
         assert frag.readiness.port == 8000
 
     def test_build_handle_sets_tunnel_target_with_gateway(self, atlas_spec):
-        from metalab.services.atlas import slurm_provider
+        from metalab.services.atlas import AtlasPlugin
 
-        frag = slurm_provider(atlas_spec, {"gateway": "login.cluster.edu"})
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {"gateway": "login.cluster.edu"})
         handle = frag.build_handle("12345", "node01")
 
         assert handle.name == "atlas"
@@ -169,12 +180,38 @@ class TestAtlasSlurmProvider:
         assert tt["local_port"] == 8000
 
     def test_build_handle_no_tunnel_without_gateway(self, atlas_spec):
-        from metalab.services.atlas import slurm_provider
+        from metalab.services.atlas import AtlasPlugin
 
-        frag = slurm_provider(atlas_spec, {})
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {})
         handle = frag.build_handle("12345", "node01")
 
         assert "tunnel_target" not in handle.metadata
+
+
+# ---------------------------------------------------------------------------
+# Unsupported platform raises NotImplementedError
+# ---------------------------------------------------------------------------
+
+
+class TestUnsupportedPlatform:
+    """Plugins raise NotImplementedError for unknown platforms."""
+
+    def test_postgres_unknown_platform(self):
+        from metalab.services.postgres import PostgresPlugin
+
+        plugin = PostgresPlugin()
+        spec = ServiceSpec(name="postgres", config={})
+        with pytest.raises(NotImplementedError, match="k8s"):
+            plugin.plan(spec, "k8s", {})
+
+    def test_atlas_unknown_platform(self):
+        from metalab.services.atlas import AtlasPlugin
+
+        plugin = AtlasPlugin()
+        spec = ServiceSpec(name="atlas", config={})
+        with pytest.raises(NotImplementedError, match="k8s"):
+            plugin.plan(spec, "k8s", {})
 
 
 # ---------------------------------------------------------------------------
@@ -354,45 +391,55 @@ class TestStopDeduplication:
 
 
 # ---------------------------------------------------------------------------
-# Provider registry
+# Plugin registry
 # ---------------------------------------------------------------------------
 
 
-class TestProviderRegistry:
-    """Test the ServiceProviderRegistry (entry-point based)."""
+class TestPluginRegistry:
+    """Test the ServicePluginRegistry (entry-point based)."""
 
-    def test_missing_provider_returns_none(self):
-        from metalab.services.registry import get_provider
+    def test_missing_plugin_returns_none(self):
+        from metalab.services.registry import get_plugin
 
-        assert get_provider("nonexistent", "local") is None
+        assert get_plugin("nonexistent") is None
 
-    def test_postgres_slurm_discovered(self):
-        from metalab.services.registry import get_provider
+    def test_postgres_discovered(self):
+        from metalab.services.registry import get_plugin
 
-        provider = get_provider("postgres", "slurm")
-        assert provider is not None
+        plugin = get_plugin("postgres")
+        assert plugin is not None
+        assert plugin.name == "postgres"
 
-    def test_postgres_local_discovered(self):
-        from metalab.services.registry import get_provider
+    def test_atlas_discovered(self):
+        from metalab.services.registry import get_plugin
 
-        provider = get_provider("postgres", "local")
-        assert provider is not None
+        plugin = get_plugin("atlas")
+        assert plugin is not None
+        assert plugin.name == "atlas"
 
-    def test_atlas_slurm_discovered(self):
-        from metalab.services.registry import get_provider
+    def test_registered_plugins_includes_known(self):
+        from metalab.services.registry import registered_plugins
 
-        provider = get_provider("atlas", "slurm")
-        assert provider is not None
+        names = registered_plugins()
+        assert "postgres" in names
+        assert "atlas" in names
 
-    def test_atlas_local_discovered(self):
-        from metalab.services.registry import get_provider
+    def test_plugin_plan_dispatches(self):
+        """Verify plugin.plan dispatches to the correct plan_{env} method."""
+        from metalab.services.registry import get_plugin
 
-        provider = get_provider("atlas", "local")
-        assert provider is not None
+        plugin = get_plugin("postgres")
+        assert plugin is not None
+        assert hasattr(plugin, "plan_slurm")
+        assert hasattr(plugin, "plan_local")
 
-    def test_registered_providers_includes_known(self):
-        from metalab.services.registry import registered_providers
+    def test_plugin_discover_returns_none_for_unknown_env(self):
+        """Discover with unknown env_type returns None (not error)."""
+        from pathlib import Path
 
-        keys = registered_providers()
-        assert ("postgres", "slurm") in keys
-        assert ("atlas", "slurm") in keys
+        from metalab.services.registry import get_plugin
+
+        plugin = get_plugin("postgres")
+        assert plugin is not None
+        result = plugin.discover(Path("/tmp"), "k8s", {})
+        assert result is None
