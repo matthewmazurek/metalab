@@ -91,6 +91,9 @@ ignore = [
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 
+[tool.uv]
+environments = ["python_version >= '3.11' and python_version < '3.13'"]
+
 # Workspace configuration (for local development)
 [tool.uv.workspace]
 members = ["atlas"]
