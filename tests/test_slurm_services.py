@@ -150,13 +150,14 @@ class TestAtlasSlurmProvider:
         assert "ATLAS_FILE_ROOT" in frag.setup_bash
         assert "--port 8000" in frag.setup_bash
 
-    def test_cleanup_bash_empty(self, atlas_spec):
-        """Atlas is foreground; no cleanup needed."""
+    def test_cleanup_bash_kills_atlas(self, atlas_spec):
+        """Atlas cleanup should kill the backgrounded uvicorn process."""
         from metalab.services.atlas import AtlasPlugin
 
         plugin = AtlasPlugin()
         frag = plugin.plan(atlas_spec, "slurm", {})
-        assert frag.cleanup_bash.strip() == ""
+        assert "ATLAS_PID" in frag.cleanup_bash
+        assert "kill" in frag.cleanup_bash
 
     def test_readiness_has_port(self, atlas_spec):
         from metalab.services.atlas import AtlasPlugin

@@ -150,8 +150,12 @@ class SlurmEnvironment:
         # Wait for all readiness checks
         hostname = self._wait_for_all_ready(fragments, job_id)
 
-        # Build handles
-        return [f.build_handle(job_id, hostname) for f in fragments]
+        # Build handles and attach SLURM log file path
+        slurm_log = str(svc_dir / f"slurm-{job_id}.out")
+        handles = [f.build_handle(job_id, hostname) for f in fragments]
+        for h in handles:
+            h.metadata.setdefault("log_file", slurm_log)
+        return handles
 
     def _compose(
         self, fragments: list[SlurmFragment], svc_dir: Path
@@ -276,7 +280,9 @@ done
                     return
             except (OSError, ConnectionRefusedError):
                 time.sleep(2.0)
-        logger.warning(f"Timeout waiting for {host}:{port}")
+        raise RuntimeError(
+            f"Service on {host}:{port} did not become reachable within {timeout:.0f}s"
+        )
 
     @staticmethod
     def _wait_for_job_host(job_id: str, timeout: float = 120.0) -> str:

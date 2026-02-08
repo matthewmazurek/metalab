@@ -151,7 +151,13 @@ class ServiceOrchestrator:
         # Import environments to trigger registration
         self._ensure_environments_registered()
 
-        env = EnvironmentRegistry.create(self.config.env_type, self.config.env_config)
+        # Inject file_root so the environment can locate shared filesystem paths
+        # (file_root is popped from env_config during config resolution)
+        env_config = dict(self.config.env_config)
+        if self.config.file_root:
+            env_config.setdefault("file_root", self.config.file_root)
+
+        env = EnvironmentRegistry.create(self.config.env_type, env_config)
         bundle = ServiceBundle(
             environment=self.config.env_type,
             profile=self.config.env_name,

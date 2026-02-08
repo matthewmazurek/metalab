@@ -200,7 +200,10 @@ class PostgresPlugin(ServicePlugin):
                 conn_string=conn_string,
                 file_root=_cfg.file_root,
                 process_id=job_id,
-                extra_metadata={"pgdata": pgdata},
+                extra_metadata={
+                    "pgdata": pgdata,
+                    "log_file": str(_cfg.service_dir / "postgres.log"),
+                },
             )
 
         return SlurmFragment(
