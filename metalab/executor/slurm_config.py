@@ -33,6 +33,13 @@ class SlurmExecutorConfig(ExecutorConfig):
     setup: list[str] = field(default_factory=list)
     extra_sbatch: dict[str, str] = field(default_factory=dict)
 
+    @classmethod
+    def handle_class(cls):
+        """Return SlurmRunHandle for reconnection support."""
+        from metalab.executor.slurm import SlurmRunHandle
+
+        return SlurmRunHandle
+
     def create(self):
         """Create a SlurmExecutor from this config."""
         from metalab.executor.slurm import SlurmConfig, SlurmExecutor

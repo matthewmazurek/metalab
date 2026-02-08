@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from metalab.store.locator import LocatorInfo
 
-from metalab.store.config import ConfigRegistry, StoreConfig
+from metalab.store.config import StoreConfig
 from metalab.store.file import FileStore, FileStoreConfig
 from metalab.store.layout import safe_experiment_id
 from metalab.store.postgres_index import PostgresIndex
@@ -184,9 +184,6 @@ class PostgresStoreConfig(StoreConfig):
         """
         return self.scoped(experiment_id)
 
-
-# Register alias scheme (postgresql is auto-registered via __init_subclass__)
-ConfigRegistry.register("postgres", PostgresStoreConfig)
 
 
 class PostgresStore:

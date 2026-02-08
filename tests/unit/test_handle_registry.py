@@ -21,39 +21,18 @@ if TYPE_CHECKING:
 class TestHandleRegistry:
     """Tests for HandleRegistry."""
 
-    def test_register_and_get(self):
-        """Test registering and retrieving a handle class."""
-
-        # Create a mock handle class
-        class MockHandle:
-            executor_type: ClassVar[str] = "mock"
-
-            @classmethod
-            def from_store(cls, store, on_event=None):
-                return cls()
-
-        # Register it
-        HandleRegistry.register("mock", MockHandle)
-
-        # Retrieve it
-        retrieved = HandleRegistry.get("mock")
-        assert retrieved is MockHandle
-
     def test_get_unknown_returns_none(self):
         """Test that getting an unknown type returns None."""
         result = HandleRegistry.get("nonexistent_executor_type_xyz")
         assert result is None
 
     def test_types_lists_registered(self):
-        """Test that types() returns registered executor types."""
-        # slurm should be registered via the import of SlurmRunHandle
-        from metalab.executor.slurm import SlurmRunHandle  # noqa: F401
-
+        """Test that types() returns registered executor types with handles."""
         types = HandleRegistry.types()
         assert "slurm" in types
 
     def test_slurm_handle_registered(self):
-        """Test that SlurmRunHandle is registered."""
+        """Test that SlurmRunHandle is discovered via entry point + handle_class()."""
         from metalab.executor.slurm import SlurmRunHandle
 
         handle_class = HandleRegistry.get("slurm")

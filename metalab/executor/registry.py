@@ -4,70 +4,81 @@ HandleRegistry: Registry for reconnectable executor handles.
 This module provides:
 - HandleRegistry: Registry mapping executor_type strings to handle classes
 
-The registry enables executor-agnostic reconnection by allowing each handle
-type to self-register. When reconnecting, the manifest's executor_type is
-used to look up the appropriate handle class.
+Handle classes are discovered via :class:`ExecutorConfigRegistry`:
+each :class:`ExecutorConfig` subclass can override :meth:`handle_class`
+to expose a reconnectable handle.  This folds handle discovery into the
+same ``metalab.executors`` entry-point mechanism used for executor configs.
 
 Example:
-    # Handle classes register themselves
-    class SlurmRunHandle:
-        executor_type: ClassVar[str] = "slurm"
-        # Auto-registers via __init_subclass__
-
-    # Reconnect dispatches to the right handle
     handle_class = HandleRegistry.get("slurm")
     handle = handle_class.from_store(store)
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import logging
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from metalab.executor.handle import RunHandle
-    from metalab.store.base import Store
+
+logger = logging.getLogger(__name__)
 
 
 class HandleRegistry:
     """
     Registry mapping executor_type strings to reconnectable handle classes.
 
-    Handle classes self-register via __init_subclass__ when they define
-    an executor_type class variable.
+    Delegates to :class:`ExecutorConfigRegistry` entry points: each
+    executor config exposes an optional ``handle_class()`` classmethod.
+    Results are cached after first lookup.
     """
 
-    _handles: dict[str, type] = {}
+    _cache: dict[str, type[RunHandle] | None] = {}
+    _loaded: bool = False
 
     @classmethod
-    def register(cls, executor_type: str, handle_class: type) -> None:
-        """
-        Register a handle class for an executor type.
+    def _ensure_loaded(cls) -> None:
+        """Populate cache from all registered executor configs (once)."""
+        if cls._loaded:
+            return
+        cls._loaded = True
+        from metalab.executor.config import ExecutorConfigRegistry
 
-        Args:
-            executor_type: The executor type string (e.g., "slurm").
-            handle_class: The handle class that supports from_store().
-        """
-        cls._handles[executor_type] = handle_class
+        for name in ExecutorConfigRegistry.types():
+            config_class = ExecutorConfigRegistry.get(name)
+            if config_class is not None:
+                try:
+                    hc = config_class.handle_class()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "Failed to load handle_class for executor %r", name, exc_info=True
+                    )
+                    hc = None
+                if hc is not None:
+                    cls._cache[name] = hc
 
     @classmethod
-    def get(cls, executor_type: str) -> type | None:
+    def get(cls, executor_type: str) -> type[RunHandle] | None:
         """
         Get the handle class for an executor type.
 
         Args:
-            executor_type: The executor type string.
+            executor_type: The executor type string (e.g., "slurm").
 
         Returns:
             The handle class, or None if not registered.
         """
-        return cls._handles.get(executor_type)
+        cls._ensure_loaded()
+        return cls._cache.get(executor_type)
 
     @classmethod
     def types(cls) -> list[str]:
         """
-        List all registered executor types.
+        List all executor types that have reconnectable handles.
 
         Returns:
             List of registered executor type strings.
         """
-        return list(cls._handles.keys())
+        cls._ensure_loaded()
+        return list(cls._cache.keys())

@@ -26,9 +26,7 @@ from metalab.executor.config import (
     resolve_executor,
 )
 from metalab.executor.handle import LocalRunHandle, RunHandle, RunStatus
-from metalab.executor.local_config import (
-    LocalExecutorConfig,
-)  # triggers auto-registration
+from metalab.executor.local_config import LocalExecutorConfig
 from metalab.executor.payload import RunPayload
 from metalab.executor.process import ProcessExecutor
 from metalab.executor.registry import HandleRegistry

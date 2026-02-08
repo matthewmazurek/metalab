@@ -115,13 +115,3 @@ def local_provider(spec: Any, env_config: dict[str, Any]) -> Any:
         log_name="atlas",
         build_handle=_build_handle,
     )
-
-
-# Auto-register providers
-try:
-    from metalab.services.registry import register_provider as _register
-
-    _register("atlas", "slurm", slurm_provider)
-    _register("atlas", "local", local_provider)
-except ImportError:
-    pass

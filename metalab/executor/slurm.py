@@ -1361,9 +1361,3 @@ class SlurmRunHandle:
                 skipped_count=skipped,
                 on_event=on_event,
             )
-
-
-# Register SlurmRunHandle with the HandleRegistry for reconnection support
-from metalab.executor.registry import HandleRegistry
-
-HandleRegistry.register(SlurmRunHandle.executor_type, SlurmRunHandle)

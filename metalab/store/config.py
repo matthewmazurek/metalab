@@ -6,49 +6,66 @@ This module provides:
 - StoreConfig: Abstract base class for store configurations
 - ConfigRegistry: Registry mapping scheme names to config classes
 
+Store backends are discovered via ``metalab.stores`` entry points
+(defined in ``pyproject.toml``).  Each entry point maps a URI scheme
+(e.g. ``"file"``, ``"postgresql"``) to a :class:`StoreConfig` subclass.
+
 StoreConfig separates configuration (pure data, serializable) from store instances
 (connections, file handles). This enables:
 
 - Pre-configuring stores before experiments are created
 - Automatic experiment scoping at runtime
 - Clean serialization via dataclasses
-
-Each StoreConfig subclass auto-registers itself via __init_subclass__.
 """
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
+from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from metalab.store.base import Store
     from metalab.store.locator import LocatorInfo
 
+logger = logging.getLogger(__name__)
+
 
 class ConfigRegistry:
     """
     Registry mapping scheme names to config classes.
 
-    Configs self-register via StoreConfig.__init_subclass__.
+    Backends are discovered lazily from ``metalab.stores`` entry points
+    on first lookup.
     """
 
     _configs: dict[str, type[StoreConfig]] = {}
+    _loaded: bool = False
 
     @classmethod
-    def register(cls, scheme: str, config_class: type[StoreConfig]) -> None:
-        """Register a config class for a scheme."""
-        cls._configs[scheme] = config_class
+    def _ensure_loaded(cls) -> None:
+        """Load all store config entry points (once)."""
+        if cls._loaded:
+            return
+        cls._loaded = True
+        for ep in entry_points(group="metalab.stores"):
+            try:
+                cls._configs[ep.name] = ep.load()
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to load store entry point %r", ep.name, exc_info=True)
 
     @classmethod
     def get(cls, scheme: str) -> type[StoreConfig] | None:
         """Get the config class for a scheme."""
+        cls._ensure_loaded()
         return cls._configs.get(scheme)
 
     @classmethod
     def schemes(cls) -> list[str]:
         """List all registered schemes."""
+        cls._ensure_loaded()
         return list(cls._configs.keys())
 
 
@@ -79,13 +96,6 @@ class StoreConfig(ABC):
 
     scheme: ClassVar[str]
     experiment_id: str | None = None
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Auto-register subclasses when they're defined."""
-        super().__init_subclass__(**kwargs)
-        # Only register if scheme is defined and non-empty
-        if hasattr(cls, "scheme") and isinstance(cls.scheme, str) and cls.scheme:
-            ConfigRegistry.register(cls.scheme, cls)
 
     @abstractmethod
     def connect(self) -> Store:

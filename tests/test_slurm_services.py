@@ -359,47 +359,32 @@ class TestStopDeduplication:
 
 
 class TestProviderRegistry:
-    """Test the ServiceProviderRegistry."""
-
-    def test_register_and_lookup(self):
-        from metalab.services.registry import (
-            _providers,
-            get_provider,
-            register_provider,
-        )
-
-        sentinel = lambda spec, env_config: None  # noqa: E731
-        register_provider("test_svc", "test_env", sentinel)
-
-        assert get_provider("test_svc", "test_env") is sentinel
-
-        # Cleanup
-        _providers.pop(("test_svc", "test_env"), None)
+    """Test the ServiceProviderRegistry (entry-point based)."""
 
     def test_missing_provider_returns_none(self):
         from metalab.services.registry import get_provider
 
         assert get_provider("nonexistent", "local") is None
 
-    def test_postgres_slurm_auto_registered(self):
+    def test_postgres_slurm_discovered(self):
         from metalab.services.registry import get_provider
 
         provider = get_provider("postgres", "slurm")
         assert provider is not None
 
-    def test_postgres_local_auto_registered(self):
+    def test_postgres_local_discovered(self):
         from metalab.services.registry import get_provider
 
         provider = get_provider("postgres", "local")
         assert provider is not None
 
-    def test_atlas_slurm_auto_registered(self):
+    def test_atlas_slurm_discovered(self):
         from metalab.services.registry import get_provider
 
         provider = get_provider("atlas", "slurm")
         assert provider is not None
 
-    def test_atlas_local_auto_registered(self):
+    def test_atlas_local_discovered(self):
         from metalab.services.registry import get_provider
 
         provider = get_provider("atlas", "local")

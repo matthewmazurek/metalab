@@ -1182,18 +1182,3 @@ def discover_local(
     except Exception:
         pass
     return None
-
-
-# Auto-register providers
-try:
-    from metalab.services.registry import (
-        register_discover as _register_discover,
-        register_provider as _register,
-    )
-
-    _register("postgres", "slurm", slurm_provider)
-    _register("postgres", "local", local_provider)
-    _register_discover("postgres", "slurm", discover_slurm)
-    _register_discover("postgres", "local", discover_local)
-except ImportError:
-    pass

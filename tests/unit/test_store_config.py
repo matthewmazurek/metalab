@@ -190,7 +190,7 @@ class TestConfigRegistry:
     """Tests for ConfigRegistry."""
 
     def test_file_scheme_registered(self) -> None:
-        """FileStoreConfig is auto-registered for 'file' scheme."""
+        """FileStoreConfig is discovered via metalab.stores entry point."""
         config_class = ConfigRegistry.get("file")
         assert config_class is FileStoreConfig
 

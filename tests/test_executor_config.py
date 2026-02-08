@@ -13,13 +13,11 @@ from metalab.executor.config import ExecutorConfigRegistry, executor_from_config
 
 class TestExecutorConfigRegistry:
     def test_local_registered(self):
-        # LocalExecutorConfig registers at import time (imported by config module)
+        # Discovered via metalab.executors entry point
         assert "local" in ExecutorConfigRegistry.types()
 
     def test_slurm_registered(self):
-        # Trigger lazy import so the subclass registers itself
-        from metalab.executor.slurm_config import SlurmExecutorConfig  # noqa: F401
-
+        # Discovered via metalab.executors entry point (no manual import needed)
         assert "slurm" in ExecutorConfigRegistry.types()
 
 

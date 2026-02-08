@@ -1,8 +1,9 @@
 """
 ExecutorConfig: Base configuration classes for executor backends.
 
-Mirrors the StoreConfig/ConfigRegistry pattern from metalab/store/config.py.
-Each executor backend registers its own config class via __init_subclass__.
+Executor backends are discovered via ``metalab.executors`` entry points
+(defined in ``pyproject.toml``).  Each entry point maps a type name
+(e.g. ``"local"``, ``"slurm"``) to an :class:`ExecutorConfig` subclass.
 
 Usage:
     # Create executor from config dict (e.g., parsed from YAML)
@@ -18,10 +19,12 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from metalab.executor.base import Executor
+    from metalab.executor.handle import RunHandle
 
 logger = logging.getLogger(__name__)
 
@@ -30,24 +33,35 @@ class ExecutorConfigRegistry:
     """
     Registry mapping executor type names to config classes.
 
-    Configs self-register via ExecutorConfig.__init_subclass__.
+    Backends are discovered lazily from ``metalab.executors`` entry points
+    on first lookup.
     """
 
     _configs: dict[str, type[ExecutorConfig]] = {}
+    _loaded: bool = False
 
     @classmethod
-    def register(cls, name: str, config_class: type[ExecutorConfig]) -> None:
-        """Register a config class for an executor type."""
-        cls._configs[name] = config_class
+    def _ensure_loaded(cls) -> None:
+        """Load all executor config entry points (once)."""
+        if cls._loaded:
+            return
+        cls._loaded = True
+        for ep in entry_points(group="metalab.executors"):
+            try:
+                cls._configs[ep.name] = ep.load()
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to load executor entry point %r", ep.name, exc_info=True)
 
     @classmethod
     def get(cls, name: str) -> type[ExecutorConfig] | None:
         """Get the config class for an executor type."""
+        cls._ensure_loaded()
         return cls._configs.get(name)
 
     @classmethod
     def types(cls) -> list[str]:
         """List all registered executor types."""
+        cls._ensure_loaded()
         return list(cls._configs.keys())
 
 
@@ -61,19 +75,12 @@ class ExecutorConfig(ABC):
     - executor_type: ClassVar[str] -- the type name (e.g., "local", "slurm")
     - create() -> Executor | None -- create an executor instance
     - from_dict(d) -> ExecutorConfig -- parse from config dict
+
+    Optionally override :meth:`handle_class` to associate a reconnectable
+    :class:`RunHandle` with this executor type.
     """
 
     executor_type: ClassVar[str] = ""
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Auto-register subclasses when they're defined."""
-        super().__init_subclass__(**kwargs)
-        if (
-            hasattr(cls, "executor_type")
-            and isinstance(cls.executor_type, str)
-            and cls.executor_type
-        ):
-            ExecutorConfigRegistry.register(cls.executor_type, cls)
 
     @abstractmethod
     def create(self) -> Executor | None:
@@ -98,6 +105,16 @@ class ExecutorConfig(ABC):
             An ExecutorConfig instance.
         """
         ...
+
+    @classmethod
+    def handle_class(cls) -> type[RunHandle] | None:
+        """
+        Return the reconnectable handle class for this executor, if any.
+
+        Override in subclasses that support reconnection (e.g. Slurm).
+        Returns ``None`` by default (no reconnection support).
+        """
+        return None
 
 
 def executor_from_config(
