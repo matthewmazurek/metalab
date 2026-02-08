@@ -1,9 +1,8 @@
 """
 Bash template generation for PostgreSQL service scripts.
 
-Single source of truth for the bash fragments used by both the
-SLURM provider (``plugin.plan_slurm``) and the standalone
-``start_postgres_slurm`` lifecycle function.
+Single source of truth for the bash fragments used by the
+SLURM provider (``plugin.plan_slurm``).
 """
 
 from __future__ import annotations
@@ -151,42 +150,3 @@ def render_cleanup_bash() -> str:
         'if [ -n "${PGDATA:-}" ] && command -v pg_ctl >/dev/null 2>&1; then '
         'pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true; fi'
     )
-
-
-def render_slurm_job_script(
-    p: PgBashParams,
-    *,
-    slurm_partition: str = "default",
-    slurm_time: str = "24:00:00",
-    slurm_memory: str = "4G",
-) -> str:
-    """Render a complete standalone SLURM job script for PostgreSQL.
-
-    Used by :func:`start_postgres_slurm` for direct ``sbatch`` submission
-    (as opposed to the fragment-based composition used by the environment).
-    """
-    setup = render_setup_bash(p)
-    return f"""#!/bin/bash
-#SBATCH --job-name=metalab-postgres
-#SBATCH --partition={slurm_partition}
-#SBATCH --time={slurm_time}
-#SBATCH --mem={slurm_memory}
-#SBATCH --cpus-per-task=2
-#SBATCH --output={p.service_dir}/slurm-%j.out
-#SBATCH --error={p.service_dir}/slurm-%j.err
-
-# Get hostname
-HOSTNAME=$(hostname)
-echo "Starting PostgreSQL on $HOSTNAME"
-
-{setup}
-
-# Keep job running (PostgreSQL runs in background)
-while true; do
-    if ! pg_isready -h localhost -p {p.port} -q; then
-        echo "PostgreSQL stopped, exiting"
-        exit 1
-    fi
-    sleep 60
-done
-"""

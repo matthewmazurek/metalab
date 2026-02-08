@@ -1,9 +1,9 @@
 """
 PostgreSQL service lifecycle management.
 
-Start, stop, and discover PostgreSQL instances for local development
-and SLURM/HPC environments.  These functions are consumed directly by
-the CLI and by ``PostgresPlugin.plan_local``.
+Start, stop, and discover PostgreSQL instances for local development.
+These functions are consumed by ``PostgresPlugin.plan_local`` and
+``PostgresPlugin.discover_*``.
 """
 
 from __future__ import annotations
@@ -18,10 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-from metalab.services.postgres._bash import PgBashParams, render_slurm_job_script
 from metalab.services.postgres.config import (
     DEFAULT_LOCAL_SERVICE_DIR,
-    DEFAULT_PORT,
     PostgresService,
     PostgresServiceConfig,
 )
@@ -370,119 +368,6 @@ def start_postgres_local(
         "PostgreSQL not found. Install PostgreSQL or Docker/Podman, "
         "or load the appropriate module (e.g., 'module load postgresql')"
     )
-
-
-def start_postgres_slurm(
-    config: PostgresServiceConfig | None = None,
-    *,
-    store_root: Path,
-    slurm_partition: str = "default",
-    slurm_time: str = "24:00:00",
-    slurm_memory: str = "4G",
-) -> PostgresService:
-    """
-    Start a PostgreSQL service via SLURM job.
-
-    Submits a SLURM job that runs PostgreSQL on a compute node.
-    Service discovery file is written to {store_root}/services/postgres/service.json.
-
-    Args:
-        config: Service configuration.
-        store_root: Root directory for the store (on shared filesystem).
-        slurm_partition: SLURM partition to submit to.
-        slurm_time: Maximum walltime for the service job.
-        slurm_memory: Memory allocation.
-
-    Returns:
-        PostgresService with connection info.
-    """
-    if config is None:
-        config = PostgresServiceConfig(
-            listen_addresses="*",
-            auth_method="trust",
-        )
-
-    service_dir = store_root / "services" / "postgres"
-    service_dir.mkdir(parents=True, exist_ok=True)
-    service_file = service_dir / "service.json"
-
-    # Check if already running
-    if service_file.exists():
-        existing = PostgresService.load(service_file)
-        if existing.slurm_job_id:
-            result = _run_cmd(
-                ["squeue", "-j", existing.slurm_job_id, "-h"],
-                check=False,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                if _is_postgres_running(existing):
-                    logger.info(
-                        f"PostgreSQL already running: {existing.connection_string}"
-                    )
-                    return existing
-
-    password = config.password
-    if config.auth_method == "scram-sha-256" and password is None:
-        password = secrets.token_urlsafe(16)
-
-    data_dir = config.data_dir or (service_dir / "data")
-
-    params = PgBashParams(
-        user=config.user,
-        password=password,
-        port=config.port or DEFAULT_PORT,
-        database=config.database,
-        auth_method=config.auth_method,
-        data_dir=data_dir,
-        service_dir=service_dir,
-        service_file=service_file,
-    )
-
-    script_content = render_slurm_job_script(
-        params,
-        slurm_partition=slurm_partition,
-        slurm_time=slurm_time,
-        slurm_memory=slurm_memory,
-    )
-
-    script_path = service_dir / "start_postgres.sh"
-    script_path.write_text(script_content)
-    os.chmod(script_path, 0o700)
-
-    result = _run_cmd(["sbatch", str(script_path)])
-
-    job_id = None
-    for line in result.stdout.split("\n"):
-        if "Submitted batch job" in line:
-            job_id = line.split()[-1]
-            break
-
-    if not job_id:
-        raise RuntimeError(f"Failed to parse SLURM job ID: {result.stdout}")
-
-    logger.info(f"Submitted SLURM job {job_id} for PostgreSQL service")
-
-    timeout = 120
-    start = time.time()
-    while time.time() - start < timeout:
-        if service_file.exists():
-            try:
-                service = PostgresService.load(service_file)
-                if _is_postgres_running(service):
-                    logger.info(f"PostgreSQL ready: {service.connection_string}")
-                    return service
-            except Exception:
-                pass
-        time.sleep(5)
-
-        result = _run_cmd(["squeue", "-j", job_id, "-h"], check=False)
-        if result.returncode != 0 or not result.stdout.strip():
-            err_file = service_dir / f"slurm-{job_id}.err"
-            if err_file.exists():
-                logger.error(f"SLURM job failed: {err_file.read_text()}")
-            raise RuntimeError(f"SLURM job {job_id} failed to start PostgreSQL")
-
-    raise RuntimeError(f"PostgreSQL service did not start within {timeout}s")
 
 
 def get_service_info(

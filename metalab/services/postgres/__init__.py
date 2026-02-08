@@ -16,7 +16,6 @@ from metalab.services.postgres.config import (
 from metalab.services.postgres.lifecycle import (
     get_service_info,
     start_postgres_local,
-    start_postgres_slurm,
     stop_postgres,
 )
 from metalab.services.postgres.plugin import PostgresPlugin
@@ -31,6 +30,5 @@ __all__ = [
     "build_store_locator",
     "get_service_info",
     "start_postgres_local",
-    "start_postgres_slurm",
     "stop_postgres",
 ]

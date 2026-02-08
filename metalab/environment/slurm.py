@@ -203,6 +203,14 @@ trap cleanup EXIT SIGTERM
 # -------------------------------------------------------------------
 
 {setup_sections}
+
+# -------------------------------------------------------------------
+# Keep-alive loop
+# -------------------------------------------------------------------
+echo "All services started, entering keep-alive loop"
+while true; do
+    sleep 60
+done
 """
 
     def stop_service(self, handle: ServiceHandle) -> None:
