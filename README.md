@@ -111,6 +111,12 @@ uv sync
 uv run pytest
 ```
 
+Enable the pre-commit hook to auto-rebuild the Atlas frontend when you change files in `atlas/frontend/`:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## License
 
 MIT

@@ -30,6 +30,45 @@ _PROBE_MAX_ATTEMPTS: int = 30  # Maximum number of probe attempts
 _PROBE_INTERVAL: float = 1.0  # Seconds between probe attempts
 
 
+def build_ssh_command(target: ConnectionTarget) -> list[str]:
+    """
+    Build an ``ssh`` tunnel command for the given connection target.
+
+    Returns a list of arguments suitable for :func:`subprocess.Popen` or
+    :func:`shlex.join` (for display to the user).
+
+    Command form::
+
+        ssh -N -L local_port:127.0.0.1:remote_port
+            [-J user@gateway] [-i ssh_key] [user@]remote_host
+    """
+    cmd: list[str] = [
+        "ssh",
+        "-N",
+        "-L",
+        f"{target.local_port}:127.0.0.1:{target.remote_port}",
+    ]
+
+    # Jump host
+    if target.gateway:
+        gateway_spec = target.gateway
+        if target.user and "@" not in gateway_spec:
+            gateway_spec = f"{target.user}@{gateway_spec}"
+        cmd.extend(["-J", gateway_spec])
+
+    # Explicit key
+    if target.ssh_key:
+        cmd.extend(["-i", target.ssh_key])
+
+    # Destination
+    destination = target.remote_host
+    if target.user:
+        destination = f"{target.user}@{target.remote_host}"
+    cmd.append(destination)
+
+    return cmd
+
+
 def _tcp_probe(host: str, port: int, timeout: float = _PROBE_TIMEOUT) -> bool:
     """
     Probe whether a TCP port is accepting connections.
@@ -78,7 +117,7 @@ class SSHTunnelConnector:
             RuntimeError: If the tunnel cannot be established within the
                 probe timeout window.
         """
-        cmd = self._build_command(target)
+        cmd = build_ssh_command(target)
         logger.info("Starting SSH tunnel: %s", " ".join(cmd))
 
         process = subprocess.Popen(
@@ -178,42 +217,6 @@ class SSHTunnelConnector:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_command(target: ConnectionTarget) -> list[str]:
-        """
-        Build the ``ssh`` command for the tunnel.
-
-        Command form::
-
-            ssh -N -L local_port:127.0.0.1:remote_port
-                [-J user@gateway] [-i ssh_key] [user@]remote_host
-        """
-        cmd: list[str] = [
-            "ssh",
-            "-N",
-            "-L",
-            f"{target.local_port}:127.0.0.1:{target.remote_port}",
-        ]
-
-        # Jump host
-        if target.gateway:
-            gateway_spec = target.gateway
-            if target.user and "@" not in gateway_spec:
-                gateway_spec = f"{target.user}@{gateway_spec}"
-            cmd.extend(["-J", gateway_spec])
-
-        # Explicit key
-        if target.ssh_key:
-            cmd.extend(["-i", target.ssh_key])
-
-        # Destination
-        destination = target.remote_host
-        if target.user:
-            destination = f"{target.user}@{target.remote_host}"
-        cmd.append(destination)
-
-        return cmd
 
     @staticmethod
     def _wait_for_tunnel(

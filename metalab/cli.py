@@ -812,6 +812,32 @@ def handle_env(args: argparse.Namespace) -> int:
         return 1
 
 
+def _print_tunnel_hint(
+    bundle: "ServiceBundle",
+    resolved: "ResolvedConfig",
+) -> None:
+    """Print a copy-paste SSH tunnel command for remote services."""
+    import shlex
+
+    from metalab.environment.connector import ConnectionTarget
+    from metalab.environment.ssh_tunnel import build_ssh_command
+
+    target_info = bundle.tunnel_targets[0]
+    target = ConnectionTarget(
+        remote_host=target_info["host"],
+        remote_port=target_info["remote_port"],
+        local_port=target_info.get("local_port", target_info["remote_port"]),
+        gateway=resolved.env_config.get("gateway"),
+        user=resolved.env_config.get("user"),
+        ssh_key=resolved.env_config.get("ssh_key"),
+    )
+
+    cmd = build_ssh_command(target)
+    print(f"\nTunnel from your workstation:")
+    print(f"  {shlex.join(cmd)}")
+    print(f"\nThen open: http://localhost:{target.local_port}")
+
+
 def handle_services(args: argparse.Namespace) -> int:
     """Handle services subcommands."""
     import json as json_mod
@@ -846,13 +872,12 @@ def handle_services(args: argparse.Namespace) -> int:
             if bundle.store_locator:
                 print(f"  Store: {bundle.store_locator}")
 
-            atlas = bundle.get("atlas")
-            if atlas:
-                print(f"\n  Atlas UI: http://{atlas.host}:{atlas.port}")
-
             if bundle.tunnel_targets and not tunnel:
-                print(f"\nTo access locally, run:")
-                print(f"  metalab tunnel")
+                _print_tunnel_hint(bundle, resolved)
+            else:
+                atlas = bundle.get("atlas")
+                if atlas:
+                    print(f"\n  Atlas UI: http://{atlas.host}:{atlas.port}")
             return 0
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -949,10 +974,9 @@ def handle_services(args: argparse.Namespace) -> int:
 
 
 def handle_tunnel(args: argparse.Namespace) -> int:
-    """Handle tunnel command."""
-    import signal
-
+    """Handle tunnel command — prints the SSH tunnel command for remote services."""
     from metalab.config import ProjectConfig
+    from metalab.environment.bundle import ServiceBundle
     from metalab.environment.orchestrator import ServiceOrchestrator
 
     try:
@@ -972,24 +996,26 @@ def handle_tunnel(args: argparse.Namespace) -> int:
 
     orch = ServiceOrchestrator(resolved)
 
-    try:
-        handle = orch.tunnel()
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+    if not orch._bundle_path.exists():
+        print("No service bundle found. Run 'metalab services up' first.")
         return 1
 
-    if handle is None:
-        print("No tunnel needed (services are local)")
+    try:
+        bundle = ServiceBundle.load(orch._bundle_path)
+    except Exception as e:
+        print(f"Error loading bundle: {e}", file=sys.stderr)
+        return 1
+
+    if not bundle.tunnel_targets:
+        print("No tunnel needed (services are local).")
         return 0
 
-    print(f"Tunnel established: {handle.local_url}")
-    print("Press Ctrl+C to close.")
+    # Allow --port to override the local port
+    local_port_override = getattr(args, "port", None)
+    if local_port_override is not None:
+        bundle.tunnel_targets[0]["local_port"] = local_port_override
 
-    try:
-        signal.pause()
-    except KeyboardInterrupt:
-        print("\nClosing tunnel...")
-
+    _print_tunnel_hint(bundle, resolved)
     return 0
 
 

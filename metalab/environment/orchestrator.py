@@ -8,10 +8,10 @@ Provides the high-level operations that CLI commands delegate to:
 - **status**: Check health of running services
 - **tunnel**: Open a managed tunnel to running services
 
-The orchestrator is config-driven: it reads :class:`ResolvedConfig` to
-determine which services to provision.  Only starts postgres if
-``[services.postgres]`` is configured.  Only starts atlas if
-``[services.atlas]`` is configured (or a store exists).
+The orchestrator is fully service-agnostic and environment-agnostic.
+It builds :class:`ServiceSpec` objects from config and delegates to
+the environment's ``start_service_group()``.  Service capabilities
+(store locator, tunnel target) are discovered from handle metadata.
 
 Typical usage::
 
@@ -79,12 +79,9 @@ class ServiceOrchestrator:
     Orchestrates service lifecycle for an environment.
 
     Config-driven: reads the :class:`ResolvedConfig` to determine which
-    services to provision.
-
-    * Only starts **postgres** if ``[services.postgres]`` is configured.
-    * Starts **atlas** if ``[services.atlas]`` is configured, or whenever a
-      store locator or ``file_root`` exists (atlas needs a backing store to
-      serve).
+    services to provision.  The orchestrator has **no** service-name or
+    env-type conditionals — service capabilities are discovered from
+    handle metadata.
 
     Args:
         config: A fully-resolved project configuration for the target
@@ -133,10 +130,11 @@ class ServiceOrchestrator:
 
         1. Check for an existing bundle — if all services are alive, reuse it.
         2. Create a :class:`ServiceEnvironment` from the registry.
-        3. Start **postgres** if configured.
-        4. Start **atlas** (pointed at postgres or ``file_root``).
-        5. Save the bundle.
-        6. Optionally open a tunnel.
+        3. Build :class:`ServiceSpec` objects from config.
+        4. Delegate to ``env.start_service_group(specs)``.
+        5. Scan handle metadata for ``store_locator`` and ``tunnel_target``.
+        6. Save the bundle.
+        7. Optionally open a tunnel.
 
         Args:
             tunnel: If ``True``, open a managed tunnel after provisioning.
@@ -159,57 +157,26 @@ class ServiceOrchestrator:
             profile=self.config.env_name,
         )
 
-        # Start postgres if configured
-        if self.config.has_service("postgres"):
-            pg_config = self.config.get_service("postgres")
-            pg_config["file_root"] = self.config.file_root
+        # file_root is the default store locator
+        if self.config.file_root:
+            bundle.store_locator = self.config.file_root
 
-            spec = ServiceSpec(name="postgres", config=pg_config)
+        specs = self._build_service_specs()
 
-            pg_handle = env.start_service(spec)
-            bundle.add("postgres", pg_handle)
+        if specs:
+            handles = env.start_service_group(specs)
 
-            # Build store locator from postgres handle
-            store_locator = self._build_store_locator(pg_handle)
-            bundle.store_locator = store_locator
-            logger.info(f"PostgreSQL started: {pg_handle.host}:{pg_handle.port}")
+            for h in handles:
+                bundle.add(h.name, h)
+                logger.info(f"{h.name} started: {h.host}:{h.port}")
 
-        # Start atlas if configured (or always if we have a store)
-        if (
-            self.config.has_service("atlas")
-            or bundle.store_locator
-            or self.config.file_root
-        ):
-            atlas_config: dict[str, Any] = {}
-            if self.config.has_service("atlas"):
-                atlas_config = dict(self.config.get_service("atlas"))
+                # Any service can advertise a store_locator
+                if "store_locator" in h.metadata:
+                    bundle.store_locator = h.metadata["store_locator"]
 
-            # Point atlas at the store
-            atlas_config["store"] = (
-                bundle.store_locator or self.config.file_root or ""
-            )
-            atlas_config["file_root"] = self.config.file_root
-
-            # Pass postgres host so environment can co-locate if appropriate
-            pg_handle = bundle.get("postgres")
-            if pg_handle:
-                atlas_config["pg_host"] = pg_handle.host
-
-            spec = ServiceSpec(name="atlas", config=atlas_config)
-
-            atlas_handle = env.start_service(spec)
-            bundle.add("atlas", atlas_handle)
-
-            # Set up tunnel target for remote environments (gateway present)
-            if self.config.env_config.get("gateway"):
-                bundle.tunnel_targets.append(
-                    {
-                        "host": atlas_handle.host,
-                        "remote_port": atlas_handle.port,
-                        "local_port": atlas_config.get("port", 8000),
-                    }
-                )
-            logger.info(f"Atlas started: {atlas_handle.host}:{atlas_handle.port}")
+                # Any service can advertise a tunnel target
+                if "tunnel_target" in h.metadata:
+                    bundle.tunnel_targets.append(h.metadata["tunnel_target"])
 
         bundle.save(self._bundle_path)
         logger.info(f"Bundle saved: {self._bundle_path}")
@@ -368,6 +335,38 @@ class ServiceOrchestrator:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _build_service_specs(self) -> list[ServiceSpec]:
+        """
+        Build an ordered list of service specs from project config.
+
+        The list is topologically ordered: services that other services
+        depend on come first (e.g. postgres before atlas).
+
+        Returns:
+            Ordered list of :class:`ServiceSpec` objects.
+        """
+        specs: list[ServiceSpec] = []
+
+        # Postgres (if configured)
+        if self.config.has_service("postgres"):
+            pg_config = dict(self.config.get_service("postgres"))
+            pg_config["file_root"] = self.config.file_root
+            specs.append(ServiceSpec(name="postgres", config=pg_config))
+
+        # Atlas (if configured, or whenever file_root exists)
+        wants_atlas = self.config.has_service("atlas") or self.config.file_root
+        if wants_atlas:
+            atlas_config: dict[str, Any] = {}
+            if self.config.has_service("atlas"):
+                atlas_config = dict(self.config.get_service("atlas"))
+            atlas_config["file_root"] = self.config.file_root
+            # Store will be set from bundle.store_locator after handles
+            # are built; pass file_root as default.
+            atlas_config.setdefault("store", self.config.file_root or "")
+            specs.append(ServiceSpec(name="atlas", config=atlas_config))
+
+        return specs
+
     def _load_existing_bundle(self) -> ServiceBundle | None:
         """
         Load and validate an existing bundle.
@@ -402,35 +401,6 @@ class ServiceOrchestrator:
             pass
 
         return None
-
-    def _build_store_locator(self, pg_handle: ServiceHandle) -> str:
-        """
-        Build a PostgreSQL store locator URI from a service handle.
-
-        The URI follows the standard ``postgresql://`` scheme.  If
-        ``file_root`` is set in the config, it is appended as a query
-        parameter so downstream code can locate file-backed artifacts.
-
-        Args:
-            pg_handle: Running postgres service handle with credentials.
-
-        Returns:
-            A ``postgresql://`` connection URI.
-        """
-        creds = pg_handle.credentials
-        user = creds.get("user", "")
-        password = creds.get("password", "")
-        database = creds.get("database", "metalab")
-
-        auth = f"{user}:{password}" if password else user
-        locator = f"postgresql://{auth}@{pg_handle.host}:{pg_handle.port}/{database}"
-
-        if self.config.file_root:
-            from urllib.parse import urlencode
-
-            locator += "?" + urlencode({"file_root": self.config.file_root})
-
-        return locator
 
     def _get_connector(self):
         """

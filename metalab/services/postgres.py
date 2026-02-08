@@ -857,3 +857,343 @@ def stop_postgres(
 
     logger.info("PostgreSQL service stopped")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Service providers (for environment fragment composition)
+# ---------------------------------------------------------------------------
+
+
+def slurm_provider(
+    spec: Any, env_config: dict[str, Any]
+) -> Any:
+    """Produce a :class:`SlurmFragment` for PostgreSQL.
+
+    Generates the bash setup/cleanup fragments and readiness check.
+    The ``build_handle`` closure sets ``metadata["store_locator"]``
+    so the orchestrator can discover the store URI generically.
+    """
+    from metalab.environment.base import ReadinessCheck, ServiceHandle
+    from metalab.environment.slurm import SlurmFragment
+
+    user = spec.config.get(
+        "user", env_config.get("user", os.environ.get("USER", "postgres"))
+    )
+    auth_method = spec.config.get("auth_method", "scram-sha-256")
+    password = spec.config.get("password")
+    if auth_method == "scram-sha-256" and not password:
+        password = secrets.token_urlsafe(16)
+
+    port = spec.config.get("port", DEFAULT_PORT)
+    database = spec.config.get("database", DEFAULT_DATABASE)
+
+    file_root = spec.config.get("file_root") or env_config.get("file_root", "")
+    store_root = Path(file_root) if file_root else Path("/tmp")
+
+    service_dir = store_root / "services" / "postgres"
+    service_dir.mkdir(parents=True, exist_ok=True)
+    service_file = service_dir / "service.json"
+    data_dir = spec.config.get("data_dir") or (service_dir / "data")
+
+    password_literal = password or ""
+    auth_prefix = user
+    if password:
+        auth_prefix = f"{user}:{password}"
+
+    setup_bash = f"""
+echo "Starting PostgreSQL..."
+
+# Ensure PostgreSQL binaries are available
+if [ -n "${{METALAB_PG_BIN_DIR:-}}" ] && [ -d "${{METALAB_PG_BIN_DIR:-}}" ]; then
+    export PATH="$METALAB_PG_BIN_DIR:$PATH"
+fi
+if ! command -v initdb >/dev/null 2>&1; then
+    for d in /usr/lib/postgresql/15/bin /usr/lib/postgresql/14/bin /usr/lib/postgresql/13/bin /usr/local/pgsql/bin; do
+        if [ -x "$d/initdb" ]; then
+            export PATH="$d:$PATH"
+            break
+        fi
+    done
+fi
+for bin in initdb pg_ctl pg_isready createdb; do
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        echo "PostgreSQL binary not found: $bin. Set METALAB_PG_BIN_DIR or load a Postgres module." >&2
+        exit 1
+    fi
+done
+
+# Setup PGDATA
+export PGDATA_BASE="{data_dir}"
+export PGDATA="$PGDATA_BASE"
+if [ -d "$PGDATA_BASE" ] && [ ! -f "$PGDATA_BASE/PG_VERSION" ]; then
+    if [ -n "$(ls -A "$PGDATA_BASE" 2>/dev/null)" ]; then
+        export PGDATA="$PGDATA_BASE/pgdata"
+    fi
+fi
+mkdir -p "$PGDATA"
+PASSWORD={json.dumps(password_literal)}
+
+# Initialize if needed
+if [ ! -f "$PGDATA/PG_VERSION" ]; then
+    echo "Initializing PostgreSQL data directory..."
+    if [ -n "$PASSWORD" ]; then
+        PWFILE="{service_dir}/.pgpass_init_$SLURM_JOB_ID"
+        printf "%s" "$PASSWORD" > "$PWFILE"
+        chmod 600 "$PWFILE"
+        initdb -D "$PGDATA" -A {auth_method} --pwfile="$PWFILE"
+        rm -f "$PWFILE"
+    else
+        initdb -D "$PGDATA" -A {auth_method}
+    fi
+
+    # Configure for network access
+    echo "host all all 0.0.0.0/0 {auth_method}" >> "$PGDATA/pg_hba.conf"
+    echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
+    echo "port = {port}" >> "$PGDATA/postgresql.conf"
+fi
+
+# Start PostgreSQL (background)
+pg_ctl -D "$PGDATA" -l "{service_dir}/postgres.log" start
+
+# Wait for PostgreSQL to be ready
+for i in $(seq 1 30); do
+    if pg_isready -h localhost -p {port} -q; then
+        break
+    fi
+    sleep 1
+done
+
+if ! pg_isready -h localhost -p {port} -q; then
+    echo "PostgreSQL failed to start" >&2
+    exit 1
+fi
+
+# Create database if needed
+if [ -n "$PASSWORD" ]; then
+    PGPASSWORD="$PASSWORD" createdb -h localhost -p {port} -U "{user}" -w "{database}" 2>/dev/null || true
+else
+    createdb -h localhost -p {port} -U "{user}" "{database}" 2>/dev/null || true
+fi
+
+# Write postgres service file
+cat > "{service_file}" << EOF
+{{
+    "host": "$HOSTNAME",
+    "port": {port},
+    "database": "{database}",
+    "user": "{user}",
+    "password": {json.dumps(password)},
+    "pgdata": "$PGDATA",
+    "slurm_job_id": "$SLURM_JOB_ID",
+    "started_at": "$(date -Iseconds)",
+    "connection_string": "postgresql://{auth_prefix}@$HOSTNAME:{port}/{database}"
+}}
+EOF
+chmod 600 "{service_file}"
+
+echo "PostgreSQL ready on $HOSTNAME:{port}"
+"""
+
+    cleanup_bash = (
+        'if [ -n "${PGDATA:-}" ] && command -v pg_ctl >/dev/null 2>&1; then '
+        'pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true; fi'
+    )
+
+    # Capture values for the closure
+    _password = password
+    _user = user
+    _database = database
+    _port = port
+    _service_file = service_file
+    _auth_prefix = auth_prefix
+
+    def _build_handle(job_id: str, hostname: str) -> ServiceHandle:
+        # Read credentials from service.json if it exists
+        creds_user = _user
+        creds_password = _password
+        creds_database = _database
+        conn_string = ""
+        pgdata = str(data_dir)
+
+        if _service_file.exists():
+            try:
+                with open(_service_file) as f:
+                    info = json.load(f)
+                creds_user = info.get("user", _user)
+                creds_password = info.get("password", _password)
+                creds_database = info.get("database", _database)
+                conn_string = info.get("connection_string", "")
+                pgdata = info.get("pgdata", pgdata)
+            except Exception:
+                pass
+
+        if not conn_string:
+            conn_string = (
+                f"postgresql://{_auth_prefix}@{hostname}:{_port}/{_database}"
+            )
+
+        return ServiceHandle(
+            name="postgres",
+            host=hostname,
+            port=_port,
+            credentials={
+                "user": creds_user,
+                "password": creds_password,
+                "database": creds_database,
+            },
+            process_id=job_id,
+            metadata={
+                "connection_string": conn_string,
+                "pgdata": pgdata,
+                "store_locator": conn_string,
+            },
+        )
+
+    return SlurmFragment(
+        name="postgres",
+        setup_bash=setup_bash,
+        cleanup_bash=cleanup_bash,
+        readiness=ReadinessCheck(port=port, file=service_file),
+        cpus=2,
+        build_handle=_build_handle,
+    )
+
+
+def local_provider(
+    spec: Any, env_config: dict[str, Any]
+) -> Any:
+    """Produce a :class:`LocalFragment` for PostgreSQL.
+
+    Delegates to :func:`start_postgres_local` and wraps the result
+    into a :class:`LocalFragment` with pre-built handle.
+    """
+    from metalab.environment.base import ReadinessCheck, ServiceHandle
+    from metalab.environment.local import LocalFragment
+
+    user = spec.config.get(
+        "user", os.environ.get("USER", "postgres")
+    )
+    pg_config = PostgresServiceConfig(
+        port=spec.config.get("port", DEFAULT_PORT),
+        database=spec.config.get("database", DEFAULT_DATABASE),
+        user=user,
+        password=spec.config.get("password"),
+        auth_method=spec.config.get("auth_method", "trust"),
+        listen_addresses=spec.config.get("listen_addresses", "localhost"),
+    )
+
+    service = start_postgres_local(pg_config)
+
+    def _build_handle(pid: str, hostname: str) -> ServiceHandle:
+        return ServiceHandle(
+            name="postgres",
+            host=service.host,
+            port=service.port,
+            credentials={
+                "user": service.user,
+                "password": service.password,
+                "database": service.database,
+            },
+            process_id=str(service.pid) if service.pid else None,
+            metadata={
+                "connection_string": service.connection_string,
+                "store_locator": service.connection_string,
+            },
+        )
+
+    return LocalFragment(
+        name="postgres",
+        command=[],  # empty = already started by start_postgres_local
+        readiness=ReadinessCheck(port=service.port),
+        stop_fn=lambda: stop_postgres(service_id="default"),
+        build_handle=_build_handle,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Discover providers
+# ---------------------------------------------------------------------------
+
+
+def discover_slurm(
+    store_root: Path, env_config: dict[str, Any]
+) -> Any:
+    """Discover a running PostgreSQL service via shared filesystem."""
+    import socket
+
+    from metalab.environment.base import ServiceHandle
+
+    try:
+        service = get_service_info(store_root=store_root)
+        if service:
+            # Check port reachable
+            try:
+                with socket.create_connection(
+                    (service.host, service.port), timeout=2.0
+                ):
+                    pass
+            except (OSError, ConnectionRefusedError):
+                return None
+
+            return ServiceHandle(
+                name="postgres",
+                host=service.host,
+                port=service.port,
+                credentials={
+                    "user": service.user,
+                    "password": service.password,
+                    "database": service.database,
+                },
+                process_id=service.slurm_job_id,
+                metadata={
+                    "connection_string": service.connection_string,
+                    "store_locator": service.connection_string,
+                },
+            )
+    except Exception:
+        pass
+    return None
+
+
+def discover_local(
+    store_root: Path, env_config: dict[str, Any]
+) -> Any:
+    """Discover a running local PostgreSQL service."""
+    from metalab.environment.base import ServiceHandle
+
+    try:
+        service = get_service_info()
+        if service:
+            return ServiceHandle(
+                name="postgres",
+                host=service.host,
+                port=service.port,
+                credentials={
+                    "user": service.user,
+                    "password": service.password,
+                    "database": service.database,
+                },
+                process_id=str(service.pid) if service.pid else None,
+                metadata={
+                    "connection_string": service.connection_string,
+                    "store_locator": service.connection_string,
+                },
+            )
+    except Exception:
+        pass
+    return None
+
+
+# Auto-register providers
+try:
+    from metalab.services.registry import (
+        register_discover as _register_discover,
+        register_provider as _register,
+    )
+
+    _register("postgres", "slurm", slurm_provider)
+    _register("postgres", "local", local_provider)
+    _register_discover("postgres", "slurm", discover_slurm)
+    _register_discover("postgres", "local", discover_local)
+except ImportError:
+    pass

@@ -1,9 +1,11 @@
 """
 LocalEnvironment: Subprocess-based service management for local development.
 
-Manages services via subprocess.Popen (or delegates to existing metalab
-service managers). Services run on localhost with no tunneling required.
+Services provide :class:`LocalFragment` objects describing their command,
+environment, and readiness check.  The environment spawns subprocesses
+sequentially, waits for readiness, and returns handles.
 """
+
 from __future__ import annotations
 
 import logging
@@ -12,13 +14,52 @@ import signal
 import socket
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from metalab.environment import EnvironmentRegistry
-from metalab.environment.base import ServiceHandle, ServiceSpec
+from metalab.environment.base import ReadinessCheck, ServiceHandle, ServiceSpec
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fragment type
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LocalFragment:
+    """A service's contribution to a local subprocess launch.
+
+    Attributes:
+        name: Service identifier.
+        command: Command + args to run as a subprocess.
+        env: Extra environment variables to set.
+        readiness: How to check the service is ready.
+        log_name: Base name for the log file (e.g. ``"atlas"``).
+        stop_fn: Optional custom stop function (e.g. ``stop_postgres``).
+            If ``None``, default SIGTERM/SIGKILL is used.
+        build_handle: Called with ``(pid, hostname)`` after readiness.
+    """
+
+    name: str
+    command: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    readiness: ReadinessCheck = field(default_factory=ReadinessCheck)
+    log_name: str | None = None
+    stop_fn: Callable[[], None] | None = None
+    build_handle: Callable[[str, str], ServiceHandle] = field(
+        default=lambda pid, host: ServiceHandle(  # type: ignore[arg-type]
+            name="unknown", host=host, port=0, process_id=pid
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
 
 
 class LocalEnvironment:
@@ -29,95 +70,95 @@ class LocalEnvironment:
     def __init__(self, **config: Any) -> None:
         self.config = config
 
+    # ------------------------------------------------------------------
+    # Service lifecycle
+    # ------------------------------------------------------------------
+
     def start_service(self, spec: ServiceSpec) -> ServiceHandle:
-        """Start a service locally.
+        """Start a single service (convenience wrapper)."""
+        return self.start_service_group([spec])[0]
 
-        For 'postgres': delegates to metalab.services.postgres.start_postgres_local()
-        For 'atlas': spawns uvicorn serving the Atlas app
+    def start_service_group(
+        self, specs: list[ServiceSpec]
+    ) -> list[ServiceHandle]:
+        """Start services sequentially as local subprocesses.
+
+        Resolves a :class:`LocalFragment` for each spec via the
+        provider registry, spawns each subprocess, waits for readiness,
+        and returns handles.
+
+        Args:
+            specs: Ordered list of service specifications.
+
+        Returns:
+            List of :class:`ServiceHandle` in the same order.
         """
-        if spec.name == "postgres":
-            return self._start_postgres(spec)
-        elif spec.name == "atlas":
-            return self._start_atlas(spec)
-        else:
-            raise ValueError(f"Unknown service: {spec.name!r}")
+        from metalab.services.registry import get_provider
 
-    def _start_postgres(self, spec: ServiceSpec) -> ServiceHandle:
-        """Start local PostgreSQL using existing metalab service."""
-        from metalab.services.postgres import (
-            PostgresServiceConfig,
-            start_postgres_local,
-        )
+        handles: list[ServiceHandle] = []
+        for spec in specs:
+            provider = get_provider(spec.name, self.env_type)
+            if provider is None:
+                raise ValueError(
+                    f"No local provider registered for service {spec.name!r}"
+                )
+            fragment: LocalFragment = provider(spec, self.config)
+            handle = self._start_fragment(fragment)
+            handles.append(handle)
+        return handles
 
-        pg_config = PostgresServiceConfig(
-            port=spec.config.get("port", 5432),
-            database=spec.config.get("database", "metalab"),
-            user=spec.config.get("user", os.environ.get("USER", "postgres")),
-            password=spec.config.get("password"),
-            auth_method=spec.config.get("auth_method", "trust"),
-            listen_addresses=spec.config.get("listen_addresses", "localhost"),
-        )
+    def _start_fragment(self, fragment: LocalFragment) -> ServiceHandle:
+        """Spawn a subprocess for a single fragment and wait for readiness."""
+        # If no command, the provider handled startup itself (e.g. postgres)
+        # and build_handle was already called with the right info.
+        if not fragment.command:
+            # Provider pre-started the service; just build the handle.
+            return fragment.build_handle("", "localhost")
 
-        service = start_postgres_local(pg_config)
-
-        return ServiceHandle(
-            name="postgres",
-            host=service.host,
-            port=service.port,
-            credentials={
-                "user": service.user,
-                "password": service.password,
-                "database": service.database,
-            },
-            process_id=str(service.pid) if service.pid else None,
-            metadata={"connection_string": service.connection_string},
-        )
-
-    def _start_atlas(self, spec: ServiceSpec) -> ServiceHandle:
-        """Start Atlas dashboard as a subprocess."""
-        port = spec.config.get("port", 8000)
-        store = spec.config.get("store", "")
-        file_root = spec.config.get("file_root")
-        host = spec.config.get("host", "127.0.0.1")
-
-        cmd = [
-            "python", "-m", "uvicorn", "atlas.main:app",
-            "--host", host, "--port", str(port),
-        ]
-
+        # Merge environment
         env = os.environ.copy()
-        env["ATLAS_STORE_PATH"] = store
-        if file_root:
-            env["ATLAS_FILE_ROOT"] = str(file_root)
+        env.update(fragment.env)
 
-        log_path = self._service_log_path("atlas", file_root)
+        # Log file
+        file_root = self.config.get("file_root")
+        log_path = self._service_log_path(
+            fragment.log_name or fragment.name, file_root
+        )
         log_file = open(log_path, "a")  # noqa: SIM115
-        logger.info(f"Atlas logs: {log_path}")
+        logger.info(f"{fragment.name} logs: {log_path}")
 
         proc = subprocess.Popen(
-            cmd, env=env,
+            fragment.command,
+            env=env,
             stdout=log_file,
             stderr=log_file,
         )
 
-        # Wait for atlas to be ready
-        self._wait_for_port(host, port, timeout=30.0)
+        # Wait for readiness
+        host = "127.0.0.1"
+        if fragment.readiness.port:
+            self._wait_for_port(host, fragment.readiness.port, timeout=30.0)
 
-        return ServiceHandle(
-            name="atlas",
-            host=host,
-            port=port,
-            process_id=str(proc.pid),
-            metadata={"log_file": str(log_path)},
-        )
+        handle = fragment.build_handle(str(proc.pid), host)
+
+        # Persist stop_fn and log_file in metadata for later use
+        if fragment.stop_fn:
+            handle.metadata["_stop_fn"] = fragment.stop_fn
+        if log_path:
+            handle.metadata["log_file"] = str(log_path)
+
+        return handle
 
     def stop_service(self, handle: ServiceHandle) -> None:
-        """Stop a service by sending SIGTERM then SIGKILL."""
-        if handle.name == "postgres":
-            from metalab.services.postgres import stop_postgres
-            # Try to use existing stop logic
+        """Stop a service.
+
+        Uses the provider's ``stop_fn`` if available (stored in handle
+        metadata), otherwise sends SIGTERM then SIGKILL.
+        """
+        stop_fn = handle.metadata.get("_stop_fn")
+        if callable(stop_fn):
             try:
-                stop_postgres(service_id="default")
+                stop_fn()
                 return
             except Exception:
                 pass
@@ -126,59 +167,36 @@ class LocalEnvironment:
             pid = int(handle.process_id)
             try:
                 os.kill(pid, signal.SIGTERM)
-                # Wait briefly for graceful shutdown
                 for _ in range(10):
                     try:
-                        os.kill(pid, 0)  # Check if still running
+                        os.kill(pid, 0)
                         time.sleep(0.5)
                     except OSError:
-                        return  # Process exited
-                # Force kill
+                        return
                 os.kill(pid, signal.SIGKILL)
             except OSError:
-                pass  # Process already gone
+                pass
 
     def discover(self, store_root: Path, service_name: str) -> ServiceHandle | None:
-        """Discover a running local service."""
-        if service_name == "postgres":
-            return self._discover_postgres()
-        return None
+        """Discover a running local service via the provider registry."""
+        from metalab.services.registry import get_discover
 
-    def _discover_postgres(self) -> ServiceHandle | None:
-        """Try to find a running local postgres via service.json."""
-        from metalab.services.postgres import get_service_info
-        try:
-            service = get_service_info()
-            if service:
-                return ServiceHandle(
-                    name="postgres",
-                    host=service.host,
-                    port=service.port,
-                    credentials={
-                        "user": service.user,
-                        "password": service.password,
-                        "database": service.database,
-                    },
-                    process_id=str(service.pid) if service.pid else None,
-                    metadata={"connection_string": service.connection_string},
-                )
-        except Exception:
-            pass
-        return None
+        discover_fn = get_discover(service_name, self.env_type)
+        if discover_fn is None:
+            return None
+        return discover_fn(store_root, self.config)
 
     def is_available(self, handle: ServiceHandle) -> bool:
         """Check if a service is reachable via TCP."""
         return self._check_port(handle.host, handle.port)
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _service_log_path(service_name: str, file_root: str | None) -> Path:
-        """
-        Determine the log file path for a service.
-
-        If *file_root* is set the log goes alongside the data
-        (``{file_root}/services/{service}.log``).  Otherwise it falls back to
-        ``~/.metalab/services/{service}.log``.
-        """
+        """Determine the log file path for a service."""
         if file_root:
             log_dir = Path(file_root) / "services"
         else:

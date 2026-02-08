@@ -20,6 +20,24 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
+class ReadinessCheck:
+    """
+    Platform-agnostic readiness specification.
+
+    Used by all environments to determine when a service is ready.
+
+    Attributes:
+        port: TCP port to probe. The environment polls until a connection
+            succeeds.
+        file: File path to poll for existence. Used when a service
+            writes a discovery file (e.g. ``service.json``) on startup.
+    """
+
+    port: int | None = None
+    file: Path | None = None
+
+
+@dataclass
 class ServiceSpec:
     """
     Specification for a service to start.
@@ -119,6 +137,25 @@ class ServiceEnvironment(Protocol):
 
         Raises:
             RuntimeError: If the service cannot be started.
+        """
+        ...
+
+    def start_service_group(
+        self, specs: list[ServiceSpec]
+    ) -> list[ServiceHandle]:
+        """
+        Start multiple services, potentially as a co-located group.
+
+        Environments may compose services into a single execution unit
+        (e.g. one SLURM job) or start them sequentially (e.g. local
+        subprocesses).  The default implementation calls
+        :meth:`start_service` for each spec.
+
+        Args:
+            specs: Ordered list of service specifications.
+
+        Returns:
+            List of ServiceHandles in the same order as *specs*.
         """
         ...
 

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Rebuild Atlas frontend static assets if any frontend source files are staged.
+
+if git diff --cached --name-only | grep -q '^atlas/frontend/'; then
+  echo "atlas/frontend/ changed — rebuilding static assets..."
+  (cd atlas/frontend && npm run build) || exit 1
+  git add atlas/atlas/static/
+fi

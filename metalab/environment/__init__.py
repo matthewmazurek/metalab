@@ -108,6 +108,7 @@ class EnvironmentRegistry:
 
 # Re-export key types
 from metalab.environment.base import (
+    ReadinessCheck,  # noqa: E402
     ServiceEnvironment,  # noqa: E402
     ServiceHandle,
     ServiceSpec,
@@ -121,6 +122,7 @@ from metalab.environment.connector import (
 
 __all__ = [
     "EnvironmentRegistry",
+    "ReadinessCheck",
     "ServiceEnvironment",
     "ServiceSpec",
     "ServiceHandle",

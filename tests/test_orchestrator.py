@@ -1,11 +1,14 @@
-"""Tests for metalab.environment.orchestrator module."""
+"""Tests for metalab.environment.orchestrator and ssh_tunnel modules."""
 
 from __future__ import annotations
 
 import pytest
 from metalab.config import ProjectInfo, ResolvedConfig
+from metalab.environment.base import ServiceSpec
 from metalab.environment.bundle import ServiceBundle
+from metalab.environment.connector import ConnectionTarget
 from metalab.environment.orchestrator import ServiceOrchestrator, ServiceStatus
+from metalab.environment.ssh_tunnel import build_ssh_command
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +159,167 @@ class TestServiceStatus:
             },
         )
         assert not status.is_healthy()
+
+
+# ---------------------------------------------------------------------------
+# _build_service_specs
+# ---------------------------------------------------------------------------
+
+
+class TestBuildServiceSpecs:
+    """Test the orchestrator builds specs from config with no hardcoding."""
+
+    def test_postgres_and_atlas(self, resolved_config):
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        assert len(specs) == 2
+        assert specs[0].name == "postgres"
+        assert specs[1].name == "atlas"
+
+    def test_postgres_before_atlas(self, resolved_config):
+        """Topological order: postgres first (atlas may depend on it)."""
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        names = [s.name for s in specs]
+        assert names.index("postgres") < names.index("atlas")
+
+    def test_postgres_config_includes_file_root(self, resolved_config):
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        pg = specs[0]
+        assert pg.config["file_root"] == "/tmp/test-root"
+
+    def test_atlas_config_includes_file_root(self, resolved_config):
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        atlas = specs[1]
+        assert atlas.config["file_root"] == "/tmp/test-root"
+
+    def test_atlas_has_user_port(self, resolved_config):
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        atlas = specs[1]
+        assert atlas.config["port"] == 8000
+
+    def test_no_services_configured(self, resolved_config_no_services):
+        """No services configured but file_root exists -> atlas only."""
+        orch = ServiceOrchestrator(resolved_config_no_services)
+        specs = orch._build_service_specs()
+        # Atlas is still created because file_root exists
+        assert len(specs) == 1
+        assert specs[0].name == "atlas"
+
+    def test_no_services_no_file_root(self):
+        """No services and no file_root -> empty specs."""
+        config = ResolvedConfig(
+            project=ProjectInfo(name="test"),
+            env_name="local",
+            env_type="local",
+            env_config={},
+            services={},
+            file_root=None,
+        )
+        orch = ServiceOrchestrator(config)
+        specs = orch._build_service_specs()
+        assert specs == []
+
+    def test_postgres_only(self):
+        """Postgres configured but no atlas and no file_root."""
+        config = ResolvedConfig(
+            project=ProjectInfo(name="test"),
+            env_name="local",
+            env_type="local",
+            env_config={},
+            services={"postgres": {"database": "mydb"}},
+            file_root=None,
+        )
+        orch = ServiceOrchestrator(config)
+        specs = orch._build_service_specs()
+        assert len(specs) == 1
+        assert specs[0].name == "postgres"
+
+
+# ---------------------------------------------------------------------------
+# build_ssh_command
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSshCommand:
+    def test_basic(self):
+        target = ConnectionTarget(
+            remote_host="compute-42",
+            remote_port=8000,
+            local_port=8000,
+        )
+        cmd = build_ssh_command(target)
+        assert cmd == ["ssh", "-N", "-L", "8000:127.0.0.1:8000", "compute-42"]
+
+    def test_with_gateway_and_user(self):
+        target = ConnectionTarget(
+            remote_host="compute-42",
+            remote_port=8000,
+            local_port=8000,
+            gateway="login.cluster.edu",
+            user="alice",
+        )
+        cmd = build_ssh_command(target)
+        assert cmd == [
+            "ssh", "-N", "-L", "8000:127.0.0.1:8000",
+            "-J", "alice@login.cluster.edu",
+            "alice@compute-42",
+        ]
+
+    def test_with_ssh_key(self):
+        target = ConnectionTarget(
+            remote_host="compute-42",
+            remote_port=8000,
+            local_port=8000,
+            ssh_key="/home/alice/.ssh/id_rsa",
+        )
+        cmd = build_ssh_command(target)
+        assert cmd == [
+            "ssh", "-N", "-L", "8000:127.0.0.1:8000",
+            "-i", "/home/alice/.ssh/id_rsa",
+            "compute-42",
+        ]
+
+    def test_gateway_already_has_user(self):
+        """If gateway already contains user@, don't double-prefix."""
+        target = ConnectionTarget(
+            remote_host="compute-42",
+            remote_port=8000,
+            local_port=8000,
+            gateway="alice@login.cluster.edu",
+            user="alice",
+        )
+        cmd = build_ssh_command(target)
+        # gateway already has user@ — should not become alice@alice@...
+        assert "-J" in cmd
+        j_idx = cmd.index("-J")
+        assert cmd[j_idx + 1] == "alice@login.cluster.edu"
+
+    def test_different_local_port(self):
+        target = ConnectionTarget(
+            remote_host="compute-42",
+            remote_port=8000,
+            local_port=9000,
+        )
+        cmd = build_ssh_command(target)
+        assert "9000:127.0.0.1:8000" in cmd
+
+    def test_all_options(self):
+        target = ConnectionTarget(
+            remote_host="node-7",
+            remote_port=5432,
+            local_port=15432,
+            gateway="bastion.example.com",
+            user="bob",
+            ssh_key="/tmp/key",
+        )
+        cmd = build_ssh_command(target)
+        assert cmd == [
+            "ssh", "-N", "-L", "15432:127.0.0.1:5432",
+            "-J", "bob@bastion.example.com",
+            "-i", "/tmp/key",
+            "bob@node-7",
+        ]
