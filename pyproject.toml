@@ -12,14 +12,12 @@ numpy = ["numpy>=1.24"]
 pandas = ["pandas>=2.0"]
 rich = ["rich>=13.0"]
 postgres = ["psycopg[binary]>=3.0", "psycopg-pool>=3.0"]
-atlas = ["metalab-atlas @ git+https://github.com/matthewmazurek/metalab-atlas.git"]
 full = [
     "numpy>=1.24",
     "pandas>=2.0",
     "rich>=13.0",
     "psycopg[binary]>=3.0",
     "psycopg-pool>=3.0",
-    "metalab-atlas @ git+https://github.com/matthewmazurek/metalab-atlas.git",
 ]
 dev = [
     "pytest>=7.0",
@@ -62,9 +60,6 @@ postgres_local = "metalab.services.postgres:discover_local"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.hatch.build.targets.wheel]
 packages = ["metalab"]
 
@@ -90,9 +85,6 @@ ignore = [
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
-
-[tool.uv]
-environments = ["python_version >= '3.11' and python_version < '3.13'"]
 
 # Workspace configuration (for local development)
 [tool.uv.workspace]
