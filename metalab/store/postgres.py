@@ -499,6 +499,9 @@ class PostgresStore:
         """
         Rebuild the Postgres index from FileStore.
 
+        Uses batch operations for efficiency — a single transaction for
+        all records instead of per-record commits.
+
         Call this if:
         - Postgres was wiped/reset
         - Connecting to a fresh database
@@ -512,17 +515,19 @@ class PostgresStore:
         # Clear existing index
         self._index.clear()
 
-        # Index all run records
+        # Index all run records in one batch transaction
         records = self._files.list_run_records()
-        for record in records:
-            self._index.index_record(record)
+        self._index.batch_index_records(records)
 
-            # Index derived if exists
+        # Collect and batch index derived metrics
+        derived_pairs = []
+        for record in records:
             derived = self._files.get_derived(record.run_id)
             if derived:
-                self._index.index_derived(record.run_id, derived)
+                derived_pairs.append((record.run_id, derived))
+        self._index.batch_index_derived(derived_pairs)
 
-        # Update field catalog
+        # Update field catalog (already batched internally)
         self._index.update_field_catalog(records)
 
         logger.info(f"Indexed {len(records)} records from files")

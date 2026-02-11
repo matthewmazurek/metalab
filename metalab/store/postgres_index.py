@@ -27,7 +27,9 @@ from metalab.schema import dump_run_record, load_run_record
 logger = logging.getLogger(__name__)
 
 # Schema version for migrations
-SCHEMA_VERSION = 2
+# v2: base tables (runs, derived, experiment_manifests, field_catalog, meta)
+# v3: GIN index on record_json + pg_trgm trigram indexes for ILIKE search
+SCHEMA_VERSION = 3
 
 # Query parameters that are metalab-specific and should be stripped
 # before passing the connection string to psycopg
@@ -320,6 +322,40 @@ class PostgresIndex:
                 """
                 )
 
+                # ---- v3 indexes: GIN on JSONB + trigram for ILIKE ----
+
+                # GIN index on record_json for containment (@>) and
+                # JSONB path queries. More future-proof than individual
+                # expression indexes since param/metric keys are dynamic.
+                cur.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS idx_runs_record_gin
+                    ON {self._table('runs')} USING GIN (record_json)
+                """
+                )
+
+                # Trigram indexes for efficient ILIKE '%query%' searches.
+                # Requires pg_trgm extension. Safe to attempt — if it fails
+                # (e.g. no superuser), we skip the trigram indexes and log.
+                try:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+                    conn.commit()  # extensions need their own commit
+
+                    for col in ("run_id", "seed_fingerprint", "params_fingerprint", "context_fingerprint"):
+                        cur.execute(
+                            f"""
+                            CREATE INDEX IF NOT EXISTS idx_runs_{col}_trgm
+                            ON {self._table('runs')} USING GIN ({col} gin_trgm_ops)
+                        """
+                        )
+                    logger.debug("pg_trgm extension and trigram indexes created")
+                except Exception as e:
+                    logger.warning(
+                        f"Could not create pg_trgm indexes (search may use seq scans): {e}"
+                    )
+                    # Rollback the failed extension/index creation
+                    conn.rollback()
+
                 # Set schema version
                 cur.execute(
                     f"""
@@ -340,6 +376,9 @@ class PostgresIndex:
     def index_record(self, record: "RunRecord") -> None:
         """
         Add or update a run record in the index.
+
+        Also incrementally updates the field_catalog so it stays current
+        without requiring a full rebuild_index().
 
         Args:
             record: The RunRecord to index.
@@ -377,7 +416,141 @@ class PostgresIndex:
                         json.dumps(data),
                     ],
                 )
+
+                # Incrementally update field_catalog with this record's fields
+                self._update_catalog_for_record(cur, data)
+
                 conn.commit()
+
+    def _update_catalog_for_record(self, cur: Any, data: dict) -> None:
+        """
+        Incrementally update field_catalog for a single record.
+
+        Uses INSERT ON CONFLICT to upsert field stats. This keeps
+        the catalog fresh without requiring a full rebuild.
+        """
+        upsert_sql = f"""
+            INSERT INTO {self._table('field_catalog')} (
+                namespace, field_name, field_type, count, values, min_value, max_value
+            ) VALUES (%s, %s, %s, 1, %s, %s, %s)
+            ON CONFLICT (namespace, field_name) DO UPDATE SET
+                count = {self._table('field_catalog')}.count + 1,
+                values = CASE
+                    WHEN EXCLUDED.values IS NOT NULL
+                         AND array_length({self._table('field_catalog')}.values, 1) < 100
+                    THEN (
+                        SELECT array_agg(DISTINCT v)
+                        FROM unnest(
+                            {self._table('field_catalog')}.values || EXCLUDED.values
+                        ) AS v
+                        LIMIT 100
+                    )
+                    ELSE {self._table('field_catalog')}.values
+                END,
+                min_value = LEAST({self._table('field_catalog')}.min_value, EXCLUDED.min_value),
+                max_value = GREATEST({self._table('field_catalog')}.max_value, EXCLUDED.max_value),
+                updated_at = NOW()
+        """
+
+        # Process params
+        for key, value in data.get("params_resolved", {}).items():
+            ftype = self._infer_type(value)
+            min_val = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            max_val = min_val
+            values_arr = [str(value)] if isinstance(value, (str, bool)) else None
+            cur.execute(upsert_sql, ["params", key, ftype, values_arr, min_val, max_val])
+
+        # Process metrics
+        for key, value in data.get("metrics", {}).items():
+            ftype = self._infer_type(value)
+            min_val = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            max_val = min_val
+            values_arr = [str(value)] if isinstance(value, (str, bool)) else None
+            cur.execute(upsert_sql, ["metrics", key, ftype, values_arr, min_val, max_val])
+
+    def batch_index_records(self, records: list["RunRecord"]) -> None:
+        """
+        Index multiple records in a single transaction.
+
+        Uses executemany for efficient pipelining. Also updates
+        the field_catalog incrementally for all records.
+
+        Args:
+            records: List of RunRecords to index.
+        """
+        if not records:
+            return
+
+        from metalab.schema import dump_run_record
+
+        all_data = [dump_run_record(r) for r in records]
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"""
+                    INSERT INTO {self._table('runs')} (
+                        run_id, experiment_id, status,
+                        context_fingerprint, params_fingerprint, seed_fingerprint,
+                        started_at, finished_at, duration_ms, record_json
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        finished_at = EXCLUDED.finished_at,
+                        duration_ms = EXCLUDED.duration_ms,
+                        record_json = EXCLUDED.record_json,
+                        updated_at = NOW()
+                    """,
+                    [
+                        (
+                            r.run_id,
+                            r.experiment_id,
+                            r.status.value,
+                            r.context_fingerprint,
+                            r.params_fingerprint,
+                            r.seed_fingerprint,
+                            _coerce_naive_local_to_utc(r.started_at),
+                            _coerce_naive_local_to_utc(r.finished_at),
+                            r.duration_ms,
+                            json.dumps(data),
+                        )
+                        for r, data in zip(records, all_data)
+                    ],
+                )
+
+                # Update field catalog for all records
+                for data in all_data:
+                    self._update_catalog_for_record(cur, data)
+
+                conn.commit()
+                logger.debug(f"Batch indexed {len(records)} records")
+
+    def batch_index_derived(self, pairs: list[tuple[str, dict[str, Any]]]) -> None:
+        """
+        Index derived metrics for multiple runs in a single transaction.
+
+        Args:
+            pairs: List of (run_id, derived_dict) tuples.
+        """
+        if not pairs:
+            return
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"""
+                    INSERT INTO {self._table('derived')} (run_id, derived_json)
+                    VALUES (%s, %s)
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        derived_json = EXCLUDED.derived_json,
+                        updated_at = NOW()
+                    """,
+                    [(run_id, json.dumps(derived)) for run_id, derived in pairs],
+                )
+                conn.commit()
+                logger.debug(f"Batch indexed {len(pairs)} derived records")
 
     def get_record(self, run_id: str) -> "RunRecord | None":
         """
