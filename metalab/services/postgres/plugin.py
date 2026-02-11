@@ -171,6 +171,7 @@ class PostgresPlugin(ServicePlugin):
             data_dir=cfg.data_dir,
             service_dir=cfg.service_dir,
             service_file=cfg.service_file,
+            file_root=cfg.file_root,
             max_connections=cfg.max_connections,
         )
 

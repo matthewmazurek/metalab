@@ -115,6 +115,48 @@ class TestPostgresSlurmProvider:
 # ---------------------------------------------------------------------------
 
 
+class TestPostgresSlurmStoreLocatorExport:
+    """Test that postgres SLURM bash exports METALAB_STORE_LOCATOR."""
+
+    @pytest.fixture
+    def pg_spec(self):
+        return ServiceSpec(
+            name="postgres",
+            config={
+                "file_root": "/shared/experiments",
+                "database": "metalab",
+                "auth_method": "trust",
+                "port": 5432,
+                "user": "researcher",
+            },
+        )
+
+    def test_setup_bash_exports_store_locator(self, pg_spec, tmp_path):
+        from metalab.services.postgres import PostgresPlugin
+
+        pg_spec.config["file_root"] = str(tmp_path)
+
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", {"file_root": str(tmp_path)})
+
+        assert "METALAB_STORE_LOCATOR" in frag.setup_bash
+        assert "export METALAB_STORE_LOCATOR=" in frag.setup_bash
+        # Should contain postgresql:// and file_root
+        assert "postgresql://" in frag.setup_bash
+        assert "file_root=" in frag.setup_bash
+
+    def test_store_locator_has_correct_port_and_db(self, pg_spec, tmp_path):
+        from metalab.services.postgres import PostgresPlugin
+
+        pg_spec.config["file_root"] = str(tmp_path)
+
+        plugin = PostgresPlugin()
+        frag = plugin.plan(pg_spec, "slurm", {"file_root": str(tmp_path)})
+
+        # The store locator template should include port and database
+        assert ":5432/metalab" in frag.setup_bash
+
+
 class TestAtlasSlurmProvider:
     """Test AtlasPlugin.plan_slurm returns a valid SlurmFragment."""
 
@@ -149,6 +191,36 @@ class TestAtlasSlurmProvider:
         assert "ATLAS_STORE_PATH" in frag.setup_bash
         assert "ATLAS_FILE_ROOT" in frag.setup_bash
         assert "--port 8000" in frag.setup_bash
+
+    def test_setup_bash_reads_metalab_store_locator(self, atlas_spec):
+        """Atlas bash should use METALAB_STORE_LOCATOR with fallback."""
+        from metalab.services.atlas import AtlasPlugin
+
+        plugin = AtlasPlugin()
+        frag = plugin.plan(atlas_spec, "slurm", {})
+
+        # Should use bash parameter expansion to prefer METALAB_STORE_LOCATOR
+        assert "METALAB_STORE_LOCATOR" in frag.setup_bash
+        # The static store value should be the fallback
+        assert "postgresql://user:pw@host:5432/metalab" in frag.setup_bash
+
+    def test_setup_bash_fallback_when_no_postgres(self):
+        """Without postgres, atlas falls back to the static store value."""
+        from metalab.services.atlas import AtlasPlugin
+
+        spec = ServiceSpec(
+            name="atlas",
+            config={
+                "port": 8000,
+                "store": "/local/path",
+                "file_root": "/shared",
+            },
+        )
+        plugin = AtlasPlugin()
+        frag = plugin.plan(spec, "slurm", {})
+
+        # The fallback value should be the file path
+        assert "/local/path" in frag.setup_bash
 
     def test_cleanup_bash_kills_atlas(self, atlas_spec):
         """Atlas cleanup should kill the backgrounded uvicorn process."""
@@ -188,6 +260,176 @@ class TestAtlasSlurmProvider:
         handle = frag.build_handle("12345", "node01")
 
         assert "tunnel_target" not in handle.metadata
+
+
+# ---------------------------------------------------------------------------
+# Atlas local — store_locator preference
+# ---------------------------------------------------------------------------
+
+
+class TestAtlasLocalStoreLocator:
+    """Test that atlas plan_local prefers store_locator over store."""
+
+    def test_prefers_store_locator_from_config(self):
+        """When store_locator is in spec config, it takes precedence."""
+        from metalab.environment.local import LocalFragment
+        from metalab.services.atlas import AtlasPlugin
+
+        spec = ServiceSpec(
+            name="atlas",
+            config={
+                "port": 8000,
+                "store": "/local/fallback",
+                "store_locator": "postgresql://user:pw@host:5432/metalab?file_root=/shared",
+                "file_root": "/shared",
+            },
+        )
+        plugin = AtlasPlugin()
+        frag = plugin.plan(spec, "local", {})
+
+        assert isinstance(frag, LocalFragment)
+        # The env should have the postgres URL, not the file path
+        assert frag.env["ATLAS_STORE_PATH"] == "postgresql://user:pw@host:5432/metalab?file_root=/shared"
+
+    def test_falls_back_to_store_without_store_locator(self):
+        """Without store_locator, falls back to static store value."""
+        from metalab.environment.local import LocalFragment
+        from metalab.services.atlas import AtlasPlugin
+
+        spec = ServiceSpec(
+            name="atlas",
+            config={
+                "port": 8000,
+                "store": "/local/path",
+                "file_root": "/shared",
+            },
+        )
+        plugin = AtlasPlugin()
+        frag = plugin.plan(spec, "local", {})
+
+        assert isinstance(frag, LocalFragment)
+        assert frag.env["ATLAS_STORE_PATH"] == "/local/path"
+
+
+# ---------------------------------------------------------------------------
+# LocalEnvironment metadata propagation via consumes
+# ---------------------------------------------------------------------------
+
+
+class TestLocalMetadataPropagation:
+    """Test that LocalEnvironment propagates handle metadata via consumes."""
+
+    def test_consumes_injects_metadata_into_downstream_spec(self):
+        """Metadata from service A's handle flows into service B's config."""
+        from metalab.environment.base import ServiceHandle
+        from metalab.environment.local import LocalEnvironment, LocalFragment
+        from metalab.services.base import ServicePlugin
+        from metalab.services.registry import _plugins, _ensure_loaded
+
+        _ensure_loaded()
+
+        # Create mock plugins that produce known fragments/handles
+        class ProducerPlugin(ServicePlugin):
+            name = "_test_producer"
+
+            def plan_local(self, spec, env_config):
+                def _build(pid, host):
+                    return ServiceHandle(
+                        name="_test_producer",
+                        host=host,
+                        port=1234,
+                        metadata={"my_value": "hello-from-producer"},
+                    )
+                return LocalFragment(
+                    name="_test_producer",
+                    command=[],
+                    build_handle=_build,
+                )
+
+        captured_config = {}
+
+        class ConsumerPlugin(ServicePlugin):
+            name = "_test_consumer"
+
+            def plan_local(self, spec, env_config):
+                # Capture the spec config at plan time
+                captured_config.update(spec.config)
+                return LocalFragment(
+                    name="_test_consumer",
+                    command=[],
+                    build_handle=lambda pid, host: ServiceHandle(
+                        name="_test_consumer", host=host, port=5678,
+                    ),
+                )
+
+        # Register test plugins
+        _plugins["_test_producer"] = ProducerPlugin()
+        _plugins["_test_consumer"] = ConsumerPlugin()
+        try:
+            env = LocalEnvironment()
+            specs = [
+                ServiceSpec(name="_test_producer", config={}),
+                ServiceSpec(
+                    name="_test_consumer",
+                    config={"existing": "keep"},
+                    consumes=["my_value"],
+                ),
+            ]
+            handles = env.start_service_group(specs)
+            assert len(handles) == 2
+
+            # The consumer's config should have the injected value
+            assert captured_config["my_value"] == "hello-from-producer"
+            # Existing config is preserved
+            assert captured_config["existing"] == "keep"
+        finally:
+            _plugins.pop("_test_producer", None)
+            _plugins.pop("_test_consumer", None)
+
+    def test_consumes_no_match_leaves_config_unchanged(self):
+        """When consumed key is not in prior metadata, config is unchanged."""
+        from metalab.environment.base import ServiceHandle
+        from metalab.environment.local import LocalEnvironment, LocalFragment
+        from metalab.services.base import ServicePlugin
+        from metalab.services.registry import _plugins, _ensure_loaded
+
+        _ensure_loaded()
+
+        captured_config = {}
+
+        class StubPlugin(ServicePlugin):
+            name = "_test_stub"
+
+            def plan_local(self, spec, env_config):
+                captured_config.update(spec.config)
+                return LocalFragment(
+                    name="_test_stub",
+                    command=[],
+                    build_handle=lambda pid, host: ServiceHandle(
+                        name="_test_stub", host=host, port=9999,
+                        metadata={},  # No metadata advertised
+                    ),
+                )
+
+        _plugins["_test_stub"] = StubPlugin()
+        try:
+            env = LocalEnvironment()
+            specs = [
+                ServiceSpec(name="_test_stub", config={}),
+                ServiceSpec(
+                    name="_test_stub",
+                    config={"store": "/fallback"},
+                    consumes=["store_locator"],
+                ),
+            ]
+            handles = env.start_service_group(specs)
+            assert len(handles) == 2
+
+            # store_locator was not in metadata, so config should be unchanged
+            assert "store_locator" not in captured_config
+            assert captured_config["store"] == "/fallback"
+        finally:
+            _plugins.pop("_test_stub", None)
 
 
 # ---------------------------------------------------------------------------

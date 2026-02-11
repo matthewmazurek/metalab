@@ -201,7 +201,7 @@ What happens:
 1. Checks for an existing service bundle -- if all services are still alive, reuses it.
 2. Creates the appropriate `ServiceEnvironment` (local subprocess manager or SLURM job submitter).
 3. Starts **PostgreSQL** if `[services.postgres]` is present in your config.
-4. Starts **Atlas** if `[services.atlas]` is present, or if a store locator or `file_root` exists.
+4. Starts **Atlas** if `[services.atlas]` is present and PostgreSQL is configured. Atlas requires a PostgreSQL backend.
 5. Saves a `bundle.json` with connection details for all running services.
 
 The `--tunnel` flag opens an SSH tunnel immediately after provisioning:
@@ -214,9 +214,12 @@ metalab services up --env slurm --tunnel
 
 | Scenario | Config needed | What starts |
 |----------|--------------|-------------|
-| **Postgres-backed** | `[services.postgres]` + `[services.atlas]` | PostgreSQL + Atlas (Atlas reads from PG) |
-| **File-only** | `file_root` set, no `[services.postgres]` | Atlas only (reads shared filesystem directly) |
+| **Postgres + Atlas** | `[services.postgres]` + `[services.atlas]` | PostgreSQL + Atlas (Atlas queries PG, optionally serves files from `file_root`) |
+| **Postgres only** | `[services.postgres]`, no `[services.atlas]` | PostgreSQL only (experiment data indexed, no web UI) |
 | **Reuse existing** | Same as above | Nothing new -- existing bundle is reused if healthy |
+
+!!! note
+    Atlas requires a PostgreSQL backend. If you only have a `file_root` without `[services.postgres]`, Atlas will not be provisioned.
 
 ### `metalab services status`
 
@@ -366,7 +369,7 @@ Services started (local):
   atlas: 127.0.0.1:8000
 ```
 
-Atlas is immediately available at [http://localhost:8000](http://localhost:8000), reading from the `file_root` defined in your local environment profile (e.g., `./runs`). No tunnel is needed.
+Atlas is immediately available at [http://localhost:8000](http://localhost:8000), querying data from PostgreSQL. When `file_root` is configured, Atlas can also serve artifact downloads and log content. No tunnel is needed.
 
 ### SLURM / HPC with PostgreSQL
 
@@ -392,14 +395,13 @@ Or provision and tunnel in one step:
 metalab services up --env slurm --tunnel
 ```
 
-### SLURM / HPC with File Store Only
+### Local Development -- Atlas reading from `file_root`
 
-If you don't need PostgreSQL (e.g., small experiments where filesystem-only is sufficient), omit the `[services.postgres]` section from your config. Atlas will read the shared filesystem directly.
+When running locally with both Postgres and Atlas, Atlas serves query results from Postgres and can also serve artifact/log content when `file_root` is configured in the environment profile.
 
 ```bash
-metalab services up --env slurm
-metalab tunnel
-# Atlas reads from file_root on the shared filesystem
+metalab services up --env local
+# Atlas at http://localhost:8000 with full artifact/log access
 ```
 
 ---

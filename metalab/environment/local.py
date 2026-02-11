@@ -87,6 +87,11 @@ class LocalEnvironment:
         provider registry, spawns each subprocess, waits for readiness,
         and returns handles.
 
+        Handle metadata from earlier services is propagated into later
+        specs via :attr:`ServiceSpec.consumes`: if a spec declares
+        consumed keys, matching metadata values from already-started
+        services are injected into that spec's ``config`` before planning.
+
         Args:
             specs: Ordered list of service specifications.
 
@@ -96,7 +101,14 @@ class LocalEnvironment:
         from metalab.services.registry import get_plugin
 
         handles: list[ServiceHandle] = []
+        resolved_metadata: dict[str, Any] = {}
+
         for spec in specs:
+            # Inject consumed metadata from earlier services
+            for key in spec.consumes:
+                if key in resolved_metadata:
+                    spec.config[key] = resolved_metadata[key]
+
             plugin = get_plugin(spec.name)
             if plugin is None:
                 raise ValueError(
@@ -105,6 +117,10 @@ class LocalEnvironment:
             fragment: LocalFragment = plugin.plan(spec, self.env_type, self.config)
             handle = self._start_fragment(fragment)
             handles.append(handle)
+
+            # Accumulate metadata for downstream services
+            resolved_metadata.update(handle.metadata)
+
         return handles
 
     def _start_fragment(self, fragment: LocalFragment) -> ServiceHandle:

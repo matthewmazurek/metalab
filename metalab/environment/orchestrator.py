@@ -359,17 +359,28 @@ class ServiceOrchestrator:
             pg_config["file_root"] = self.config.file_root
             specs.append(ServiceSpec(name="postgres", config=pg_config))
 
-        # Atlas (if configured, or whenever file_root exists)
-        wants_atlas = self.config.has_service("atlas") or self.config.file_root
+        # Atlas requires Postgres — only add if Postgres is also configured
+        has_postgres = self.config.has_service("postgres")
+        wants_atlas = self.config.has_service("atlas") or (
+            self.config.file_root and has_postgres
+        )
         if wants_atlas:
+            if not has_postgres:
+                logger.warning(
+                    "Atlas requires a PostgreSQL backend. "
+                    "Add a [services.postgres] section to your config."
+                )
             atlas_config: dict[str, Any] = {}
             if self.config.has_service("atlas"):
                 atlas_config = dict(self.config.get_service("atlas"))
             atlas_config["file_root"] = self.config.file_root
-            # Store will be set from bundle.store_locator after handles
-            # are built; pass file_root as default.
-            atlas_config.setdefault("store", self.config.file_root or "")
-            specs.append(ServiceSpec(name="atlas", config=atlas_config))
+            # store_locator is injected at runtime from the Postgres handle
+            # via consumes (Local) or METALAB_STORE_LOCATOR (SLURM).
+            specs.append(ServiceSpec(
+                name="atlas",
+                config=atlas_config,
+                consumes=["store_locator"],
+            ))
 
         return specs
 

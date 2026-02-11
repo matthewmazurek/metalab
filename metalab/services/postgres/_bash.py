@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote_plus
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class PgBashParams:
     data_dir: Path
     service_dir: Path
     service_file: Path
+    file_root: str = ""
     max_connections: int = 200
 
     @property
@@ -143,6 +145,9 @@ EOF
 chmod 600 "{p.service_file}"
 
 echo "PostgreSQL ready on $HOSTNAME:{p.port}"
+
+# Export store locator for downstream services (e.g. atlas)
+export METALAB_STORE_LOCATOR="postgresql://{p.auth_prefix}@$HOSTNAME:{p.port}/{p.database}?file_root={quote_plus(str(p.file_root))}"
 """
 
 

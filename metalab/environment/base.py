@@ -49,11 +49,16 @@ class ServiceSpec:
         name: Service type identifier (e.g., "postgres", "atlas").
         config: Service-specific configuration (ports, passwords, etc.).
         resources: Resource requirements (memory, cpus, gpus, etc.).
+        consumes: Metadata keys this service wants from earlier services'
+            handles.  When an environment starts services sequentially,
+            it can inject matching metadata values into ``config`` before
+            planning this service.
     """
 
     name: str
     config: dict[str, Any] = field(default_factory=dict)
     resources: dict[str, Any] = field(default_factory=dict)
+    consumes: list[str] = field(default_factory=list)
 
 
 @dataclass

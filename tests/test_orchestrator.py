@@ -202,12 +202,11 @@ class TestBuildServiceSpecs:
         assert atlas.config["port"] == 8000
 
     def test_no_services_configured(self, resolved_config_no_services):
-        """No services configured but file_root exists -> atlas only."""
+        """No services configured -> empty specs (Atlas requires Postgres)."""
         orch = ServiceOrchestrator(resolved_config_no_services)
         specs = orch._build_service_specs()
-        # Atlas is still created because file_root exists
-        assert len(specs) == 1
-        assert specs[0].name == "atlas"
+        # Atlas requires Postgres, so no specs without it
+        assert len(specs) == 0
 
     def test_no_services_no_file_root(self):
         """No services and no file_root -> empty specs."""
@@ -237,6 +236,37 @@ class TestBuildServiceSpecs:
         specs = orch._build_service_specs()
         assert len(specs) == 1
         assert specs[0].name == "postgres"
+
+    def test_atlas_consumes_store_locator(self, resolved_config):
+        """Atlas spec declares it consumes store_locator from prior services."""
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        atlas = specs[1]
+        assert "store_locator" in atlas.consumes
+
+    def test_postgres_does_not_consume(self, resolved_config):
+        """Postgres has no upstream dependencies — consumes is empty."""
+        orch = ServiceOrchestrator(resolved_config)
+        specs = orch._build_service_specs()
+        pg = specs[0]
+        assert pg.consumes == []
+
+    def test_atlas_without_postgres_not_created(self):
+        """Atlas-only (no postgres) is not created since Atlas requires PG."""
+        config = ResolvedConfig(
+            project=ProjectInfo(name="test"),
+            env_name="local",
+            env_type="local",
+            env_config={},
+            services={"atlas": {"port": 8000}},
+            file_root="/tmp/test-root",
+        )
+        orch = ServiceOrchestrator(config)
+        specs = orch._build_service_specs()
+        # Atlas still created (explicitly configured), but with a warning
+        assert len(specs) == 1
+        assert specs[0].name == "atlas"
+        assert specs[0].consumes == ["store_locator"]
 
 
 # ---------------------------------------------------------------------------

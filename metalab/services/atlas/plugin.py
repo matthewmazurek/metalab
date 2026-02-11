@@ -2,13 +2,19 @@
 AtlasPlugin: Class-based service plugin for the Atlas dashboard.
 
 Provides SLURM and local providers for the Atlas uvicorn-based dashboard.
+
+Atlas requires a PostgreSQL backend. The store_locator (a postgresql:// URL)
+is provided by the Postgres service via the `consumes` mechanism.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from metalab.services.base import ServicePlugin
+
+logger = logging.getLogger(__name__)
 
 
 class AtlasPlugin(ServicePlugin):
@@ -33,6 +39,11 @@ class AtlasPlugin(ServicePlugin):
         ``gateway`` configured, the resulting handle's
         ``metadata["tunnel_target"]`` is set so the orchestrator can open
         a tunnel.
+
+        If postgres is also running in the same SLURM job, its bash
+        fragment will have exported ``METALAB_STORE_LOCATOR`` before
+        this fragment runs.  Atlas picks it up automatically, falling
+        back to the static ``store`` config value.
         """
         from metalab.environment.base import ReadinessCheck, ServiceHandle
         from metalab.environment.slurm import SlurmFragment
@@ -44,7 +55,7 @@ class AtlasPlugin(ServicePlugin):
 
         setup_bash = f"""
 echo "Starting Atlas on $HOSTNAME:{port}"
-export ATLAS_STORE_PATH="{store}"
+export ATLAS_STORE_PATH="${{METALAB_STORE_LOCATOR:-{store}}}"
 export ATLAS_FILE_ROOT="{file_root}"
 mkdir -p "{svc_dir}"
 
@@ -100,14 +111,27 @@ echo "Atlas PID: $ATLAS_PID"
 
         Builds the uvicorn command and environment variables.  No tunnel
         target metadata is set for local environments (no gateway).
+
+        If ``store_locator`` is present in the spec config (injected by
+        :class:`LocalEnvironment` from an earlier service's handle
+        metadata), it takes precedence over the static ``store`` value.
         """
         from metalab.environment.base import ReadinessCheck, ServiceHandle
         from metalab.environment.local import LocalFragment
 
         port = spec.config.get("port", 8000)
-        store = spec.config.get("store", "")
+        store = spec.config.get("store_locator") or spec.config.get("store", "")
         file_root = spec.config.get("file_root") or env_config.get("file_root", "")
         host = spec.config.get("host", "127.0.0.1")
+
+        if not store or not (
+            store.startswith("postgresql://") or store.startswith("postgres://")
+        ):
+            logger.warning(
+                "Atlas requires a PostgreSQL store_locator. "
+                "Ensure Postgres is configured and started before Atlas. "
+                f"Current store value: {store!r}"
+            )
 
         cmd = [
             "python", "-m", "uvicorn", "atlas.main:app",
