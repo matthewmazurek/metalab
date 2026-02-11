@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 from metalab.store.config import StoreConfig
 from metalab.store.file import FileStore, FileStoreConfig
-from metalab.store.layout import safe_experiment_id
+
 from metalab.store.postgres_index import PostgresIndex
 from metalab.types import ArtifactDescriptor, Metric, RunRecord
 
@@ -217,13 +217,13 @@ class PostgresStore:
         """
         self._config = config
 
-        # Compute effective file root (with experiment subdirectory if provided)
-        effective_root = Path(config.file_root)
-        if config.experiment_id:
-            effective_root = effective_root / safe_experiment_id(config.experiment_id)
-
         # Create FileStore (source of truth) via its config
-        file_config = FileStoreConfig(root=str(effective_root))
+        # Pass experiment_id through so FileStore computes the effective root
+        # and writes experiment_id into _meta.json for collection discovery.
+        file_config = FileStoreConfig(
+            root=config.file_root,
+            experiment_id=config.experiment_id,
+        )
         self._files = file_config.connect()
 
         # Create PostgresIndex (query acceleration)
@@ -238,7 +238,7 @@ class PostgresStore:
 
         logger.info(
             f"PostgresStore initialized: index at {self._sanitize_connection_string(config.connection_string)}, "
-            f"files at {effective_root}"
+            f"files at {self._files.root}"
         )
 
     @property
