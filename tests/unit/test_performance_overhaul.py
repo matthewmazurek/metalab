@@ -57,13 +57,16 @@ def _make_test_record(
 class TestBatchIndexRecords:
     """Tests for batch_index_records and batch_index_derived."""
 
-    def test_batch_index_records_calls_executemany(self):
-        """batch_index_records uses executemany in a single transaction."""
+    def test_batch_index_records_uses_copy(self):
+        """batch_index_records uses COPY + temp table in a single transaction."""
         from metalab.store.postgres_index import PostgresIndex
 
         mock_pool = MagicMock()
         mock_conn = MagicMock()
         mock_cur = MagicMock()
+        mock_copy_ctx = MagicMock()
+        mock_cur.copy.return_value.__enter__ = MagicMock(return_value=mock_copy_ctx)
+        mock_cur.copy.return_value.__exit__ = MagicMock(return_value=False)
         mock_pool.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_pool.connection.return_value.__exit__ = MagicMock(return_value=False)
         mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
@@ -84,8 +87,11 @@ class TestBatchIndexRecords:
 
             index.batch_index_records(records)
 
-            # Should call executemany once for the batch
-            assert mock_cur.executemany.call_count == 1
+            # Should use COPY for bulk loading
+            mock_cur.copy.assert_called_once()
+
+            # Should write one row per record
+            assert mock_copy_ctx.write_row.call_count == 3
 
             # Should commit once
             mock_conn.commit.assert_called_once()
@@ -106,13 +112,16 @@ class TestBatchIndexRecords:
             # Should not attempt to get a connection
             mock_pool.connection.assert_not_called()
 
-    def test_batch_index_derived_calls_executemany(self):
-        """batch_index_derived uses executemany in a single transaction."""
+    def test_batch_index_derived_uses_copy(self):
+        """batch_index_derived uses COPY + temp table in a single transaction."""
         from metalab.store.postgres_index import PostgresIndex
 
         mock_pool = MagicMock()
         mock_conn = MagicMock()
         mock_cur = MagicMock()
+        mock_copy_ctx = MagicMock()
+        mock_cur.copy.return_value.__enter__ = MagicMock(return_value=mock_copy_ctx)
+        mock_cur.copy.return_value.__exit__ = MagicMock(return_value=False)
         mock_pool.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_pool.connection.return_value.__exit__ = MagicMock(return_value=False)
         mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
@@ -132,8 +141,12 @@ class TestBatchIndexRecords:
 
             index.batch_index_derived(pairs)
 
-            # Should call executemany once
-            assert mock_cur.executemany.call_count == 1
+            # Should use COPY for bulk loading
+            mock_cur.copy.assert_called_once()
+
+            # Should write one row per pair
+            assert mock_copy_ctx.write_row.call_count == 2
+
             mock_conn.commit.assert_called_once()
 
     def test_batch_index_derived_empty_is_noop(self):

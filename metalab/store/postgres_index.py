@@ -478,8 +478,8 @@ class PostgresIndex:
         """
         Index multiple records in a single transaction.
 
-        Uses executemany for efficient pipelining. Also updates
-        the field_catalog incrementally for all records.
+        Uses COPY to a temp table then INSERT...ON CONFLICT for fast bulk
+        upserts (~100x faster than executemany for large record sets).
 
         Args:
             records: List of RunRecords to index.
@@ -493,24 +493,21 @@ class PostgresIndex:
 
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.executemany(
-                    f"""
-                    INSERT INTO {self._table('runs')} (
-                        run_id, experiment_id, status,
-                        context_fingerprint, params_fingerprint, seed_fingerprint,
-                        started_at, finished_at, duration_ms, record_json
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    )
-                    ON CONFLICT (run_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        finished_at = EXCLUDED.finished_at,
-                        duration_ms = EXCLUDED.duration_ms,
-                        record_json = EXCLUDED.record_json,
-                        updated_at = NOW()
-                    """,
-                    [
-                        (
+                # Create temp table matching the runs schema
+                cur.execute(f"""
+                    CREATE TEMP TABLE _bulk_runs (LIKE {self._table('runs')} INCLUDING DEFAULTS)
+                    ON COMMIT DROP
+                """)
+
+                # COPY data into temp table (binary protocol, much faster)
+                with cur.copy(
+                    "COPY _bulk_runs (run_id, experiment_id, status,"
+                    " context_fingerprint, params_fingerprint, seed_fingerprint,"
+                    " started_at, finished_at, duration_ms, record_json)"
+                    " FROM STDIN"
+                ) as copy:
+                    for r, data in zip(records, all_data):
+                        copy.write_row((
                             r.run_id,
                             r.experiment_id,
                             r.status.value,
@@ -521,14 +518,26 @@ class PostgresIndex:
                             _coerce_naive_local_to_utc(r.finished_at),
                             r.duration_ms,
                             json.dumps(data),
-                        )
-                        for r, data in zip(records, all_data)
-                    ],
-                )
+                        ))
 
-                # Update field catalog for all records
-                for data in all_data:
-                    self._update_catalog_for_record(cur, data)
+                # Upsert from temp table in one statement
+                cur.execute(f"""
+                    INSERT INTO {self._table('runs')} (
+                        run_id, experiment_id, status,
+                        context_fingerprint, params_fingerprint, seed_fingerprint,
+                        started_at, finished_at, duration_ms, record_json
+                    )
+                    SELECT run_id, experiment_id, status,
+                           context_fingerprint, params_fingerprint, seed_fingerprint,
+                           started_at, finished_at, duration_ms, record_json
+                    FROM _bulk_runs
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        finished_at = EXCLUDED.finished_at,
+                        duration_ms = EXCLUDED.duration_ms,
+                        record_json = EXCLUDED.record_json,
+                        updated_at = NOW()
+                """)
 
                 conn.commit()
                 logger.debug(f"Batch indexed {len(records)} records")
@@ -536,6 +545,9 @@ class PostgresIndex:
     def batch_index_derived(self, pairs: list[tuple[str, dict[str, Any]]]) -> None:
         """
         Index derived metrics for multiple runs in a single transaction.
+
+        Uses COPY to a temp table then INSERT...ON CONFLICT for fast bulk
+        upserts.
 
         Args:
             pairs: List of (run_id, derived_dict) tuples.
@@ -545,16 +557,25 @@ class PostgresIndex:
 
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.executemany(
-                    f"""
+                cur.execute(f"""
+                    CREATE TEMP TABLE _bulk_derived (LIKE {self._table('derived')} INCLUDING DEFAULTS)
+                    ON COMMIT DROP
+                """)
+
+                with cur.copy(
+                    "COPY _bulk_derived (run_id, derived_json) FROM STDIN"
+                ) as copy:
+                    for run_id, derived in pairs:
+                        copy.write_row((run_id, json.dumps(derived)))
+
+                cur.execute(f"""
                     INSERT INTO {self._table('derived')} (run_id, derived_json)
-                    VALUES (%s, %s)
+                    SELECT run_id, derived_json FROM _bulk_derived
                     ON CONFLICT (run_id) DO UPDATE SET
                         derived_json = EXCLUDED.derived_json,
                         updated_at = NOW()
-                    """,
-                    [(run_id, json.dumps(derived)) for run_id, derived in pairs],
-                )
+                """)
+
                 conn.commit()
                 logger.debug(f"Batch indexed {len(pairs)} derived records")
 

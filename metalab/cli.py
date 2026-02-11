@@ -630,7 +630,13 @@ def handle_services(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+            import logging as _logging
+
+            from rich.console import Console
+            from rich.logging import RichHandler
             from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
+            console = Console(stderr=True)
 
             print("Rebuilding Postgres index from FileStore...")
             with Progress(
@@ -638,14 +644,29 @@ def handle_services(args: argparse.Namespace) -> int:
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
                 TaskProgressColumn(),
+                console=console,
                 transient=True,
             ) as prog:
-                task_id = prog.add_task("Starting...", total=None)
+                # Route logging through Rich so it doesn't collide
+                # with the progress bar
+                rich_handler = RichHandler(
+                    console=console,
+                    show_path=False,
+                    show_time=False,
+                )
+                root_logger = _logging.getLogger("metalab")
+                original_handlers = root_logger.handlers[:]
+                root_logger.handlers = [rich_handler]
 
-                def _on_progress(phase: str, completed: int, total: int) -> None:
-                    prog.update(task_id, description=phase, completed=completed, total=total)
+                try:
+                    task_id = prog.add_task("Starting...", total=None)
 
-                count = store.rebuild_index(progress=_on_progress)
+                    def _on_progress(phase: str, completed: int, total: int) -> None:
+                        prog.update(task_id, description=phase, completed=completed, total=total)
+
+                    count = store.rebuild_index(progress=_on_progress)
+                finally:
+                    root_logger.handlers = original_handlers
 
             print(f"Done. Indexed {count} records.")
             return 0

@@ -556,30 +556,43 @@ class PostgresStore:
             _tick("Scanning experiments", n_exps, n_exps)
 
         # ------------------------------------------------------------------
-        # Phase 2: clear and write index
+        # Phase 2: clear old index
         # ------------------------------------------------------------------
-        _tick("Writing index", 0, 3)
+        _tick("Clearing index", 0, 1)
         self._index.clear()
+        _tick("Clearing index", 1, 1)
 
+        # ------------------------------------------------------------------
+        # Phase 3: bulk-insert run records (COPY)
+        # ------------------------------------------------------------------
+        n_total = len(all_records)
+        _tick(f"Indexing {n_total:,} records", 0, 1)
         self._index.batch_index_records(all_records)
-        _tick("Writing index", 1, 3)
+        _tick(f"Indexing {n_total:,} records", 1, 1)
 
-        # Collect and batch index derived metrics
+        # ------------------------------------------------------------------
+        # Phase 4: collect and bulk-insert derived metrics
+        # ------------------------------------------------------------------
         derived_pairs = []
         n_records = len(record_stores)
         for i, (record, store) in enumerate(record_stores):
-            if i % 50 == 0:
+            if i % 200 == 0:
                 _tick("Collecting derived metrics", i, n_records)
             derived = store.get_derived(record.run_id)
             if derived:
                 derived_pairs.append((record.run_id, derived))
         _tick("Collecting derived metrics", n_records, n_records)
 
+        _tick(f"Indexing {len(derived_pairs):,} derived", 0, 1)
         self._index.batch_index_derived(derived_pairs)
-        _tick("Writing index", 2, 3)
+        _tick(f"Indexing {len(derived_pairs):,} derived", 1, 1)
 
+        # ------------------------------------------------------------------
+        # Phase 5: rebuild field catalog
+        # ------------------------------------------------------------------
+        _tick("Rebuilding field catalog", 0, 1)
         self._index.update_field_catalog(all_records)
-        _tick("Writing index", 3, 3)
+        _tick("Rebuilding field catalog", 1, 1)
 
         logger.info(f"Indexed {len(all_records)} records from files")
         return len(all_records)
