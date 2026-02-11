@@ -630,8 +630,23 @@ def handle_services(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
             print("Rebuilding Postgres index from FileStore...")
-            count = store.rebuild_index()
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                transient=True,
+            ) as prog:
+                task_id = prog.add_task("Starting...", total=None)
+
+                def _on_progress(phase: str, completed: int, total: int) -> None:
+                    prog.update(task_id, description=phase, completed=completed, total=total)
+
+                count = store.rebuild_index(progress=_on_progress)
+
             print(f"Done. Indexed {count} records.")
             return 0
         except Exception as e:

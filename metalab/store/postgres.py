@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 if TYPE_CHECKING:
     from typing import BinaryIO
@@ -495,43 +495,94 @@ class PostgresStore:
     # Index management
     # =========================================================================
 
-    def rebuild_index(self) -> int:
+    def rebuild_index(
+        self,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> int:
         """
         Rebuild the Postgres index from FileStore.
 
         Uses batch operations for efficiency — a single transaction for
         all records instead of per-record commits.
 
+        When the store is unscoped (no experiment_id), discovers all experiment
+        subdirectories via _meta.json and indexes records from each one.
+
         Call this if:
         - Postgres was wiped/reset
         - Connecting to a fresh database
         - Index got out of sync
+
+        Args:
+            progress: Optional callback ``(phase, completed, total)`` invoked
+                as work proceeds. *phase* is a short label (e.g.
+                ``"Scanning experiments"``, ``"Indexing derived"``).
 
         Returns:
             Number of records indexed.
         """
         logger.info("Rebuilding Postgres index from files...")
 
-        # Clear existing index
+        def _tick(phase: str, completed: int, total: int) -> None:
+            if progress is not None:
+                progress(phase, completed, total)
+
+        # ------------------------------------------------------------------
+        # Phase 1: discover and load run records from files
+        # ------------------------------------------------------------------
+        all_records: list[RunRecord] = []
+        record_stores: list[tuple[RunRecord, FileStore]] = []
+
+        if self._config.experiment_id:
+            _tick("Scanning experiments", 0, 1)
+            records = self._files.list_run_records()
+            all_records.extend(records)
+            record_stores.extend((r, self._files) for r in records)
+            _tick("Scanning experiments", 1, 1)
+        else:
+            base_config = FileStoreConfig(root=self._config.file_root)
+            experiment_ids = base_config.list_experiments()
+            n_exps = len(experiment_ids)
+            logger.info(
+                f"Discovered {n_exps} experiments in {self._config.file_root}"
+            )
+
+            for i, exp_id in enumerate(experiment_ids):
+                _tick("Scanning experiments", i, n_exps)
+                scoped_store = base_config.for_experiment(exp_id).connect()
+                records = scoped_store.list_run_records()
+                all_records.extend(records)
+                record_stores.extend((r, scoped_store) for r in records)
+            _tick("Scanning experiments", n_exps, n_exps)
+
+        # ------------------------------------------------------------------
+        # Phase 2: clear and write index
+        # ------------------------------------------------------------------
+        _tick("Writing index", 0, 3)
         self._index.clear()
 
-        # Index all run records in one batch transaction
-        records = self._files.list_run_records()
-        self._index.batch_index_records(records)
+        self._index.batch_index_records(all_records)
+        _tick("Writing index", 1, 3)
 
         # Collect and batch index derived metrics
         derived_pairs = []
-        for record in records:
-            derived = self._files.get_derived(record.run_id)
+        n_records = len(record_stores)
+        for i, (record, store) in enumerate(record_stores):
+            if i % 50 == 0:
+                _tick("Collecting derived metrics", i, n_records)
+            derived = store.get_derived(record.run_id)
             if derived:
                 derived_pairs.append((record.run_id, derived))
+        _tick("Collecting derived metrics", n_records, n_records)
+
         self._index.batch_index_derived(derived_pairs)
+        _tick("Writing index", 2, 3)
 
-        # Update field catalog (already batched internally)
-        self._index.update_field_catalog(records)
+        self._index.update_field_catalog(all_records)
+        _tick("Writing index", 3, 3)
 
-        logger.info(f"Indexed {len(records)} records from files")
-        return len(records)
+        logger.info(f"Indexed {len(all_records)} records from files")
+        return len(all_records)
 
     @classmethod
     def from_filestore(
