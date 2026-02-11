@@ -28,6 +28,11 @@ Backends (execution + storage) are pluggable. Domain logic stays in user Operati
 - Branches: feat/*, fix/*, chore/*
 - Commits: imperative, scoped when helpful
 - PRs must include tests for new behavior and doc updates for API changes
+- **Pushing/pulling**: Always use `required_permissions: ["all"]` for git push,
+  pull, and fetch. The `gh` credential helper stores tokens in the macOS Keyring,
+  which requires full system access (not just network).
+- **Submodules**: `atlas/` is a git submodule. Commit and push inside the
+  submodule first, then commit and push the parent repo.
 
 ## Contracts
 - Operation.run(context, params, seeds, runtime, capture) -> RunRecord
