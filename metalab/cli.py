@@ -632,11 +632,12 @@ def handle_services(args: argparse.Namespace) -> int:
 
             import logging as _logging
 
-            from rich.console import Console
-            from rich.logging import RichHandler
             from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-            console = Console(stderr=True)
+            # Suppress log output during progress — the progress bar
+            # already communicates the same information.
+            metalab_logger = _logging.getLogger("metalab")
+            prev_level = metalab_logger.level
 
             print("Rebuilding Postgres index from FileStore...")
             with Progress(
@@ -644,19 +645,9 @@ def handle_services(args: argparse.Namespace) -> int:
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
                 TaskProgressColumn(),
-                console=console,
                 transient=True,
             ) as prog:
-                # Route logging through Rich so it doesn't collide
-                # with the progress bar
-                rich_handler = RichHandler(
-                    console=console,
-                    show_path=False,
-                    show_time=False,
-                )
-                root_logger = _logging.getLogger("metalab")
-                original_handlers = root_logger.handlers[:]
-                root_logger.handlers = [rich_handler]
+                metalab_logger.setLevel(_logging.WARNING)
 
                 try:
                     task_id = prog.add_task("Starting...", total=None)
@@ -666,7 +657,7 @@ def handle_services(args: argparse.Namespace) -> int:
 
                     count = store.rebuild_index(progress=_on_progress)
                 finally:
-                    root_logger.handlers = original_handlers
+                    metalab_logger.setLevel(prev_level)
 
             print(f"Done. Indexed {count} records.")
             return 0
