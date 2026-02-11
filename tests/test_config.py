@@ -212,6 +212,17 @@ class TestLocalOverrides:
         resolved = config.resolve("local")
         assert resolved.project.name == "overridden-name"
 
+    def test_local_default_env_override_used_when_resolving_without_env(self):
+        """resolve() with no env uses merged default_env including local overrides."""
+        # Base has default_env="slurm"; local overrides to "local"
+        base = {**SAMPLE_CONFIG, "project": {"name": "test", "default_env": "slurm"}}
+        local = {"project": {"default_env": "local"}}
+        config = ProjectConfig.from_dict(base, local_overrides=local)
+        resolved = config.resolve()  # no env specified
+        # Should use "local" from .metalab.local.toml, not "slurm" from base
+        assert resolved.env_name == "local"
+        assert resolved.file_root == "./runs"
+
     def test_local_override_nested_services_resources(self):
         local = {
             "environments": {

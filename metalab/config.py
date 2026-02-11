@@ -339,7 +339,8 @@ class ProjectConfig:
         2. Named environment profile
         3. Local overrides for that environment (and services)
 
-        If *env_name* is ``None``, uses ``project.default_env``.
+        If *env_name* is ``None``, uses ``project.default_env`` (including
+        local overrides from ``.metalab.local.toml``).
 
         Args:
             env_name: Environment profile name, or ``None`` for default.
@@ -351,8 +352,14 @@ class ProjectConfig:
             ValueError: If no environment name can be determined, or the
                 requested environment does not exist.
         """
-        # Determine which environment to resolve
-        env_name = env_name or self.project.default_env
+        # Determine which environment to resolve.
+        # Use merged project.default_env (base + local overrides) so that
+        # .metalab.local.toml can override default_env for local development.
+        local_project = self._local_overrides.get("project", {})
+        effective_default_env = local_project.get(
+            "default_env", self.project.default_env
+        )
+        env_name = env_name or effective_default_env
         if env_name is None:
             available = ", ".join(sorted(self.environments)) or "(none)"
             raise ValueError(
