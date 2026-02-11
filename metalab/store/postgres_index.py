@@ -259,6 +259,12 @@ class PostgresIndex:
                     ON {self._table('runs')} (experiment_id, started_at DESC)
                 """
                 )
+                cur.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS idx_runs_experiment_status 
+                    ON {self._table('runs')} (experiment_id, status)
+                """
+                )
 
                 # Create derived metrics table
                 cur.execute(
