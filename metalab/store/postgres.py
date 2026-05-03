@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 from metalab.store.config import StoreConfig
 from metalab.store.file import FileStore, FileStoreConfig
-
+from metalab.store.layout import safe_experiment_id
 from metalab.store.postgres_index import PostgresIndex
 from metalab.types import ArtifactDescriptor, Metric, RunRecord
 
@@ -185,7 +185,6 @@ class PostgresStoreConfig(StoreConfig):
             A new PostgresStoreConfig scoped to the experiment.
         """
         return self.scoped(experiment_id)
-
 
 
 class PostgresStore:
@@ -543,9 +542,7 @@ class PostgresStore:
             base_config = FileStoreConfig(root=self._config.file_root)
             experiment_ids = base_config.list_experiments()
             n_exps = len(experiment_ids)
-            logger.info(
-                f"Discovered {n_exps} experiments in {self._config.file_root}"
-            )
+            logger.info(f"Discovered {n_exps} experiments in {self._config.file_root}")
 
             for i, exp_id in enumerate(experiment_ids):
                 _tick("Scanning experiments", i, n_exps)
@@ -588,10 +585,56 @@ class PostgresStore:
         _tick(f"Indexing {len(derived_pairs):,} derived", 1, 1)
 
         # ------------------------------------------------------------------
-        # Phase 5: rebuild field catalog
+        # Phase 5: re-index experiment manifests from files
+        # ------------------------------------------------------------------
+        manifest_pairs: list[tuple[str, str, dict]] = []  # (exp_id, ts, data)
+
+        if self._config.experiment_id:
+            exp_dir = self._files.layout.experiments_dir_path()
+            if exp_dir.exists():
+                safe_id = safe_experiment_id(self._config.experiment_id)
+                for path in sorted(exp_dir.glob(f"{safe_id}_*.json")):
+                    try:
+                        import json as _json
+
+                        data = _json.loads(path.read_text(encoding="utf-8"))
+                        # Extract timestamp from filename: {safe_id}_{timestamp}.json
+                        stem = path.stem  # e.g. "my_exp_1.0_20240101_120000"
+                        ts = stem[len(safe_id) + 1 :]  # strip safe_id + underscore
+                        manifest_pairs.append((self._config.experiment_id, ts, data))
+                    except Exception as e:
+                        logger.warning(f"Failed to load manifest {path}: {e}")
+        else:
+            for i, exp_id in enumerate(experiment_ids):
+                scoped_store = base_config.for_experiment(exp_id).connect()
+                exp_dir = scoped_store.layout.experiments_dir_path()
+                if not exp_dir.exists():
+                    continue
+                safe_id = safe_experiment_id(exp_id)
+                for path in sorted(exp_dir.glob(f"{safe_id}_*.json")):
+                    try:
+                        import json as _json
+
+                        data = _json.loads(path.read_text(encoding="utf-8"))
+                        stem = path.stem
+                        ts = stem[len(safe_id) + 1 :]
+                        manifest_pairs.append((exp_id, ts, data))
+                    except Exception as e:
+                        logger.warning(f"Failed to load manifest {path}: {e}")
+
+        n_manifests = len(manifest_pairs)
+        _tick(f"Indexing {n_manifests:,} manifests", 0, n_manifests or 1)
+        for i, (exp_id, ts, manifest_data) in enumerate(manifest_pairs):
+            self._index.index_manifest(exp_id, manifest_data, ts)
+            if i % 50 == 0:
+                _tick(f"Indexing {n_manifests:,} manifests", i, n_manifests)
+        _tick(f"Indexing {n_manifests:,} manifests", n_manifests, n_manifests)
+
+        # ------------------------------------------------------------------
+        # Phase 6: rebuild field catalog (includes derived fields)
         # ------------------------------------------------------------------
         _tick("Rebuilding field catalog", 0, 1)
-        self._index.update_field_catalog(all_records)
+        self._index.update_field_catalog(all_records, derived_pairs)
         _tick("Rebuilding field catalog", 1, 1)
 
         logger.info(f"Indexed {len(all_records)} records from files")

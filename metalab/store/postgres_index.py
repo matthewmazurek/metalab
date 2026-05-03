@@ -211,12 +211,12 @@ class PostgresIndex:
         This is idempotent—all statements use IF NOT EXISTS / ON CONFLICT.
         """
         with conn.cursor() as cur:
-                # Create schema
-                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
+            # Create schema
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
 
-                # Create runs table
-                cur.execute(
-                    f"""
+            # Create runs table
+            cur.execute(
+                f"""
                     CREATE TABLE IF NOT EXISTS {self._table('runs')} (
                         run_id TEXT PRIMARY KEY,
                         experiment_id TEXT NOT NULL,
@@ -232,43 +232,43 @@ class PostgresIndex:
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """
-                )
+            )
 
-                # Create indexes for runs
-                cur.execute(
-                    f"""
+            # Create indexes for runs
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_runs_experiment_id 
                     ON {self._table('runs')} (experiment_id)
                 """
-                )
-                cur.execute(
-                    f"""
+            )
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_runs_status 
                     ON {self._table('runs')} (status)
                 """
-                )
-                cur.execute(
-                    f"""
+            )
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_runs_started_at 
                     ON {self._table('runs')} (started_at DESC)
                 """
-                )
-                cur.execute(
-                    f"""
+            )
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_runs_experiment_started 
                     ON {self._table('runs')} (experiment_id, started_at DESC)
                 """
-                )
-                cur.execute(
-                    f"""
+            )
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_runs_experiment_status 
                     ON {self._table('runs')} (experiment_id, status)
                 """
-                )
+            )
 
-                # Create derived metrics table
-                cur.execute(
-                    f"""
+            # Create derived metrics table
+            cur.execute(
+                f"""
                     CREATE TABLE IF NOT EXISTS {self._table('derived')} (
                         run_id TEXT PRIMARY KEY,
                         derived_json JSONB NOT NULL,
@@ -276,11 +276,11 @@ class PostgresIndex:
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """
-                )
+            )
 
-                # Create experiment_manifests table
-                cur.execute(
-                    f"""
+            # Create experiment_manifests table
+            cur.execute(
+                f"""
                     CREATE TABLE IF NOT EXISTS {self._table('experiment_manifests')} (
                         id SERIAL PRIMARY KEY,
                         experiment_id TEXT NOT NULL,
@@ -292,17 +292,17 @@ class PostgresIndex:
                         UNIQUE (experiment_id, timestamp)
                     )
                 """
-                )
-                cur.execute(
-                    f"""
+            )
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_manifests_experiment_id 
                     ON {self._table('experiment_manifests')} (experiment_id, submitted_at DESC)
                 """
-                )
+            )
 
-                # Create field_catalog table (for Atlas)
-                cur.execute(
-                    f"""
+            # Create field_catalog table (for Atlas)
+            cur.execute(
+                f"""
                     CREATE TABLE IF NOT EXISTS {self._table('field_catalog')} (
                         namespace TEXT NOT NULL,
                         field_name TEXT NOT NULL,
@@ -315,65 +315,70 @@ class PostgresIndex:
                         PRIMARY KEY (namespace, field_name)
                     )
                 """
-                )
+            )
 
-                # Create meta table
-                cur.execute(
-                    f"""
+            # Create meta table
+            cur.execute(
+                f"""
                     CREATE TABLE IF NOT EXISTS {self._table('meta')} (
                         key TEXT PRIMARY KEY,
                         value JSONB NOT NULL,
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """
-                )
+            )
 
-                # ---- v3 indexes: GIN on JSONB + trigram for ILIKE ----
+            # ---- v3 indexes: GIN on JSONB + trigram for ILIKE ----
 
-                # GIN index on record_json for containment (@>) and
-                # JSONB path queries. More future-proof than individual
-                # expression indexes since param/metric keys are dynamic.
-                cur.execute(
-                    f"""
+            # GIN index on record_json for containment (@>) and
+            # JSONB path queries. More future-proof than individual
+            # expression indexes since param/metric keys are dynamic.
+            cur.execute(
+                f"""
                     CREATE INDEX IF NOT EXISTS idx_runs_record_gin
                     ON {self._table('runs')} USING GIN (record_json)
                 """
-                )
+            )
 
-                # Trigram indexes for efficient ILIKE '%query%' searches.
-                # Requires pg_trgm extension. Safe to attempt — if it fails
-                # (e.g. no superuser), we skip the trigram indexes and log.
-                try:
-                    cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-                    conn.commit()  # extensions need their own commit
+            # Trigram indexes for efficient ILIKE '%query%' searches.
+            # Requires pg_trgm extension. Safe to attempt — if it fails
+            # (e.g. no superuser), we skip the trigram indexes and log.
+            try:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+                conn.commit()  # extensions need their own commit
 
-                    for col in ("run_id", "seed_fingerprint", "params_fingerprint", "context_fingerprint"):
-                        cur.execute(
-                            f"""
+                for col in (
+                    "run_id",
+                    "seed_fingerprint",
+                    "params_fingerprint",
+                    "context_fingerprint",
+                ):
+                    cur.execute(
+                        f"""
                             CREATE INDEX IF NOT EXISTS idx_runs_{col}_trgm
                             ON {self._table('runs')} USING GIN ({col} gin_trgm_ops)
                         """
-                        )
-                    logger.debug("pg_trgm extension and trigram indexes created")
-                except Exception as e:
-                    logger.warning(
-                        f"Could not create pg_trgm indexes (search may use seq scans): {e}"
                     )
-                    # Rollback the failed extension/index creation
-                    conn.rollback()
+                logger.debug("pg_trgm extension and trigram indexes created")
+            except Exception as e:
+                logger.warning(
+                    f"Could not create pg_trgm indexes (search may use seq scans): {e}"
+                )
+                # Rollback the failed extension/index creation
+                conn.rollback()
 
-                # Set schema version
-                cur.execute(
-                    f"""
+            # Set schema version
+            cur.execute(
+                f"""
                     INSERT INTO {self._table('meta')} (key, value)
                     VALUES ('schema_version', %s)
                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
                 """,
-                    [json.dumps(SCHEMA_VERSION)],
-                )
+                [json.dumps(SCHEMA_VERSION)],
+            )
 
-                conn.commit()
-                logger.debug(f"Schema ensured for {self._schema}")
+            conn.commit()
+            logger.debug(f"Schema ensured for {self._schema}")
 
     # =========================================================================
     # Run record indexing
@@ -461,18 +466,30 @@ class PostgresIndex:
         # Process params
         for key, value in data.get("params_resolved", {}).items():
             ftype = self._infer_type(value)
-            min_val = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            min_val = (
+                value
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else None
+            )
             max_val = min_val
             values_arr = [str(value)] if isinstance(value, (str, bool)) else None
-            cur.execute(upsert_sql, ["params", key, ftype, values_arr, min_val, max_val])
+            cur.execute(
+                upsert_sql, ["params", key, ftype, values_arr, min_val, max_val]
+            )
 
         # Process metrics
         for key, value in data.get("metrics", {}).items():
             ftype = self._infer_type(value)
-            min_val = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            min_val = (
+                value
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else None
+            )
             max_val = min_val
             values_arr = [str(value)] if isinstance(value, (str, bool)) else None
-            cur.execute(upsert_sql, ["metrics", key, ftype, values_arr, min_val, max_val])
+            cur.execute(
+                upsert_sql, ["metrics", key, ftype, values_arr, min_val, max_val]
+            )
 
     def batch_index_records(self, records: list["RunRecord"]) -> None:
         """
@@ -494,10 +511,12 @@ class PostgresIndex:
         with self._conn() as conn:
             with conn.cursor() as cur:
                 # Create temp table matching the runs schema
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     CREATE TEMP TABLE _bulk_runs (LIKE {self._table('runs')} INCLUDING DEFAULTS)
                     ON COMMIT DROP
-                """)
+                """
+                )
 
                 # COPY data into temp table (binary protocol, much faster)
                 with cur.copy(
@@ -507,21 +526,24 @@ class PostgresIndex:
                     " FROM STDIN"
                 ) as copy:
                     for r, data in zip(records, all_data):
-                        copy.write_row((
-                            r.run_id,
-                            r.experiment_id,
-                            r.status.value,
-                            r.context_fingerprint,
-                            r.params_fingerprint,
-                            r.seed_fingerprint,
-                            _coerce_naive_local_to_utc(r.started_at),
-                            _coerce_naive_local_to_utc(r.finished_at),
-                            r.duration_ms,
-                            json.dumps(data),
-                        ))
+                        copy.write_row(
+                            (
+                                r.run_id,
+                                r.experiment_id,
+                                r.status.value,
+                                r.context_fingerprint,
+                                r.params_fingerprint,
+                                r.seed_fingerprint,
+                                _coerce_naive_local_to_utc(r.started_at),
+                                _coerce_naive_local_to_utc(r.finished_at),
+                                r.duration_ms,
+                                json.dumps(data),
+                            )
+                        )
 
                 # Upsert from temp table in one statement
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     INSERT INTO {self._table('runs')} (
                         run_id, experiment_id, status,
                         context_fingerprint, params_fingerprint, seed_fingerprint,
@@ -537,7 +559,8 @@ class PostgresIndex:
                         duration_ms = EXCLUDED.duration_ms,
                         record_json = EXCLUDED.record_json,
                         updated_at = NOW()
-                """)
+                """
+                )
 
                 conn.commit()
                 logger.debug(f"Batch indexed {len(records)} records")
@@ -557,10 +580,12 @@ class PostgresIndex:
 
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     CREATE TEMP TABLE _bulk_derived (LIKE {self._table('derived')} INCLUDING DEFAULTS)
                     ON COMMIT DROP
-                """)
+                """
+                )
 
                 with cur.copy(
                     "COPY _bulk_derived (run_id, derived_json) FROM STDIN"
@@ -568,13 +593,15 @@ class PostgresIndex:
                     for run_id, derived in pairs:
                         copy.write_row((run_id, json.dumps(derived)))
 
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     INSERT INTO {self._table('derived')} (run_id, derived_json)
                     SELECT run_id, derived_json FROM _bulk_derived
                     ON CONFLICT (run_id) DO UPDATE SET
                         derived_json = EXCLUDED.derived_json,
                         updated_at = NOW()
-                """)
+                """
+                )
 
                 conn.commit()
                 logger.debug(f"Batch indexed {len(pairs)} derived records")
@@ -796,12 +823,18 @@ class PostgresIndex:
     # Field catalog (for Atlas)
     # =========================================================================
 
-    def update_field_catalog(self, records: list["RunRecord"] | None = None) -> None:
+    def update_field_catalog(
+        self,
+        records: list["RunRecord"] | None = None,
+        derived_pairs: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> None:
         """
-        Update the field catalog from run records.
+        Update the field catalog from run records and derived metrics.
 
         Args:
             records: Records to process. If None, processes all indexed records.
+            derived_pairs: Optional list of (run_id, derived_dict) tuples.
+                          If provided, derived metrics are included in the catalog.
         """
         if records is None:
             records = self.list_records()
@@ -819,6 +852,12 @@ class PostgresIndex:
             # Process metrics
             for key, value in data.get("metrics", {}).items():
                 self._update_field_stats(stats, "metrics", key, value)
+
+        # Process derived metrics
+        if derived_pairs:
+            for _run_id, derived in derived_pairs:
+                for key, value in derived.items():
+                    self._update_field_stats(stats, "derived", key, value)
 
         # Upsert to field_catalog
         with self._conn() as conn:
