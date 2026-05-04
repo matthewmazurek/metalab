@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from metalab.store.events import iter_event_files
+from metalab.store.events import tail_event_rows
 from metalab.store.layout import LAYOUT_VERSION, FileStoreLayout
 
 KIND_TO_CODE = {
@@ -150,34 +150,21 @@ def read_status(
                 per_run[run_id] = decoded
 
     new_offsets = dict(offsets)
-    for path in iter_event_files(root):
-        key = str(path.relative_to(root))
-        offset = offsets.get(key, 0)
-        try:
-            with path.open("rb") as f:
-                f.seek(offset)
-                for raw in f:
-                    try:
-                        event = json.loads(raw.decode("utf-8"))
-                    except Exception:
-                        continue
-                    run_id = event.get("run_id")
-                    kind = event.get("kind")
-                    if run_id and kind in {
-                        "started",
-                        "finished",
-                        "failed",
-                        "skipped",
-                    }:
-                        timestamp = str(event.get("timestamp", ""))
-                        per_run[run_id] = _merge_run_state(
-                            per_run.get(run_id),
-                            kind=kind,
-                            timestamp=timestamp,
-                        )
-                new_offsets[key] = f.tell()
-        except FileNotFoundError:
-            continue
+    for event in tail_event_rows(root, new_offsets):
+        run_id = event.get("run_id")
+        kind = event.get("kind")
+        if run_id and kind in {
+            "started",
+            "finished",
+            "failed",
+            "skipped",
+        }:
+            timestamp = str(event.get("timestamp", ""))
+            per_run[run_id] = _merge_run_state(
+                per_run.get(run_id),
+                kind=kind,
+                timestamp=timestamp,
+            )
 
     if use_cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)

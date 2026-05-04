@@ -59,6 +59,7 @@ from metalab.executor import (
     Executor,
     LocalRunHandle,
     ProcessExecutor,
+    ReconnectableRunHandle,
     RunHandle,
     RunPayload,
     RunStatus,
@@ -195,6 +196,7 @@ __all__ = [
     "ProcessExecutor",
     "RunPayload",
     "RunHandle",
+    "ReconnectableRunHandle",
     "RunStatus",
     "LocalRunHandle",
     # SLURM (lazy-loaded)

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from metalab.events import EventCallback
     from metalab.executor.base import ExperimentPlan
     from metalab.experiment import Experiment
+    from metalab.result import IndexedResults
     from metalab.store.base import Store
 
 from metalab.store.capabilities import SupportsWorkingDirectory
@@ -1093,18 +1094,15 @@ class SlurmRunHandle:
         status = self.status
         return status.done == status.total
 
-    def result(self, timeout: float | None = None) -> Results:
+    def _await_completion(self, timeout: float | None = None) -> None:
         """
-        Block until all jobs complete and return Results.
+        Block until all jobs complete.
 
         Includes a settling loop to handle sacct accounting lag.
         Emits lifecycle callback events when polling detects new terminal states.
 
         Args:
             timeout: Maximum seconds to wait. None means wait forever.
-
-        Returns:
-            Results object containing all completed runs.
 
         Raises:
             TimeoutError: If timeout is reached before completion.
@@ -1167,10 +1165,39 @@ class SlurmRunHandle:
 
             time.sleep(poll_interval)
 
-        # Load all records from store
-        records = self._store.list_run_records()
+    def result(
+        self,
+        timeout: float | None = None,
+        *,
+        indexed: bool | str = False,
+        refresh_index: bool = False,
+    ) -> Results | IndexedResults:
+        """
+        Block until all jobs complete and return results.
 
-        return Results(store=self._store, records=records)
+        Result loading delegates to the same store-level policy used by
+        ``metalab.load_results``.  The default remains eager for compatibility;
+        pass ``indexed="auto"`` or ``indexed=True`` for large completed stores.
+
+        Args:
+            timeout: Maximum seconds to wait. None means wait forever.
+            indexed: Result loading policy; see ``metalab.load_results``.
+            refresh_index: Rebuild the DuckDB sidecar before opening indexed results.
+
+        Returns:
+            Results or IndexedResults containing completed runs.
+
+        Raises:
+            TimeoutError: If timeout is reached before completion.
+        """
+        from metalab.runner import load_results_from_store
+
+        self._await_completion(timeout)
+        return load_results_from_store(
+            self._store,
+            indexed=indexed,
+            refresh_index=refresh_index,
+        )
 
     def cancel(self) -> None:
         """Cancel all pending/running jobs."""
@@ -1183,16 +1210,19 @@ class SlurmRunHandle:
                 logger.warning(f"Failed to cancel job {job_id}: {stderr}")
 
     @classmethod
-    def from_store(
+    def from_store_manifest(
         cls,
         store: "Store",
+        manifest: dict[str, Any],
+        *,
         on_event: "EventCallback | None" = None,
     ) -> "SlurmRunHandle":
         """
-        Create a handle by loading manifest from store (reconnection).
+        Create a handle from a loaded root manifest (reconnection).
 
         Args:
             store: Store containing the manifest.
+            manifest: Root run-store manifest.
             on_event: Optional lifecycle event callback.
 
         Returns:
@@ -1201,18 +1231,6 @@ class SlurmRunHandle:
         Raises:
             FileNotFoundError: If no manifest exists in the store.
         """
-        store_path = _get_store_path(store)
-        manifest_path = store_path / "manifest.json"
-
-        if not manifest_path.exists():
-            raise FileNotFoundError(
-                f"No manifest found at {manifest_path}. "
-                "Cannot reconnect without a manifest."
-            )
-
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-
         # Check executor type
         executor_type = manifest.get("executor_type", "slurm")
         if executor_type != "slurm":
@@ -1233,3 +1251,29 @@ class SlurmRunHandle:
             skipped_count=manifest.get("skipped_count", 0),
             on_event=on_event,
         )
+
+    @classmethod
+    def from_store(
+        cls,
+        store: "Store",
+        on_event: "EventCallback | None" = None,
+    ) -> "SlurmRunHandle":
+        """
+        Create a handle by loading manifest from store (legacy reconnection helper).
+
+        Prefer ``from_store_manifest`` when the caller has already loaded the root
+        manifest.
+        """
+        store_path = _get_store_path(store)
+        manifest_path = store_path / "manifest.json"
+
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"No manifest found at {manifest_path}. "
+                "Cannot reconnect without a manifest."
+            )
+
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        return cls.from_store_manifest(store, manifest, on_event=on_event)

@@ -25,7 +25,12 @@ from metalab.executor.config import (
     executor_from_config,
     resolve_executor,
 )
-from metalab.executor.handle import LocalRunHandle, RunHandle, RunStatus
+from metalab.executor.handle import (
+    LocalRunHandle,
+    ReconnectableRunHandle,
+    RunHandle,
+    RunStatus,
+)
 from metalab.executor.local_config import LocalExecutorConfig
 from metalab.executor.payload import RunPayload
 from metalab.executor.process import ProcessExecutor
@@ -63,6 +68,7 @@ __all__ = [
     "LocalExecutorConfig",
     "RunPayload",
     "RunHandle",
+    "ReconnectableRunHandle",
     "RunStatus",
     "LocalRunHandle",
     "ThreadExecutor",

@@ -33,6 +33,13 @@ Contract:
 - call `execute_payload(...)` or emit equivalent canonical records/events
 - never treat event or cache state as resume truth
 
+Executors that can be reattached from a later Python session may additionally
+expose a reconnectable handle class from their executor config.  Reconnection is
+a construction capability: `metalab.reconnect(PATH)` loads the root
+`manifest.json`, dispatches by `executor_type`, and calls the backend handle's
+manifest-based factory.  The backend owns validation of its persisted submission
+fields; the public runtime surface remains `RunHandle`.
+
 Canonical run records remain the source of truth. Events, heartbeats, status
 cache, and DuckDB indexes are accelerators.
 

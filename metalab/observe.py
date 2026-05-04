@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from metalab.store.events import iter_event_files
+from metalab.store.events import tail_event_rows
 
 BASIC_FIELDS = [
     "kind",
@@ -186,21 +186,7 @@ def field_label(field: str) -> str:
 
 def read_new_events(root: str | Path, offsets: dict[str, int]) -> Iterator[dict[str, Any]]:
     """Yield new JSON events and update byte offsets in-place."""
-    root_path = Path(root)
-    for path in iter_event_files(root_path):
-        key = str(path.relative_to(root_path))
-        offset = offsets.get(key, 0)
-        try:
-            with path.open("rb") as f:
-                f.seek(offset)
-                for raw in f:
-                    try:
-                        yield json.loads(raw.decode("utf-8"))
-                    except Exception:
-                        continue
-                offsets[key] = f.tell()
-        except FileNotFoundError:
-            continue
+    yield from tail_event_rows(Path(root), offsets)
 
 
 def observe_events(

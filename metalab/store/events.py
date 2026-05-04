@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -101,6 +102,29 @@ def iter_event_files(root: Path) -> list[Path]:
     if not events_root.exists():
         return []
     return sorted(events_root.glob("*/*.ndjson"))
+
+
+def tail_event_rows(root: Path, offsets: dict[str, int]) -> Iterator[dict[str, Any]]:
+    """
+    Yield new event rows from shard files and update byte offsets in-place.
+
+    This is the shared low-level primitive behind live observation and compact
+    status aggregation.  Callers own the interpretation of event rows.
+    """
+    for path in iter_event_files(root):
+        key = str(path.relative_to(root))
+        offset = offsets.get(key, 0)
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                for raw in f:
+                    try:
+                        yield json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        continue
+                offsets[key] = f.tell()
+        except FileNotFoundError:
+            continue
 
 
 def iter_events(root: Path) -> list[PersistentEvent]:

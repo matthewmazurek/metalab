@@ -23,11 +23,11 @@ import uuid
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
-    from metalab.result import Results
+    from metalab.result import IndexedResults, Results
     from metalab.store.base import Store
     from metalab.types import RunRecord
 
@@ -81,7 +81,7 @@ class RunHandle(Protocol):
 
     All executors return a RunHandle from submit(). Users can:
     - Check status without blocking (.status, .is_complete)
-    - Block until completion (.result())
+    - Block until completion and load results (.result())
     - Cancel pending/running jobs (.cancel())
     - Subscribe to events via on_event callback
 
@@ -111,7 +111,13 @@ class RunHandle(Protocol):
         """True if all runs have finished (success or failure)."""
         ...
 
-    def result(self, timeout: float | None = None) -> Results:
+    def result(
+        self,
+        timeout: float | None = None,
+        *,
+        indexed: bool | str = False,
+        refresh_index: bool = False,
+    ) -> Results | IndexedResults:
         """
         Block until all runs complete and return Results.
 
@@ -119,7 +125,8 @@ class RunHandle(Protocol):
             timeout: Maximum seconds to wait. None means wait forever.
 
         Returns:
-            Results object containing all completed runs.
+            Results object containing all completed runs.  Backends may also
+            support indexed loading policies for large stores.
 
         Raises:
             TimeoutError: If timeout is reached before completion.
@@ -147,6 +154,26 @@ class RunHandle(Protocol):
         Args:
             callback: Function to receive events, or None to disable.
         """
+        ...
+
+
+class ReconnectableRunHandle(Protocol):
+    """
+    Construction capability for handles that can be rebuilt from run-store metadata.
+
+    Runtime control remains the responsibility of :class:`RunHandle`; this protocol
+    only captures the backend-specific attach/reconnect entry point.
+    """
+
+    @classmethod
+    def from_store_manifest(
+        cls,
+        store: "Store",
+        manifest: dict[str, Any],
+        *,
+        on_event: "EventCallback | None" = None,
+    ) -> RunHandle:
+        """Create a run handle from a connected store and its root manifest."""
         ...
 
 
@@ -315,7 +342,13 @@ class LocalRunHandle:
         """True if all runs have finished (success or failure)."""
         return all(f.done() for _, f in self._futures)
 
-    def result(self, timeout: float | None = None) -> Results:
+    def result(
+        self,
+        timeout: float | None = None,
+        *,
+        indexed: bool | str = False,
+        refresh_index: bool = False,
+    ) -> Results | IndexedResults:
         """
         Block until all runs complete and return Results.
 
@@ -332,6 +365,14 @@ class LocalRunHandle:
         from metalab.result import Results
 
         if self._gathered:
+            if indexed is not False or refresh_index:
+                from metalab.runner import load_results_from_store
+
+                return load_results_from_store(
+                    self._store,
+                    indexed=indexed,
+                    refresh_index=refresh_index,
+                )
             return Results(store=self._store, records=self._records)
 
         records = []
@@ -381,6 +422,15 @@ class LocalRunHandle:
 
         self._records = records
         self._gathered = True
+
+        if indexed is not False or refresh_index:
+            from metalab.runner import load_results_from_store
+
+            return load_results_from_store(
+                self._store,
+                indexed=indexed,
+                refresh_index=refresh_index,
+            )
 
         return Results(store=self._store, records=records)
 

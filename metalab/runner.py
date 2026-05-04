@@ -384,6 +384,27 @@ def run(
     return handle
 
 
+def load_results_from_store(
+    store: "Store",
+    experiment_id: str | None = None,
+    *,
+    indexed: bool | str = "auto",
+    refresh_index: bool = False,
+) -> Results | IndexedResults:
+    """Load results from an already-connected store."""
+    if indexed not in {"auto", True, False}:
+        raise ValueError("indexed must be one of: 'auto', True, False")
+
+    if indexed is False:
+        return Results.from_store(store, experiment_id=experiment_id)
+    return IndexedResults.from_store(
+        store,
+        experiment_id=experiment_id,
+        refresh=refresh_index,
+        rebuild=indexed is True or refresh_index,
+    )
+
+
 def load_results(
     store: "str | StoreConfig",
     experiment_id: str | None = None,
@@ -442,22 +463,13 @@ def load_results(
     else:
         config = store
 
-    if indexed not in {"auto", True, False}:
-        raise ValueError("indexed must be one of: 'auto', True, False")
-
     resolved_store = config.connect()
-    if indexed is False:
-        return Results.from_store(resolved_store, experiment_id=experiment_id)
-    return IndexedResults.from_store(
+    return load_results_from_store(
         resolved_store,
         experiment_id=experiment_id,
-        refresh=refresh_index,
-        rebuild=indexed is True or refresh_index,
+        indexed=indexed,
+        refresh_index=refresh_index,
     )
-
-
-# Local executor types that don't support reconnection
-_LOCAL_EXECUTOR_TYPES = {"local", "thread", "process"}
 
 
 def _load_manifest(store: "Store") -> dict:
@@ -555,22 +567,20 @@ def reconnect(
     manifest = _load_manifest(store_instance)
     executor_type = manifest.get("executor_type")
 
-    # 3. Reject local executors with helpful error
-    if executor_type in _LOCAL_EXECUTOR_TYPES:
-        raise ValueError(
-            f"Cannot reconnect to '{executor_type}' executor - local runs are synchronous. "
-            f"Use metalab.load_results() to retrieve completed results."
-        )
-
-    # 4. Dispatch to registered handle
+    # 3. Dispatch to registered reconnectable handle
     handle_class = HandleRegistry.get(executor_type)
     if handle_class is None:
         raise ValueError(
-            f"No reconnectable handle registered for executor type '{executor_type}'. "
-            f"Supported types: {HandleRegistry.types()}"
+            f"Executor type '{executor_type}' does not support reconnect. "
+            f"Supported reconnectable types: {HandleRegistry.types()}. "
+            "Use metalab.load_results() to retrieve completed results."
         )
 
-    handle: RunHandle = handle_class.from_store(store_instance, on_event=on_event)
+    handle: RunHandle = handle_class.from_store_manifest(
+        store_instance,
+        manifest,
+        on_event=on_event,
+    )
 
     # Wire up on_event callback if provided.
     if on_event is not None:

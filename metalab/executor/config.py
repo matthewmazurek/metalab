@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from metalab.executor.base import Executor
-    from metalab.executor.handle import RunHandle
+    from metalab.executor.handle import ReconnectableRunHandle
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class ExecutorConfig(ABC):
         ...
 
     @classmethod
-    def handle_class(cls) -> type[RunHandle] | None:
+    def handle_class(cls) -> type[ReconnectableRunHandle] | None:
         """
         Return the reconnectable handle class for this executor, if any.
 

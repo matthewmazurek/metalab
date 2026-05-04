@@ -129,6 +129,13 @@ Local runs execute in the CLI process and return when work is complete. SLURM
 runs submit the array job, print the job id and store path, then exit; use
 `metalab observe /scratch/me/runs` to follow progress.
 
+In Python, local runs commonly use `metalab.run(...).result()` because the
+handle owns in-process futures.  For SLURM-scale runs, prefer `observe` or
+`metalab.reconnect(PATH).status` for monitoring and `metalab.load_results(PATH)`
+for completed result queries.  `SlurmRunHandle.result(indexed="auto")` is
+available when a script intentionally wants to block and then use the same
+indexed result-loading policy.
+
 Runs are resume-first: completed successful run records are not re-executed,
 while missing, failed, stale, or malformed records are eligible to run again.
 `skipped` events are displayed as `skip` in `metalab observe` and describe a

@@ -5,7 +5,7 @@ import json
 import metalab
 from metalab import ProcessExecutor, RunRecord, Status, ThreadExecutor
 from metalab.index import export, index_is_current, rebuild_index, summary
-from metalab.store.file import FileStoreConfig
+from metalab.store.file import FileStore, FileStoreConfig
 from metalab.store.layout import FileStoreLayout
 
 
@@ -142,6 +142,68 @@ def test_load_results_auto_requires_current_sidecar(tmp_path):
 
     eager = metalab.load_results(str(tmp_path), indexed=False)
     assert isinstance(eager, metalab.Results)
+
+
+def test_reconnect_constructs_handle_without_loading_records(tmp_path, monkeypatch):
+    manifest = {
+        "layout_version": 4,
+        "outputs_layout": "hash-mod-sharded-ndjson",
+        "shard_hash": "sha256",
+        "shard_count": 64,
+        "record_schema_version": 1,
+        "experiment_id": "hpc:1",
+        "executor_type": "slurm",
+        "submission_mode": "array_indexed",
+        "job_ids": ["12345"],
+        "shards": [
+            {
+                "start_idx": 0,
+                "end_idx": 0,
+                "array_range": "0",
+                "job_id": "12345",
+            }
+        ],
+        "total_runs": 1,
+        "total_chunks": 1,
+        "chunk_size": 1,
+        "skipped_count": 0,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def fail_list_records(self, experiment_id=None):
+        raise AssertionError("reconnect should not materialize run records")
+
+    monkeypatch.setattr(FileStore, "list_run_records", fail_list_records)
+
+    handle = metalab.reconnect(str(tmp_path), verbose=False)
+
+    assert handle.can_reconnect
+    assert handle.job_id == "12345"
+
+
+def test_slurm_result_can_delegate_to_indexed_results(tmp_path, monkeypatch):
+    exp = _experiment()
+    metalab.run(exp, store=str(tmp_path), verbose=False).result()
+    store = FileStoreConfig(root=str(tmp_path)).connect()
+    handle = metalab.SlurmRunHandle(
+        store=store,
+        job_ids=[],
+        shards=[],
+        total_runs=4,
+        chunk_size=1,
+    )
+
+    monkeypatch.setattr(
+        metalab.SlurmRunHandle,
+        "_await_completion",
+        lambda self, timeout=None: None,
+    )
+
+    results = handle.result(indexed=True)
+
+    assert isinstance(results, metalab.IndexedResults)
+    assert index_is_current(tmp_path)
+    assert len(results) == 4
 
 
 def test_resolved_context_is_stored_in_submission_log(tmp_path):

@@ -11,7 +11,7 @@ same ``metalab.executors`` entry-point mechanism used for executor configs.
 
 Example:
     handle_class = HandleRegistry.get("slurm")
-    handle = handle_class.from_store(store)
+    handle = handle_class.from_store_manifest(store, manifest)
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from metalab.executor.handle import RunHandle
+    from metalab.executor.handle import ReconnectableRunHandle
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class HandleRegistry:
     Results are cached after first lookup.
     """
 
-    _cache: dict[str, type[RunHandle] | None] = {}
+    _cache: dict[str, type[ReconnectableRunHandle] | None] = {}
     _loaded: bool = False
 
     @classmethod
@@ -59,7 +59,7 @@ class HandleRegistry:
                     cls._cache[name] = hc
 
     @classmethod
-    def get(cls, executor_type: str) -> type[RunHandle] | None:
+    def get(cls, executor_type: str) -> type[ReconnectableRunHandle] | None:
         """
         Get the handle class for an executor type.
 
