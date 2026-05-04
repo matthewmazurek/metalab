@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
-from metalab.schema import load_run_record
 from metalab.store.events import iter_event_files, iter_events
 from metalab.store.layout import FileStoreLayout
-from metalab.types import RunRecord
+from metalab.store.records import iter_run_records
 
 DUCKDB_HINT = "Install DuckDB support with: uv sync --extra hpc"
 
@@ -20,47 +19,6 @@ def _duckdb():
     except ImportError as e:
         raise RuntimeError(DUCKDB_HINT) from e
     return duckdb
-
-
-def iter_run_records(root: Path) -> Generator[tuple[RunRecord, str], None, None]:
-    """Stream latest canonical run records from v4 record shards."""
-    layout = FileStoreLayout(root)
-    latest: dict[str, dict[str, Any]] = {}
-    paths = [layout.shard_map_path()]
-    if not paths[0].exists():
-        paths = sorted(layout.record_shards_dir_path().glob("*.idx"))
-    for idx_path in paths:
-        with idx_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                run_id = row.get("run_id")
-                if not isinstance(run_id, str):
-                    continue
-                prev = latest.get(run_id)
-                if prev is None or int(row.get("sequence", 0)) >= int(
-                    prev.get("sequence", 0)
-                ):
-                    latest[run_id] = row
-
-    for row in latest.values():
-        shard_id = row.get("shard_id")
-        if not isinstance(shard_id, str):
-            continue
-        shard_path = layout.record_shards_dir_path() / f"{shard_id}.ndjson"
-        try:
-            with shard_path.open("rb") as handle:
-                handle.seek(int(row["offset"]))
-                payload = handle.read(int(row["length"]))
-            record = load_run_record(json.loads(payload.decode("utf-8")))
-        except Exception:
-            continue
-        ref = f"{shard_path}:{row['offset']}:{row['length']}"
-        yield record, ref
 
 
 def _event_offsets(root: Path) -> dict[str, int]:

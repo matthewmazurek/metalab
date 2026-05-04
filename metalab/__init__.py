@@ -1,11 +1,9 @@
 """
-metalab: A general experiment runner framework.
+metalab: A filesystem-native experiment runner for HPC workflows.
 
 An Experiment is a reproducible mapping from (Context, Params, Seeds)
-to (RunRecord + Artifacts), executed over a ParamSource using an Executor,
-persisted by a Store.
-
-Everything else is plug-ins.
+to (RunRecord + Artifacts), executed over a ParamSource using an Executor and
+persisted in a v4 filesystem run store.
 
 Example:
 ```python

@@ -111,6 +111,39 @@ def test_load_results_uses_indexed_facade_without_eager_records(tmp_path):
     assert isinstance(eager, metalab.Results)
 
 
+def test_load_results_auto_requires_current_sidecar(tmp_path):
+    exp = _experiment()
+    metalab.run(exp, store=str(tmp_path), verbose=False).result()
+
+    try:
+        metalab.load_results(str(tmp_path))
+    except RuntimeError as e:
+        assert "sidecar index is missing or stale" in str(e)
+        assert "metalab index rebuild" in str(e)
+    else:
+        raise AssertionError("auto indexed load should not implicitly rebuild")
+
+    rebuild_index(tmp_path, force=True)
+    results = metalab.load_results(str(tmp_path))
+    assert isinstance(results, metalab.IndexedResults)
+    assert len(results) == 4
+
+    layout = FileStoreLayout(tmp_path)
+    event_path = next(layout.events_dir_path().glob("*/*.ndjson"))
+    with event_path.open("a", encoding="utf-8") as f:
+        f.write("\n")
+
+    try:
+        metalab.load_results(str(tmp_path))
+    except RuntimeError as e:
+        assert "sidecar index is missing or stale" in str(e)
+    else:
+        raise AssertionError("auto indexed load should reject stale sidecars")
+
+    eager = metalab.load_results(str(tmp_path), indexed=False)
+    assert isinstance(eager, metalab.Results)
+
+
 def test_resolved_context_is_stored_in_submission_log(tmp_path):
     context_file = tmp_path / "input.txt"
     context_file.write_text("hello", encoding="utf-8")

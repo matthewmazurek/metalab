@@ -34,6 +34,12 @@ from metalab.store.layout import (
     FileStoreLayout,
     safe_experiment_id,
 )
+from metalab.store.records import (
+    iter_ndjson_rows,
+    latest_run_index_entries,
+    latest_run_index_entry,
+    read_run_at_index,
+)
 from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 logger = logging.getLogger(__name__)
@@ -50,8 +56,8 @@ class FileStoreConfig(StoreConfig):
     scoped = config.scoped("my_exp:1.0")
     store = scoped.connect()
 
-    # Or let runner handle scoping:
-    metalab.run(exp, store=config)  # auto-scopes to experiment
+    # Or point the runner at a run-store root directly:
+    metalab.run(exp, store="./runs/my_exp")
     ```
     """
 
@@ -336,38 +342,11 @@ class FileStore:
 
     def _iter_ndjson(self, path: Path) -> Generator[dict[str, Any], None, None]:
         """Yield JSON rows from an NDJSON file, skipping malformed rows."""
-        if not path.exists():
-            return
-        with path.open("r", encoding="utf-8") as handle:
-            for line_no, line in enumerate(handle, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except Exception as e:
-                    logger.warning(f"Failed to load row {path}:{line_no}: {e}")
-                    continue
-                if isinstance(data, dict):
-                    yield data
+        yield from iter_ndjson_rows(path)
 
     def _latest_run_index_entries(self) -> dict[str, dict[str, Any]]:
         """Return latest run index entry per run id by sequence."""
-        latest: dict[str, dict[str, Any]] = {}
-        paths = [self._layout.shard_map_path()]
-        if not paths[0].exists():
-            paths = sorted(self._layout.record_shards_dir_path().glob("*.idx"))
-        for path in paths:
-            for row in self._iter_ndjson(path):
-                run_id = row.get("run_id")
-                if not isinstance(run_id, str):
-                    continue
-                prev = latest.get(run_id)
-                if prev is None or int(row.get("sequence", 0)) >= int(
-                    prev.get("sequence", 0)
-                ):
-                    latest[run_id] = row
-        return latest
+        return latest_run_index_entries(self._layout)
 
     def _record_shard_freshness(self) -> dict[str, list[int]]:
         """Return cheap freshness signals for canonical run shards."""
@@ -426,31 +405,12 @@ class FileStore:
 
     def _latest_run_index_entry(self, run_id: str) -> dict[str, Any] | None:
         """Return latest run index entry for a run id."""
-        latest: dict[str, Any] | None = None
-        for row in self._iter_ndjson(self._layout.record_shard_index_path(run_id)):
-            if row.get("run_id") != run_id:
-                continue
-            if latest is None or int(row.get("sequence", 0)) >= int(
-                latest.get("sequence", 0)
-            ):
-                latest = row
-        return latest
+        return latest_run_index_entry(self._layout, run_id)
 
     def _read_run_at_index(self, row: dict[str, Any]) -> RunRecord | None:
         """Read a run record via a byte index row."""
-        shard_id = row.get("shard_id")
-        if not isinstance(shard_id, str):
-            return None
-        path = self._layout.record_shards_dir_path() / f"{shard_id}.ndjson"
-        try:
-            with path.open("rb") as handle:
-                handle.seek(int(row["offset"]))
-                payload = handle.read(int(row["length"]))
-            data = json.loads(payload.decode("utf-8"))
-            return load_run_record(data)
-        except Exception as e:
-            logger.warning(f"Failed to load run record from {path}: {e}")
-            return None
+        record_ref = read_run_at_index(self._layout, row)
+        return record_ref[0] if record_ref is not None else None
 
     def _append_output(
         self,

@@ -400,8 +400,10 @@ def load_results(
         store: Store path or StoreConfig.
         experiment_id: Optional filter by experiment ID.
         indexed: Use the DuckDB sidecar index when available. ``"auto"``
-            uses it when DuckDB can be opened and falls back to eager file
-            loading otherwise. Set ``False`` to force eager loading.
+            opens an existing current index and refuses missing or stale sidecars
+            to avoid implicit full-store rebuilds. Set ``True`` or
+            ``refresh_index=True`` to build the index. Set ``False`` to force
+            eager loading from canonical records.
         refresh_index: Rebuild the DuckDB sidecar before opening indexed results.
 
     Returns:
@@ -412,8 +414,11 @@ def load_results(
 
     Example:
     ```python
-    # Load all results from a store path
+    # Load all results from a store path with a current DuckDB sidecar
     results = metalab.load_results("./runs/gene_perturbation")
+
+    # Or force direct canonical record loading
+    results = metalab.load_results("./runs/gene_perturbation", indexed=False)
 
     # Access runs
     for run in results:
@@ -437,18 +442,18 @@ def load_results(
     else:
         config = store
 
+    if indexed not in {"auto", True, False}:
+        raise ValueError("indexed must be one of: 'auto', True, False")
+
     resolved_store = config.connect()
-    if indexed is not False:
-        try:
-            return IndexedResults.from_store(
-                resolved_store,
-                experiment_id=experiment_id,
-                refresh=refresh_index,
-            )
-        except RuntimeError:
-            if indexed is True:
-                raise
-    return Results.from_store(resolved_store, experiment_id=experiment_id)
+    if indexed is False:
+        return Results.from_store(resolved_store, experiment_id=experiment_id)
+    return IndexedResults.from_store(
+        resolved_store,
+        experiment_id=experiment_id,
+        refresh=refresh_index,
+        rebuild=indexed is True or refresh_index,
+    )
 
 
 # Local executor types that don't support reconnection

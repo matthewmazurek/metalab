@@ -25,7 +25,7 @@ class LocatorInfo:
 
     Attributes:
         scheme: The locator scheme (file).
-        path: Path component (filesystem path or database name).
+        path: Filesystem run-store path.
         host: Hostname for network stores.
         port: Port number for network stores.
         user: Username for authenticated stores.

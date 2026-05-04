@@ -7,11 +7,9 @@ The Store abstraction covers:
 - Logs (optional)
 - Experiment manifests
 
-Backend implementations can be:
-- Filesystem (FileStore)
-- S3/GCS object store
-- MLflow/W&B adapter
-- Database + blob store
+The supported implementation is the filesystem run store. The protocol keeps
+core orchestration decoupled from concrete file IO without implying database,
+service, or object-store backends.
 """
 
 from __future__ import annotations

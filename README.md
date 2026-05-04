@@ -81,9 +81,11 @@ filesystem artifacts. Event logs, heartbeats, status cache, shard maps, and
 DuckDB indexes are accelerators that can be regenerated.
 
 `metalab.load_results(PATH)` is the public Python entry point for completed
-results. When DuckDB is installed, it opens/rebuilds the sidecar index under the
-hood and keeps run records lazy for summaries, filters, and tables. Pass
-`indexed=False` to force direct eager loading from canonical run shards.
+results. By default, it opens the DuckDB sidecar only when the index is already
+current, keeping summaries, filters, and iteration lazy without surprising
+full-store rebuilds. Run `metalab index rebuild PATH`, pass `indexed=True`, or
+pass `refresh_index=True` to build the sidecar. Pass `indexed=False` to force
+direct eager loading from canonical run shards.
 
 ## CLI
 

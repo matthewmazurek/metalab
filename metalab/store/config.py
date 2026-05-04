@@ -12,7 +12,7 @@ StoreConfig separates configuration (pure data, serializable) from store instanc
 (connections, file handles). This enables:
 
 - Pre-configuring stores before experiments are created
-- Automatic experiment scoping at runtime
+- Explicit experiment scoping when callers want collection-style paths
 - Clean serialization via dataclasses
 """
 

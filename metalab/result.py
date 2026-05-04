@@ -930,9 +930,10 @@ class IndexedResults:
         experiment_id: str | None = None,
         *,
         refresh: bool = False,
+        rebuild: bool = True,
     ) -> IndexedResults:
         """Open or build the DuckDB sidecar index for a file store."""
-        from metalab.index import index_is_current, rebuild_index
+        from metalab.index import _duckdb, index_is_current, rebuild_index
         from metalab.store.layout import FileStoreLayout
 
         root = getattr(store, "root", None)
@@ -941,8 +942,17 @@ class IndexedResults:
 
         root_path = Path(root)
         db_path = FileStoreLayout(root_path).duckdb_path()
-        if refresh or not index_is_current(root_path):
+        current = index_is_current(root_path)
+        if refresh or (rebuild and not current):
             db_path = rebuild_index(root_path, force=True)
+        elif not current:
+            raise RuntimeError(
+                "DuckDB sidecar index is missing or stale. Run `metalab index rebuild "
+                "PATH`, call `metalab.load_results(PATH, refresh_index=True)`, or pass "
+                "`indexed=False` to eagerly scan canonical run records."
+            )
+        else:
+            _duckdb()
         return cls(store=store, db_path=db_path, experiment_id=experiment_id)
 
     @property
