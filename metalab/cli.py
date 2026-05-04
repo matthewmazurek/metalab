@@ -107,7 +107,9 @@ def _handle_observe(args: argparse.Namespace) -> int:
         read_new_events,
         shorten_value,
     )
-    from metalab.status import read_status
+    from metalab.status import read_status, validate_run_store
+
+    validate_run_store(_require_store_path(args.store))
 
     pretty = args.pretty or not (args.plain or args.json_output)
     by_run = args.by_run or not args.events

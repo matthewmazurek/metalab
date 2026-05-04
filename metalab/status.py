@@ -19,6 +19,10 @@ KIND_TO_CODE = {
 CODE_TO_KIND = {code: kind for kind, code in KIND_TO_CODE.items()}
 
 
+class RunStoreNotFoundError(ValueError):
+    """Raised when a path does not look like a metalab run store."""
+
+
 @dataclass
 class StoreStatus:
     total: int = 0
@@ -50,6 +54,33 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def validate_run_store(store_root: str | Path) -> Path:
+    """Return a run-store path or raise a clear user-facing error."""
+    root = Path(store_root)
+    manifest_path = root / "manifest.json"
+    if not root.exists():
+        raise RunStoreNotFoundError(
+            f"No metalab run store found at {root}. The path does not exist. "
+            "Run `metalab run ... --store PATH` first or pass the correct store path."
+        )
+    if not root.is_dir():
+        raise RunStoreNotFoundError(
+            f"No metalab run store found at {root}. Expected a directory containing "
+            "manifest.json."
+        )
+    if not manifest_path.exists():
+        raise RunStoreNotFoundError(
+            f"No metalab run store found at {root}. Expected manifest.json. "
+            "Run `metalab run ... --store PATH` first or pass the correct store path."
+        )
+    manifest = _load_json(manifest_path)
+    if not manifest:
+        raise RunStoreNotFoundError(
+            f"Malformed metalab run store at {root}. Could not read manifest.json."
+        )
+    return root
+
+
 def _decode_cached_state(state: Any) -> dict[str, str] | None:
     """Decode legacy or compact cached per-run state."""
     if isinstance(state, str):
@@ -79,7 +110,7 @@ def read_status(
     stale_after: timedelta = timedelta(minutes=5),
 ) -> StoreStatus:
     """Compute run-store status without scanning canonical run records."""
-    root = Path(store_root)
+    root = validate_run_store(store_root)
     manifest = _load_json(root / "manifest.json") or {}
     total = int(manifest.get("expected_run_count") or manifest.get("total_runs") or 0)
 

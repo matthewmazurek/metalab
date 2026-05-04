@@ -144,6 +144,11 @@ def test_runner_uses_plan_based_executor_without_concrete_type_check(tmp_path):
 
     assert executor.plan is not None
     assert executor.plan.skipped_count == 4
+    assert executor.plan.total_runs == 4
+    assert executor.plan.pending_entries == []
+    assert len(executor.plan.all_run_ids) == 4
+    assert executor.plan.context_fingerprint
+    assert executor.plan.store.get_working_directory() == tmp_path
 
     events = [
         json.loads(line)

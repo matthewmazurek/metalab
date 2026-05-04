@@ -13,7 +13,7 @@ from metalab.observe import (
     read_new_events,
     shorten_value,
 )
-from metalab.status import read_status
+from metalab.status import RunStoreNotFoundError, read_status
 from metalab.store.events import PersistentEvent
 from metalab.store.file import FileStoreConfig
 from metalab.store.layout import FileStoreLayout
@@ -91,6 +91,16 @@ def test_status_reads_events_and_heartbeats_incrementally(tmp_path):
     status = read_status(tmp_path)
     assert status.pending == 0
     assert status.stale_workers == 0
+
+
+def test_status_requires_manifest_with_clear_error(tmp_path):
+    try:
+        read_status(tmp_path)
+    except RunStoreNotFoundError as e:
+        assert "Expected manifest.json" in str(e)
+        assert "metalab run" in str(e)
+    else:
+        raise AssertionError("read_status should reject non-store directories")
 
 
 def test_status_handles_large_event_stream_with_compact_cache(tmp_path):

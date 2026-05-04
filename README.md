@@ -90,6 +90,9 @@ runs submit the array job, print the job id and store path, then exit; use
 Runs are resume-first: completed successful run records are skipped, while
 missing, failed, stale, or malformed records are eligible to run again.
 
+Custom executors implement the plan-based contract described in
+[`docs/executors.md`](docs/executors.md).
+
 ## Development
 
 Python 3.11+ required.
