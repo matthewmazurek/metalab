@@ -44,7 +44,7 @@ def _print_status(status: Any, *, json_output: bool = False) -> None:
         return
     print(
         f"total={status.total} success={status.success} failed={status.failed} "
-        f"skipped={status.skipped} running={status.running} pending={status.pending} "
+        f"running={status.running} pending={status.pending} "
         f"stale_workers={status.stale_workers}"
     )
 
@@ -144,11 +144,12 @@ def _handle_observe(args: argparse.Namespace) -> int:
         console = Console()
         rows: list[dict[str, Any]] = []
         by_run_rows: dict[str, dict[str, Any]] = {}
+        skipped_run_ids: set[str] = set()
         offsets: dict[str, int] = {}
 
         def render_header() -> Text:
             status = read_status(_require_store_path(args.store))
-            complete = status.success + status.failed + status.skipped
+            complete = status.success + status.failed
             pct = (complete / status.total * 100) if status.total else 0.0
             summary = Text()
             summary.append("metalab observe", style="bold")
@@ -176,9 +177,9 @@ def _handle_observe(args: argparse.Namespace) -> int:
                 f"pending {status.pending}",
                 style="white" if status.pending else "dim",
             )
-            if status.skipped:
+            if skipped_run_ids:
                 summary.append("   ")
-                summary.append(f"skipped {status.skipped}", style="dim yellow")
+                summary.append(f"skip {len(skipped_run_ids)}", style="yellow")
             if status.stale_workers:
                 summary.append("   ")
                 summary.append(f"stale workers {status.stale_workers}", style="yellow")
@@ -229,6 +230,10 @@ def _handle_observe(args: argparse.Namespace) -> int:
                         if by_run:
                             run_id = event.get("run_id")
                             if run_id:
+                                if event.get("kind") == "skipped":
+                                    skipped_run_ids.add(str(run_id))
+                                    changed = True
+                                    continue
                                 by_run_rows[run_id] = merge_run_row(
                                     by_run_rows.get(run_id),
                                     event,

@@ -87,8 +87,11 @@ Local runs execute in the CLI process and return when work is complete. SLURM
 runs submit the array job, print the job id and store path, then exit; use
 `metalab observe /scratch/me/runs` to follow progress.
 
-Runs are resume-first: completed successful run records are skipped, while
-missing, failed, stale, or malformed records are eligible to run again.
+Runs are resume-first: completed successful run records are not re-executed,
+while missing, failed, stale, or malformed records are eligible to run again.
+`skipped` events are displayed as `skip` in `metalab observe` and describe a
+particular submission; they do not change the durable experiment status of an
+already successful run.
 
 Custom executors implement the plan-based contract described in
 [`docs/executors.md`](docs/executors.md).

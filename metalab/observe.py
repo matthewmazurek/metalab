@@ -166,6 +166,8 @@ def shorten_value(field: str, value: Any) -> str:
             return value
     if field == "run_id" and isinstance(value, str):
         return value[:12]
+    if field == "kind" and value == "skipped":
+        return "skip"
     if field == "duration_ms" and isinstance(value, int | float):
         return f"{value / 1000:.1f}s"
     return format_value(value)

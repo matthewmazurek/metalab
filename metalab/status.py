@@ -28,7 +28,6 @@ class StoreStatus:
     total: int = 0
     success: int = 0
     failed: int = 0
-    skipped: int = 0
     running: int = 0
     pending: int = 0
     stale_workers: int = 0
@@ -39,7 +38,6 @@ class StoreStatus:
             "total": self.total,
             "success": self.success,
             "failed": self.failed,
-            "skipped": self.skipped,
             "running": self.running,
             "pending": self.pending,
             "stale_workers": self.stale_workers,
@@ -103,6 +101,30 @@ def _encode_cached_state(state: dict[str, str]) -> list[str]:
     return [KIND_TO_CODE.get(state.get("kind", ""), state.get("kind", "")), state.get("timestamp", "")]
 
 
+def _merge_run_state(
+    previous: dict[str, str] | None,
+    *,
+    kind: str,
+    timestamp: str,
+) -> dict[str, str]:
+    """Merge an event kind into per-run state.
+
+    A skipped event means "already successful, not executed in this submission".
+    It must not replace a known successful canonical state from an earlier
+    finished event, or status would report completed runs as no longer success.
+    """
+    if previous is None:
+        return {
+            "kind": "finished" if kind == "skipped" else kind,
+            "timestamp": timestamp,
+        }
+    if timestamp < previous.get("timestamp", ""):
+        return previous
+    if kind == "skipped" and previous.get("kind") == "finished":
+        return previous
+    return {"kind": "finished" if kind == "skipped" else kind, "timestamp": timestamp}
+
+
 def read_status(
     store_root: str | Path,
     *,
@@ -146,9 +168,11 @@ def read_status(
                         "skipped",
                     }:
                         timestamp = str(event.get("timestamp", ""))
-                        previous = per_run.get(run_id)
-                        if previous is None or timestamp >= previous.get("timestamp", ""):
-                            per_run[run_id] = {"kind": kind, "timestamp": timestamp}
+                        per_run[run_id] = _merge_run_state(
+                            per_run.get(run_id),
+                            kind=kind,
+                            timestamp=timestamp,
+                        )
                 new_offsets[key] = f.tell()
         except FileNotFoundError:
             continue
@@ -174,9 +198,8 @@ def read_status(
 
     success = sum(1 for state in per_run.values() if state.get("kind") == "finished")
     failed = sum(1 for state in per_run.values() if state.get("kind") == "failed")
-    skipped = sum(1 for state in per_run.values() if state.get("kind") == "skipped")
     running = sum(1 for state in per_run.values() if state.get("kind") == "started")
-    done = success + failed + skipped + running
+    done = success + failed + running
     pending = max(0, total - done)
     has_active_work = running > 0 or pending > 0
 
@@ -197,7 +220,6 @@ def read_status(
         total=total,
         success=success,
         failed=failed,
-        skipped=skipped,
         running=running,
         pending=pending,
         stale_workers=stale,

@@ -35,3 +35,7 @@ Contract:
 
 Canonical run records remain the source of truth. Events, heartbeats, status
 cache, and DuckDB indexes are accelerators.
+
+`skipped` events are submission-local resume events. They mean "this submission
+did not execute the run because a canonical success already existed." They are
+not durable run states and should not replace a successful run record.

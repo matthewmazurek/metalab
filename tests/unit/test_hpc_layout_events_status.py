@@ -103,6 +103,31 @@ def test_status_requires_manifest_with_clear_error(tmp_path):
         raise AssertionError("read_status should reject non-store directories")
 
 
+def test_status_keeps_success_after_resume_skip_event(tmp_path):
+    store = FileStoreConfig(root=str(tmp_path)).connect()
+    store.write_root_manifest(
+        {
+            "experiment_id": "exp:1",
+            "expected_run_count": 1,
+            "executor_type": "local",
+            "job_id": "job1",
+            "created_at": datetime.now().isoformat(),
+        }
+    )
+    worker_sink = store.event_sink("job1", "worker1", "exp:1")
+    worker_sink.emit("started", run_id="r1")
+    worker_sink.emit("finished", run_id="r1")
+
+    assert read_status(tmp_path).success == 1
+
+    runner_sink = store.event_sink("job2", "runner", "exp:1")
+    runner_sink.emit("skipped", run_id="r1", payload={"reason": "already success"})
+
+    status = read_status(tmp_path)
+    assert status.success == 1
+    assert status.pending == 0
+
+
 def test_status_handles_large_event_stream_with_compact_cache(tmp_path):
     total = 100_000
     store = FileStoreConfig(root=str(tmp_path)).connect()
@@ -165,6 +190,7 @@ def test_observer_projects_fields_and_uses_offsets(tmp_path):
     }
     assert "params.x=2" in format_row(row)
     assert shorten_value("run_id", "abcdef1234567890") == "abcdef123456"
+    assert shorten_value("kind", "skipped") == "skip"
     assert shorten_value("duration_ms", 12345) == "12.3s"
     assert field_label("metrics.score") == "score"
 
