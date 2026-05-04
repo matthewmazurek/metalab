@@ -325,7 +325,7 @@ class Run:
         """
         Load structured result data by name.
 
-        Structured data is stored via capture.data() as packed metadata.
+        Structured data is stored via capture.data() as packed outputs.
 
         Args:
             name: The data name.

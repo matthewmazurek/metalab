@@ -11,7 +11,7 @@ sidecar for indexing/export after runs have written canonical records.
 ## Non-goals
 - No domain-specific assumptions.
 - No database, web dashboard, service orchestration, or tunnel management.
-- No read compatibility for pre-v3 run-store layouts.
+- No read compatibility for pre-v4 run-store layouts.
 - No required distributed framework.
 
 ## Core invariants
@@ -43,23 +43,24 @@ sidecar for indexing/export after runs have written canonical records.
 - PRs must include tests for new behavior and docs for API changes
 
 ## Run-store layout
-New stores use the v3 hash-sharded metadata layout only:
+New stores use the v4 hash-sharded output layout only:
 
 ```text
 manifest.json
-runs/manifest.json
-runs/shards/{shard_id}.ndjson
-runs/shards/{shard_id}.idx
-metadata/manifest.json
-metadata/results/{shard_id}.ndjson
-metadata/artifacts/{shard_id}.ndjson
-metadata/logs/{shard_id}.ndjson
-events/{job_id}/{worker_id}.ndjson
-heartbeats/{job_id}/{worker_id}.json
-artifacts/{prefix}/{run_id}/...
-index/status-cache.json
-index/shard-map.ndjson
-index/metalab.duckdb
+records/manifest.json
+records/{shard_id}.ndjson
+records/{shard_id}.idx
+outputs/manifest.json
+outputs/results/{shard_id}.ndjson
+outputs/logs/{shard_id}.ndjson
+outputs/artifacts/metadata/{shard_id}.ndjson
+outputs/artifacts/files/{prefix}/{run_id}/...
+.metalab/events/{job_id}/{worker_id}.ndjson
+.metalab/heartbeats/{job_id}/{worker_id}.json
+.metalab/index/status-cache.json
+.metalab/index/shard-map.ndjson
+.metalab/index/metalab.duckdb
+.metalab/submissions.ndjson
 ```
 
 ## Query/export discipline

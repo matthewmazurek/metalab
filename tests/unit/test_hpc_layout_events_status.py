@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from metalab.types import ArtifactDescriptor, RunRecord, Status
 from metalab.observe import (
     append_fields,
     field_label,
@@ -18,23 +17,27 @@ from metalab.status import RunStoreNotFoundError, read_status
 from metalab.store.events import PersistentEvent
 from metalab.store.file import FileStoreConfig
 from metalab.store.layout import FileStoreLayout
+from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 
-def test_v3_layout_uses_hash_sharded_paths(tmp_path):
+def test_v4_layout_uses_hash_sharded_paths(tmp_path):
     layout = FileStoreLayout(tmp_path)
     run_id = "abcdef123456"
     shard_id = layout.shard_id(run_id)
 
-    assert layout.run_path(run_id) == tmp_path / "runs" / "shards" / f"{shard_id}.ndjson"
-    assert layout.run_shard_index_path(run_id) == tmp_path / "runs" / "shards" / f"{shard_id}.idx"
-    assert layout.log_path(run_id, "run") == tmp_path / "metadata" / "logs" / f"{shard_id}.ndjson"
-    assert layout.scratch_log_path(run_id, "run") == tmp_path / ".scratch" / "logs" / shard_id / f"{run_id}_run.log"
-    assert layout.artifact_dir(run_id) == tmp_path / "artifacts" / "ab" / run_id
-    assert layout.duckdb_path() == tmp_path / "index" / "metalab.duckdb"
-    assert layout.planned_runs_path("ab") == tmp_path / "index" / "planned-runs" / "ab.ndjson"
+    assert layout.record_path(run_id) == tmp_path / "records" / f"{shard_id}.ndjson"
+    assert layout.record_shard_index_path(run_id) == tmp_path / "records" / f"{shard_id}.idx"
+    assert layout.log_path(run_id, "run") == tmp_path / "outputs" / "logs" / f"{shard_id}.ndjson"
+    assert layout.scratch_log_path(run_id, "run") == tmp_path / ".metalab" / "scratch" / "logs" / shard_id / f"{run_id}_run.log"
+    assert layout.artifact_dir(run_id) == tmp_path / "outputs" / "artifacts" / "files" / "ab" / run_id
+    assert layout.artifact_manifest_path(run_id) == tmp_path / "outputs" / "artifacts" / "metadata" / f"{shard_id}.ndjson"
+    assert layout.duckdb_path() == tmp_path / ".metalab" / "index" / "metalab.duckdb"
+    assert layout.planned_runs_path("ab") == tmp_path / ".metalab" / "index" / "planned-runs" / "ab.ndjson"
+    assert layout.event_log_path("job1", "worker1") == tmp_path / ".metalab" / "events" / "job1" / "worker1.ndjson"
+    assert layout.heartbeat_path("job1", "worker1") == tmp_path / ".metalab" / "heartbeats" / "job1" / "worker1.json"
 
 
-def test_v3_hash_shard_assignment_is_stable_and_bounded(tmp_path):
+def test_v4_hash_shard_assignment_is_stable_and_bounded(tmp_path):
     layout = FileStoreLayout(tmp_path)
     run_ids = [f"run-{idx:06d}" for idx in range(300_000)]
     shard_ids = {layout.shard_id(run_id) for run_id in run_ids}
@@ -44,7 +47,7 @@ def test_v3_hash_shard_assignment_is_stable_and_bounded(tmp_path):
     assert all(0 <= int(shard_id) < 64 for shard_id in shard_ids)
 
 
-def test_file_store_packed_metadata_latest_wins(tmp_path):
+def test_file_store_packed_outputs_latest_wins(tmp_path):
     store = FileStoreConfig(root=str(tmp_path)).connect()
     run_id = "aaaaaaaaaaaaaaaa"
     first = RunRecord.running(
@@ -269,7 +272,7 @@ def test_status_handles_large_event_stream_with_compact_cache(tmp_path):
     assert status.total == total
     assert status.success == total
     assert status.pending == 0
-    cache = json.loads((tmp_path / "index" / "status-cache.json").read_text())
+    cache = json.loads(FileStoreLayout(tmp_path).status_cache_path().read_text())
     assert cache["format"] == "compact-v1"
     assert cache["per_run"]["run-000000"][0] == "s"
 

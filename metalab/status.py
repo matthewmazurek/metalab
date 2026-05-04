@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from metalab.store.events import iter_event_files
+from metalab.store.layout import LAYOUT_VERSION, FileStoreLayout
 
 KIND_TO_CODE = {
     "started": "r",
@@ -133,10 +134,11 @@ def read_status(
 ) -> StoreStatus:
     """Compute run-store status without scanning canonical run records."""
     root = validate_run_store(store_root)
+    layout = FileStoreLayout(root)
     manifest = _load_json(root / "manifest.json") or {}
     total = int(manifest.get("expected_run_count") or manifest.get("total_runs") or 0)
 
-    cache_path = root / "index" / "status-cache.json"
+    cache_path = layout.status_cache_path()
     cache = _load_json(cache_path) if use_cache else None
     offsets: dict[str, int] = {}
     per_run: dict[str, dict[str, str]] = {}
@@ -182,7 +184,7 @@ def read_status(
         cache_path.write_text(
             json.dumps(
                 {
-                    "layout_version": 3,
+                    "layout_version": LAYOUT_VERSION,
                     "format": "compact-v1",
                     "updated_at": datetime.now().isoformat(),
                     "offsets": new_offsets,
@@ -206,7 +208,7 @@ def read_status(
     workers = []
     stale = 0
     now = datetime.now()
-    hb_root = root / "heartbeats"
+    hb_root = layout.heartbeats_dir_path()
     for path in sorted(hb_root.glob("*/*.json")) if hb_root.exists() else []:
         data = _load_json(path)
         if not data:

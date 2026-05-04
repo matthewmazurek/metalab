@@ -6,6 +6,7 @@ import metalab
 from metalab import ProcessExecutor, RunRecord, Status, ThreadExecutor
 from metalab.index import export, index_is_current, rebuild_index, summary
 from metalab.store.file import FileStoreConfig
+from metalab.store.layout import FileStoreLayout
 
 
 @metalab.operation
@@ -13,18 +14,18 @@ def _op(params, seeds, capture):
     capture.metric("score", params["x"] + seeds.replicate_index)
 
 
-def _experiment():
+def _experiment(context=None):
     return metalab.Experiment(
         name="hpc",
         version="1",
-        context={},
+        context=context or {},
         operation=_op,
         params=metalab.grid(x=[1, 2]),
         seeds=metalab.seeds(base=1, replicates=2),
     )
 
 
-def test_local_run_writes_v3_store_and_resumes(tmp_path):
+def test_local_run_writes_v4_store_and_resumes(tmp_path):
     exp = _experiment()
 
     handle = metalab.run(
@@ -38,32 +39,54 @@ def test_local_run_writes_v3_store_and_resumes(tmp_path):
     assert len(results) == 4
     assert (tmp_path / "manifest.json").exists()
     manifest = json.loads((tmp_path / "manifest.json").read_text())
-    assert manifest["layout_version"] == 3
-    assert manifest["metadata_layout"] == "hash-mod-sharded-ndjson"
+    layout = FileStoreLayout(tmp_path)
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        ".metalab",
+        "manifest.json",
+        "outputs",
+        "records",
+    ]
+    assert manifest["layout_version"] == 4
+    assert manifest["outputs_layout"] == "hash-mod-sharded-ndjson"
     assert manifest["shard_count"] == 64
     assert manifest["expected_run_count"] == 4
     assert "expected_run_ids" not in manifest
-    assert manifest["expected_run_ids_path"] == "index/planned-runs/{prefix}.ndjson"
-    assert len(list((tmp_path / "index" / "planned-runs").glob("*.ndjson"))) >= 1
-    assert len(list((tmp_path / "runs").glob("*/*.json"))) == 0
-    assert len(list((tmp_path / "runs" / "shards").glob("*.ndjson"))) >= 1
-    assert len(list((tmp_path / "runs" / "shards").glob("*.idx"))) >= 1
-    assert len(list((tmp_path / "metadata" / "logs").glob("*.ndjson"))) >= 1
+    assert manifest["expected_run_ids_path"] == ".metalab/index/planned-runs/{prefix}.ndjson"
+    assert len(list(layout.planned_runs_dir_path().glob("*.ndjson"))) >= 1
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "events").exists()
+    assert not (tmp_path / "heartbeats").exists()
+    assert not (tmp_path / "index").exists()
+    assert len(list((tmp_path / "records").glob("*.ndjson"))) >= 1
+    assert len(list((tmp_path / "records").glob("*.idx"))) >= 1
+    assert len(list((tmp_path / "outputs" / "logs").glob("*.ndjson"))) >= 1
+    assert len(list((tmp_path / "outputs" / "artifacts" / "metadata").glob("*.ndjson"))) == 0
+    assert (tmp_path / "outputs" / "artifacts" / "files").exists()
+    assert not (tmp_path / "metadata").exists()
+    assert not (tmp_path / "artifacts").exists()
     assert len(list((tmp_path / "logs").glob("*/*.log"))) == 0
-    assert len(list((tmp_path / "events").glob("*/*.ndjson"))) >= 1
-    assert len(list((tmp_path / "heartbeats").glob("*/*.json"))) >= 1
+    assert len(list(layout.events_dir_path().glob("*/*.ndjson"))) >= 1
+    assert len(list(layout.heartbeats_dir_path().glob("*/*.json"))) >= 1
+    submissions_path = layout.submissions_path()
+    assert submissions_path.exists()
+    assert not (tmp_path / ".metalab" / "experiments").exists()
+    assert not (tmp_path / ".metalab" / "contexts").exists()
+    submissions = [json.loads(line) for line in submissions_path.read_text().splitlines()]
+    assert len(submissions) == 1
+    assert submissions[0]["manifest"]["submission_id"] == manifest["job_id"]
     events = [
         json.loads(line)
-        for path in (tmp_path / "events").glob("*/*.ndjson")
+        for path in layout.events_dir_path().glob("*/*.ndjson")
         for line in path.read_text().splitlines()
     ]
     assert sum(1 for event in events if event["kind"] == "planned_batch") == 1
     assert not any(event["kind"] == "planned" for event in events)
-    heartbeat_files = list((tmp_path / "heartbeats").glob("*/*.json"))
+    heartbeat_files = list(layout.heartbeats_dir_path().glob("*/*.json"))
     assert 1 <= len(heartbeat_files) <= 2
 
     second = metalab.run(exp, store=str(tmp_path), verbose=False)
     assert second.status.skipped == 4
+    assert len(submissions_path.read_text().splitlines()) == 2
 
 
 def test_load_results_uses_indexed_facade_without_eager_records(tmp_path):
@@ -88,17 +111,38 @@ def test_load_results_uses_indexed_facade_without_eager_records(tmp_path):
     assert isinstance(eager, metalab.Results)
 
 
+def test_resolved_context_is_stored_in_submission_log(tmp_path):
+    context_file = tmp_path / "input.txt"
+    context_file.write_text("hello", encoding="utf-8")
+    exp = _experiment(context={"input": metalab.FilePath(str(context_file))})
+
+    metalab.run(exp, store=str(tmp_path), verbose=False).result()
+
+    layout = FileStoreLayout(tmp_path)
+    submissions = [
+        json.loads(line)
+        for line in layout.submissions_path().read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert len(submissions) == 1
+    manifest = submissions[0]["manifest"]
+    assert "resolved_context" in manifest
+    assert "context.input" in manifest["resolved_context"]["resolved_fields"]
+    assert not (tmp_path / ".metalab" / "contexts").exists()
+
+
 def test_index_freshness_uses_event_offsets_not_run_tree_mtime(tmp_path):
     exp = _experiment()
     metalab.run(exp, store=str(tmp_path), verbose=False).result()
     rebuild_index(tmp_path, force=True)
     assert index_is_current(tmp_path)
 
-    run_shard = next((tmp_path / "runs" / "shards").glob("*.ndjson"))
-    run_shard.touch()
+    layout = FileStoreLayout(tmp_path)
+    record_shard = next((tmp_path / "records").glob("*.ndjson"))
+    record_shard.touch()
     assert index_is_current(tmp_path)
 
-    event_path = next((tmp_path / "events").glob("*/*.ndjson"))
+    event_path = next(layout.events_dir_path().glob("*/*.ndjson"))
     with event_path.open("a", encoding="utf-8") as f:
         f.write("\n")
     assert not index_is_current(tmp_path)
@@ -136,14 +180,14 @@ def test_resume_reruns_malformed_records(tmp_path):
 
     store = FileStoreConfig(root=str(tmp_path)).connect()
     malformed_record = store.list_run_records()[0]
-    shard_path = store.layout.run_shard_path(malformed_record.run_id)
+    shard_path = store.layout.record_shard_path(malformed_record.run_id)
     offset = shard_path.stat().st_size
     bad = b"{bad json\n"
     with shard_path.open("ab") as handle:
         handle.write(bad)
     existing_sequences = [
         json.loads(line)["sequence"]
-        for line in store.layout.run_shard_index_path(malformed_record.run_id)
+        for line in store.layout.record_shard_index_path(malformed_record.run_id)
         .read_text()
         .splitlines()
         if line.strip()
@@ -156,7 +200,7 @@ def test_resume_reruns_malformed_records(tmp_path):
         "status": "success",
         "sequence": max(existing_sequences) + 1,
     }
-    with store.layout.run_shard_index_path(malformed_record.run_id).open("a", encoding="utf-8") as handle:
+    with store.layout.record_shard_index_path(malformed_record.run_id).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(index_row, sort_keys=True) + "\n")
     with store.layout.shard_map_path().open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(index_row, sort_keys=True) + "\n")
@@ -181,16 +225,17 @@ def test_process_executor_writes_events_and_stable_worker_heartbeats(tmp_path):
         ).result()
 
     assert len(results.successful) == 4
+    layout = FileStoreLayout(tmp_path)
 
     events = [
         json.loads(line)
-        for path in (tmp_path / "events").glob("*/*.ndjson")
+        for path in layout.events_dir_path().glob("*/*.ndjson")
         for line in path.read_text().splitlines()
     ]
     transition_events = [event for event in events if event.get("run_id")]
     assert {event["kind"] for event in transition_events} >= {"started", "finished"}
 
-    heartbeat_files = list((tmp_path / "heartbeats").glob("*/*.json"))
+    heartbeat_files = list(layout.heartbeats_dir_path().glob("*/*.json"))
     assert 1 <= len(heartbeat_files) <= 2
     assert all(path.name.startswith("process_") for path in heartbeat_files)
 
@@ -218,9 +263,10 @@ def test_runner_uses_plan_based_executor_without_concrete_type_check(tmp_path):
     assert executor.plan.context_fingerprint
     assert executor.plan.store.get_working_directory() == tmp_path
 
+    layout = FileStoreLayout(tmp_path)
     events = [
         json.loads(line)
-        for path in (tmp_path / "events").glob("*/*.ndjson")
+        for path in layout.events_dir_path().glob("*/*.ndjson")
         for line in path.read_text().splitlines()
     ]
     plan_job_id = json.loads((tmp_path / "manifest.json").read_text())["job_id"]

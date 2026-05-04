@@ -1,4 +1,4 @@
-"""Filesystem-only v3 hash-sharded run store for HPC execution."""
+"""Filesystem-only v4 hash-sharded run store for HPC execution."""
 
 from __future__ import annotations
 
@@ -28,7 +28,12 @@ from metalab.schema import (
 )
 from metalab.store.config import StoreConfig
 from metalab.store.events import FileEventSink
-from metalab.store.layout import METADATA_LAYOUT, FileStoreLayout, safe_experiment_id
+from metalab.store.layout import (
+    LAYOUT_VERSION,
+    OUTPUTS_LAYOUT,
+    FileStoreLayout,
+    safe_experiment_id,
+)
 from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 logger = logging.getLogger(__name__)
@@ -76,7 +81,7 @@ class FileStoreConfig(StoreConfig):
         """
         List all experiment IDs in this collection.
 
-        Discovers experiments by scanning subdirectories for _meta.json files
+        Discovers experiments by scanning subdirectories for .metalab/meta.json files
         that contain experiment_id. Only works on unscoped configs.
 
         Returns:
@@ -103,7 +108,7 @@ class FileStoreConfig(StoreConfig):
         for child in root.iterdir():
             if not child.is_dir():
                 continue
-            meta_path = child / "_meta.json"
+            meta_path = FileStoreLayout(child).meta_path()
             if meta_path.exists():
                 try:
                     import json
@@ -170,7 +175,15 @@ class FileStore:
             effective_root = effective_root / safe_experiment_id(config.experiment_id)
 
         shard_count = 64
-        meta_path = effective_root / "_meta.json"
+        meta_path = FileStoreLayout(effective_root).meta_path()
+        if not meta_path.exists() and (
+            (effective_root / "_meta.json").exists()
+            or (effective_root / "runs" / "shards").exists()
+        ):
+            raise ValueError(
+                f"Unsupported metalab file store layout at {effective_root}: "
+                f"expected layout_version={LAYOUT_VERSION}"
+            )
         if meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -212,8 +225,8 @@ class FileStore:
         if not meta_path.exists():
             meta_data: dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
-                "layout_version": 3,
-                "metadata_layout": METADATA_LAYOUT,
+                "layout_version": LAYOUT_VERSION,
+                "outputs_layout": OUTPUTS_LAYOUT,
                 "shard_hash": "sha256",
                 "shard_count": self._layout.shard_count,
                 "record_schema_version": SCHEMA_VERSION,
@@ -228,10 +241,10 @@ class FileStore:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception as e:
                 raise ValueError(f"Malformed metalab store metadata: {meta_path}") from e
-            if meta.get("layout_version") != 3:
+            if meta.get("layout_version") != LAYOUT_VERSION:
                 raise ValueError(
                     f"Unsupported metalab file store layout at {self._layout.root}: "
-                    f"expected layout_version=3"
+                    f"expected layout_version={LAYOUT_VERSION}"
                 )
 
     @property
@@ -343,7 +356,7 @@ class FileStore:
         latest: dict[str, dict[str, Any]] = {}
         paths = [self._layout.shard_map_path()]
         if not paths[0].exists():
-            paths = sorted(self._layout.run_shards_dir_path().glob("*.idx"))
+            paths = sorted(self._layout.record_shards_dir_path().glob("*.idx"))
         for path in paths:
             for row in self._iter_ndjson(path):
                 run_id = row.get("run_id")
@@ -356,10 +369,10 @@ class FileStore:
                     latest[run_id] = row
         return latest
 
-    def _run_shard_freshness(self) -> dict[str, list[int]]:
+    def _record_shard_freshness(self) -> dict[str, list[int]]:
         """Return cheap freshness signals for canonical run shards."""
         freshness: dict[str, list[int]] = {}
-        for path in sorted(self._layout.run_shards_dir_path().glob("*.ndjson")):
+        for path in sorted(self._layout.record_shards_dir_path().glob("*.ndjson")):
             stat = path.stat()
             freshness[str(path.relative_to(self._layout.root))] = [
                 stat.st_size,
@@ -378,7 +391,7 @@ class FileStore:
             return None
         if cache.get("layout_version") != 1:
             return None
-        if cache.get("shards") != self._run_shard_freshness():
+        if cache.get("shards") != self._record_shard_freshness():
             return None
         run_ids = cache.get("success_run_ids")
         if not isinstance(run_ids, list):
@@ -392,7 +405,7 @@ class FileStore:
             {
                 "layout_version": 1,
                 "built_at": datetime.now().isoformat(),
-                "shards": self._run_shard_freshness(),
+                "shards": self._record_shard_freshness(),
                 "success_run_ids": sorted(success_run_ids),
             },
         )
@@ -414,7 +427,7 @@ class FileStore:
     def _latest_run_index_entry(self, run_id: str) -> dict[str, Any] | None:
         """Return latest run index entry for a run id."""
         latest: dict[str, Any] | None = None
-        for row in self._iter_ndjson(self._layout.run_shard_index_path(run_id)):
+        for row in self._iter_ndjson(self._layout.record_shard_index_path(run_id)):
             if row.get("run_id") != run_id:
                 continue
             if latest is None or int(row.get("sequence", 0)) >= int(
@@ -428,7 +441,7 @@ class FileStore:
         shard_id = row.get("shard_id")
         if not isinstance(shard_id, str):
             return None
-        path = self._layout.run_shards_dir_path() / f"{shard_id}.ndjson"
+        path = self._layout.record_shards_dir_path() / f"{shard_id}.ndjson"
         try:
             with path.open("rb") as handle:
                 handle.seek(int(row["offset"]))
@@ -439,13 +452,13 @@ class FileStore:
             logger.warning(f"Failed to load run record from {path}: {e}")
             return None
 
-    def _append_metadata(
+    def _append_output(
         self,
         kind: str,
         run_id: str,
         row: dict[str, Any],
     ) -> None:
-        """Append one packed metadata row."""
+        """Append one packed output row."""
         sequence = time.time_ns()
         envelope = {
             "run_id": run_id,
@@ -455,18 +468,18 @@ class FileStore:
             **row,
         }
         with self._run_lock(run_id):
-            self._append_json_row(self._layout.metadata_shard_path(kind, run_id), envelope)
+            self._append_json_row(self._layout.output_shard_path(kind, run_id), envelope)
 
-    def _latest_metadata_rows(
+    def _latest_output_rows(
         self,
         kind: str,
         run_id: str,
         *,
         key_field: str | None = None,
     ) -> dict[str, dict[str, Any]]:
-        """Return latest metadata rows for a run, keyed by field or singleton."""
+        """Return latest output rows for a run, keyed by field or singleton."""
         latest: dict[str, dict[str, Any]] = {}
-        for row in self._iter_ndjson(self._layout.metadata_shard_path(kind, run_id)):
+        for row in self._iter_ndjson(self._layout.output_shard_path(kind, run_id)):
             if row.get("run_id") != run_id:
                 continue
             key = str(row.get(key_field)) if key_field else "_"
@@ -484,8 +497,8 @@ class FileStore:
     def put_run_record(self, record: RunRecord) -> None:
         """Persist a run record as an append-only canonical shard row."""
         shard_id = self._layout.shard_id(record.run_id)
-        data_path = self._layout.run_shard_path(record.run_id)
-        index_path = self._layout.run_shard_index_path(record.run_id)
+        data_path = self._layout.record_shard_path(record.run_id)
+        index_path = self._layout.record_shard_index_path(record.run_id)
         sequence = time.time_ns()
         with self._run_lock(record.run_id):
             data = dump_run_record(record)
@@ -547,8 +560,8 @@ class FileStore:
         self._atomic_write_json(
             self._layout.root_manifest_path(),
             {
-                "layout_version": 3,
-                "metadata_layout": METADATA_LAYOUT,
+                "layout_version": LAYOUT_VERSION,
+                "outputs_layout": OUTPUTS_LAYOUT,
                 "shard_hash": "sha256",
                 "shard_count": self._layout.shard_count,
                 "record_schema_version": SCHEMA_VERSION,
@@ -558,26 +571,26 @@ class FileStore:
         self._write_shard_manifests()
 
     def _write_shard_manifests(self) -> None:
-        """Write compact manifests for canonical packed metadata layout."""
+        """Write compact manifests for canonical packed output layout."""
         common = {
-            "layout_version": 3,
-            "metadata_layout": METADATA_LAYOUT,
+            "layout_version": LAYOUT_VERSION,
+            "outputs_layout": OUTPUTS_LAYOUT,
             "shard_hash": "sha256",
             "shard_count": self._layout.shard_count,
         }
         self._atomic_write_json(
-            self._layout.run_shards_manifest_path(),
+            self._layout.record_shards_manifest_path(),
             {
                 **common,
                 "record_schema_version": SCHEMA_VERSION,
                 "shards": [
-                    f"runs/shards/{idx:04d}.ndjson"
+                    self._layout.records_manifest_reference(f"{idx:04d}")
                     for idx in range(self._layout.shard_count)
                 ],
             },
         )
         self._atomic_write_json(
-            self._layout.metadata_manifest_path(),
+            self._layout.outputs_manifest_path(),
             {
                 **common,
                 "kinds": ["results", "artifacts", "logs"],
@@ -587,14 +600,14 @@ class FileStore:
     def rebuild_shard_indexes(self) -> None:
         """Rebuild run-record shard indexes and shard-map from canonical shards."""
         latest_rows: list[dict[str, Any]] = []
-        for idx_path in self._layout.run_shards_dir_path().glob("*.idx"):
+        for idx_path in self._layout.record_shards_dir_path().glob("*.idx"):
             idx_path.unlink()
         shard_map = self._layout.shard_map_path()
         if shard_map.exists():
             shard_map.unlink()
 
         sequence = 0
-        for data_path in sorted(self._layout.run_shards_dir_path().glob("*.ndjson")):
+        for data_path in sorted(self._layout.record_shards_dir_path().glob("*.ndjson")):
             shard_id = data_path.stem
             idx_path = data_path.with_suffix(".idx")
             offset = 0
@@ -733,7 +746,7 @@ class FileStore:
         if dest_path.exists():
             logger.warning(f"Artifact {dest_name} already exists, overwriting")
 
-        # Copy or write the artifact payload. The packed metadata append below
+        # Copy or write the artifact payload. The packed output append below
         # takes the shard lock; avoid recursively acquiring the same flock.
         if isinstance(data, Path):
             shutil.copy2(data, dest_path)
@@ -760,7 +773,7 @@ class FileStore:
         descriptor: ArtifactDescriptor,
         uri: str,
     ) -> None:
-        """Update the packed artifact metadata for a run."""
+        """Update the packed artifact descriptor output for a run."""
         clean_metadata = {
             k: v for k, v in descriptor.metadata.items() if not k.startswith("_")
         }
@@ -776,7 +789,7 @@ class FileStore:
                 metadata=clean_metadata,
             )
         )
-        self._append_metadata(
+        self._append_output(
             "artifacts",
             run_id,
             {
@@ -809,7 +822,7 @@ class FileStore:
 
     def list_artifacts(self, run_id: str) -> list[ArtifactDescriptor]:
         """List artifacts for a run."""
-        rows = self._latest_metadata_rows("artifacts", run_id, key_field="name")
+        rows = self._latest_output_rows("artifacts", run_id, key_field="name")
         artifacts = []
         for row in rows.values():
             descriptor = row.get("descriptor")
@@ -833,7 +846,7 @@ class FileStore:
         """
         Store structured result data for a run.
 
-        Results are stored as append-only packed metadata rows.
+        Results are stored as append-only packed output rows.
         """
         result_obj = {
             "data": data,
@@ -841,7 +854,7 @@ class FileStore:
             "shape": shape,
             "metadata": metadata or {},
         }
-        self._append_metadata(
+        self._append_output(
             "results",
             run_id,
             {
@@ -852,7 +865,7 @@ class FileStore:
 
     def get_result(self, run_id: str, name: str) -> dict[str, Any] | None:
         """Retrieve structured result data."""
-        rows = self._latest_metadata_rows("results", run_id, key_field="name")
+        rows = self._latest_output_rows("results", run_id, key_field="name")
         row = rows.get(name)
         if row is None:
             return None
@@ -861,7 +874,7 @@ class FileStore:
 
     def list_results(self, run_id: str) -> list[str]:
         """List result names for a run."""
-        return sorted(self._latest_metadata_rows("results", run_id, key_field="name"))
+        return sorted(self._latest_output_rows("results", run_id, key_field="name"))
 
     # =========================================================================
     # Log operations
@@ -874,8 +887,8 @@ class FileStore:
         content: str,
         label: str | None = None,
     ) -> None:
-        """Store finalized log content as packed metadata."""
-        self._append_metadata(
+        """Store finalized log content as a packed output."""
+        self._append_output(
             "logs",
             run_id,
             {
@@ -899,9 +912,9 @@ class FileStore:
         """
         Retrieve a log file.
 
-        Searches packed log metadata for the run id.
+        Searches packed log outputs for the run id.
         """
-        rows = self._latest_metadata_rows("logs", run_id, key_field="name")
+        rows = self._latest_output_rows("logs", run_id, key_field="name")
         row = rows.get(name)
         content = row.get("content") if row else None
         return content if isinstance(content, str) else None
@@ -912,7 +925,7 @@ class FileStore:
 
         Returns a list of log names (e.g., ["run", "stdout", "stderr"]).
         """
-        return sorted(self._latest_metadata_rows("logs", run_id, key_field="name"))
+        return sorted(self._latest_output_rows("logs", run_id, key_field="name"))
 
     # =========================================================================
     # Capability: SupportsExperimentManifests
@@ -924,45 +937,35 @@ class FileStore:
         manifest: dict[str, Any],
         timestamp: str | None = None,
     ) -> None:
-        """Store an experiment manifest."""
+        """Append an experiment submission manifest."""
         from datetime import datetime
 
         if timestamp is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        exp_dir = self._layout.experiments_dir_path()
-        exp_dir.mkdir(parents=True, exist_ok=True)
-
-        exp_manifest_path = self._layout.experiment_manifest_path(
-            experiment_id, timestamp
-        )
-        self._atomic_write_json(exp_manifest_path, manifest)
-        logger.debug(f"Saved experiment manifest to {exp_manifest_path}")
+        row = {
+            "experiment_id": experiment_id,
+            "submitted_at": manifest.get("submitted_at") or datetime.now().isoformat(),
+            "timestamp": timestamp,
+            "job_id": manifest.get("job_id"),
+            "executor_type": manifest.get("executor_type"),
+            "manifest": manifest,
+        }
+        self._append_json_row(self._layout.submissions_path(), row)
+        logger.debug(f"Appended submission manifest to {self._layout.submissions_path()}")
 
     def get_experiment_manifest(self, experiment_id: str) -> dict[str, Any] | None:
         """
-        Retrieve experiment manifest by ID (most recent version).
+        Retrieve experiment manifest by ID (most recent submission).
         """
-        exp_dir = self._layout.experiments_dir_path()
-        if not exp_dir.exists():
-            return None
-
-        # Find manifest files matching this experiment_id
-        safe_id = safe_experiment_id(experiment_id)
-        matching = sorted(
-            exp_dir.glob(f"{safe_id}_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-
-        if not matching:
-            return None
-
-        try:
-            return json.loads(matching[0].read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to load experiment manifest {matching[0]}: {e}")
-            return None
+        latest: dict[str, Any] | None = None
+        for row in self._iter_ndjson(self._layout.submissions_path()):
+            manifest = row.get("manifest")
+            row_experiment_id = row.get("experiment_id")
+            if row_experiment_id != experiment_id or not isinstance(manifest, dict):
+                continue
+            latest = manifest
+        return latest
 
     # =========================================================================
     # Utility methods

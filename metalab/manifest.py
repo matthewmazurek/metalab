@@ -85,7 +85,7 @@ def build_experiment_manifest(
         "metadata": experiment.metadata,
         "total_runs": total_runs,
         "run_ids_inline": False,
-        "run_ids_path": "index/planned-runs/{prefix}.ndjson",
+        "run_ids_path": ".metalab/index/planned-runs/{prefix}.ndjson",
         "submitted_at": datetime.now().isoformat(),
     }
 

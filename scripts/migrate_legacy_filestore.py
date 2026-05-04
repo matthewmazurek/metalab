@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off migration from the legacy flat FileStore to the v3 HPC run store.
+"""One-off migration from the legacy flat FileStore to the v4 HPC run store.
 
 This intentionally lives outside the metalab CLI. It is for rescuing old
 experiments so the clean-break runner can resume them safely.
@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 DEFAULT_SHARD_COUNT = 64
-METADATA_LAYOUT = "hash-mod-sharded-ndjson"
+LAYOUT_VERSION = 4
+OUTPUTS_LAYOUT = "hash-mod-sharded-ndjson"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -80,7 +81,7 @@ def _json_line(data: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _write_run_shards(
+def _write_record_shards(
     output_root: Path,
     records: list[dict[str, Any]],
     *,
@@ -93,8 +94,8 @@ def _write_run_shards(
     shard_map_rows: list[dict[str, Any]] = []
     sequence = 0
     for shard_id, rows in sorted(rows_by_shard.items()):
-        data_path = output_root / "runs" / "shards" / f"{shard_id}.ndjson"
-        idx_path = output_root / "runs" / "shards" / f"{shard_id}.idx"
+        data_path = output_root / "records" / f"{shard_id}.ndjson"
+        idx_path = output_root / "records" / f"{shard_id}.idx"
         data_path.parent.mkdir(parents=True, exist_ok=True)
         offset = 0
         data_lines: list[bytes] = []
@@ -119,23 +120,23 @@ def _write_run_shards(
         tmp.rename(data_path)
         _write_ndjson(idx_path, idx_rows)
 
-    _write_ndjson(output_root / "index" / "shard-map.ndjson", shard_map_rows)
+    _write_ndjson(output_root / ".metalab" / "index" / "shard-map.ndjson", shard_map_rows)
     _write_json(
-        output_root / "runs" / "manifest.json",
+        output_root / "records" / "manifest.json",
         {
-            "layout_version": 3,
-            "metadata_layout": METADATA_LAYOUT,
+            "layout_version": LAYOUT_VERSION,
+            "outputs_layout": OUTPUTS_LAYOUT,
             "shard_hash": "sha256",
             "shard_count": shard_count,
             "record_schema_version": "2",
             "shards": [
-                f"runs/shards/{idx:04d}.ndjson" for idx in range(shard_count)
+                f"records/{idx:04d}.ndjson" for idx in range(shard_count)
             ],
         },
     )
 
 
-def _write_metadata_shards(
+def _write_output_shards(
     output_root: Path,
     kind: str,
     rows: list[dict[str, Any]],
@@ -146,7 +147,11 @@ def _write_metadata_shards(
     for row in rows:
         rows_by_shard.setdefault(_shard_id(row["run_id"], shard_count), []).append(row)
     for shard_id, shard_rows in sorted(rows_by_shard.items()):
-        _write_ndjson(output_root / "metadata" / kind / f"{shard_id}.ndjson", shard_rows)
+        if kind == "artifacts":
+            path = output_root / "outputs" / "artifacts" / "metadata" / f"{shard_id}.ndjson"
+        else:
+            path = output_root / "outputs" / kind / f"{shard_id}.ndjson"
+        _write_ndjson(path, shard_rows)
 
 
 def _parse_time(value: Any, fallback: datetime) -> datetime:
@@ -209,7 +214,9 @@ def _normalize_artifacts(
 
     normalized = []
     old_artifact_dir = (legacy_root / "artifacts" / run_id).resolve()
-    new_artifact_dir = (output_root / "artifacts" / run_id[:2] / run_id).resolve()
+    new_artifact_dir = (
+        output_root / "outputs" / "artifacts" / "files" / run_id[:2] / run_id
+    ).resolve()
     for item in artifacts:
         if not isinstance(item, dict):
             continue
@@ -289,7 +296,7 @@ def _copy_sidecars(legacy_root: Path, output_root: Path, run_id: str) -> None:
     prefix = run_id[:2]
     _copy_tree(
         legacy_root / "artifacts" / run_id,
-        output_root / "artifacts" / prefix / run_id,
+        output_root / "outputs" / "artifacts" / "files" / prefix / run_id,
     )
 
 
@@ -434,12 +441,12 @@ def migrate(
     planned_run_ids: list[str] = []
     migrated_run_ids: list[str] = []
     migrated_records: list[dict[str, Any]] = []
-    metadata_rows: dict[str, list[dict[str, Any]]] = {
+    output_rows: dict[str, list[dict[str, Any]]] = {
         "results": [],
         "artifacts": [],
         "logs": [],
     }
-    metadata_sequence = 0
+    output_sequence = 0
     event_rows: list[dict[str, Any]] = []
 
     for path, data in records:
@@ -467,15 +474,15 @@ def migrate(
         counts["success"] += 1
         migrated_run_ids.append(run_id)
         migrated_records.append(record)
-        result_rows = _legacy_result_rows(legacy_root, run_id, metadata_sequence)
-        metadata_sequence += len(result_rows)
-        artifact_rows = _artifact_rows(record, metadata_sequence)
-        metadata_sequence += len(artifact_rows)
-        log_rows = _legacy_log_rows(legacy_root, run_id, metadata_sequence)
-        metadata_sequence += len(log_rows)
-        metadata_rows["results"].extend(result_rows)
-        metadata_rows["artifacts"].extend(artifact_rows)
-        metadata_rows["logs"].extend(log_rows)
+        result_rows = _legacy_result_rows(legacy_root, run_id, output_sequence)
+        output_sequence += len(result_rows)
+        artifact_rows = _artifact_rows(record, output_sequence)
+        output_sequence += len(artifact_rows)
+        log_rows = _legacy_log_rows(legacy_root, run_id, output_sequence)
+        output_sequence += len(log_rows)
+        output_rows["results"].extend(result_rows)
+        output_rows["artifacts"].extend(artifact_rows)
+        output_rows["logs"].extend(log_rows)
         event_rows.append(
             {
                 "event_id": f"migration-{run_id}",
@@ -498,25 +505,32 @@ def migrate(
                 _copy_sidecars(legacy_root, output_root, run_id)
 
     if not dry_run:
-        _write_run_shards(output_root, migrated_records, shard_count=shard_count)
-        for kind, rows in metadata_rows.items():
-            _write_metadata_shards(output_root, kind, rows, shard_count=shard_count)
+        _write_record_shards(output_root, migrated_records, shard_count=shard_count)
+        for kind, rows in output_rows.items():
+            _write_output_shards(output_root, kind, rows, shard_count=shard_count)
+        for path in [
+            output_root / "outputs" / "results",
+            output_root / "outputs" / "logs",
+            output_root / "outputs" / "artifacts" / "metadata",
+            output_root / "outputs" / "artifacts" / "files",
+        ]:
+            path.mkdir(parents=True, exist_ok=True)
         _write_json(
-            output_root / "metadata" / "manifest.json",
+            output_root / "outputs" / "manifest.json",
             {
-                "layout_version": 3,
-                "metadata_layout": METADATA_LAYOUT,
+                "layout_version": LAYOUT_VERSION,
+                "outputs_layout": OUTPUTS_LAYOUT,
                 "shard_hash": "sha256",
                 "shard_count": shard_count,
                 "kinds": ["results", "artifacts", "logs"],
             },
         )
         _write_json(
-            output_root / "_meta.json",
+            output_root / ".metalab" / "meta.json",
             {
                 "created_by": "metalab",
-                "layout_version": 3,
-                "metadata_layout": METADATA_LAYOUT,
+                "layout_version": LAYOUT_VERSION,
+                "outputs_layout": OUTPUTS_LAYOUT,
                 "shard_hash": "sha256",
                 "shard_count": shard_count,
                 "record_schema_version": "2",
@@ -527,15 +541,15 @@ def migrate(
         _write_json(
             output_root / "manifest.json",
             {
-                "layout_version": 3,
-                "metadata_layout": METADATA_LAYOUT,
+                "layout_version": LAYOUT_VERSION,
+                "outputs_layout": OUTPUTS_LAYOUT,
                 "shard_hash": "sha256",
                 "shard_count": shard_count,
                 "record_schema_version": "2",
                 "experiment_id": inferred_experiment_id,
                 "expected_run_count": len(planned_run_ids),
                 "expected_run_ids_inline": False,
-                "expected_run_ids_path": "index/planned-runs/{prefix}.ndjson",
+                "expected_run_ids_path": ".metalab/index/planned-runs/{prefix}.ndjson",
                 "executor_type": "legacy-migration",
                 "job_id": "legacy-migration",
                 "created_at": datetime.now().isoformat(),
@@ -550,8 +564,14 @@ def migrate(
                 {"run_id": run_id, "shard_id": _shard_id(run_id, shard_count)}
             )
         for prefix, rows in shards.items():
-            _write_ndjson(output_root / "index" / "planned-runs" / f"{prefix}.ndjson", rows)
-        _write_ndjson(output_root / "events" / "legacy-migration" / "legacy.ndjson", event_rows)
+            _write_ndjson(
+                output_root / ".metalab" / "index" / "planned-runs" / f"{prefix}.ndjson",
+                rows,
+            )
+        _write_ndjson(
+            output_root / ".metalab" / "events" / "legacy-migration" / "legacy.ndjson",
+            event_rows,
+        )
 
     counts["planned"] = len(planned_run_ids)
     counts["migrated"] = len(migrated_run_ids)
@@ -560,7 +580,7 @@ def migrate(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Migrate legacy flat FileStore successes to a v3 hash-sharded HPC store."
+        description="Migrate legacy flat FileStore successes to a v4 hash-sharded HPC store."
     )
     parser.add_argument("legacy_store", type=Path)
     parser.add_argument("output_store", type=Path)
@@ -573,7 +593,7 @@ def main() -> int:
     parser.add_argument(
         "--no-sidecars",
         action="store_true",
-        help="Do not copy artifact payloads into the v3 layout.",
+        help="Do not copy artifact payloads into the v4 layout.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report counts without writing files.")
     parser.add_argument(
@@ -607,7 +627,7 @@ def main() -> int:
     if args.dry_run:
         print("dry run: no files written")
     else:
-        print(f"wrote v3 hash-sharded store: {args.output_store.resolve()}")
+        print(f"wrote v4 hash-sharded store: {args.output_store.resolve()}")
     return 0
 
 

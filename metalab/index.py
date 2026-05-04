@@ -23,12 +23,12 @@ def _duckdb():
 
 
 def iter_run_records(root: Path) -> Generator[tuple[RunRecord, str], None, None]:
-    """Stream latest canonical run records from v3 run shards."""
+    """Stream latest canonical run records from v4 record shards."""
     layout = FileStoreLayout(root)
     latest: dict[str, dict[str, Any]] = {}
     paths = [layout.shard_map_path()]
     if not paths[0].exists():
-        paths = sorted(layout.run_shards_dir_path().glob("*.idx"))
+        paths = sorted(layout.record_shards_dir_path().glob("*.idx"))
     for idx_path in paths:
         with idx_path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -51,7 +51,7 @@ def iter_run_records(root: Path) -> Generator[tuple[RunRecord, str], None, None]
         shard_id = row.get("shard_id")
         if not isinstance(shard_id, str):
             continue
-        shard_path = layout.run_shards_dir_path() / f"{shard_id}.ndjson"
+        shard_path = layout.record_shards_dir_path() / f"{shard_id}.ndjson"
         try:
             with shard_path.open("rb") as handle:
                 handle.seek(int(row["offset"]))
@@ -76,8 +76,8 @@ def _shard_offsets(root: Path) -> dict[str, int]:
     layout = FileStoreLayout(root)
     offsets: dict[str, int] = {}
     for base in [
-        layout.run_shards_dir_path(),
-        layout.metadata_dir_path(),
+        layout.record_shards_dir_path(),
+        layout.outputs_dir_path(),
         layout.index_dir_path(),
     ]:
         if not base.exists():

@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_SHARD_COUNT = 64
-METADATA_LAYOUT = "hash-mod-sharded-ndjson"
+LAYOUT_VERSION = 4
+OUTPUTS_LAYOUT = "hash-mod-sharded-ndjson"
 
 
 def safe_experiment_id(experiment_id: str) -> str:
@@ -24,28 +25,28 @@ def safe_experiment_id(experiment_id: str) -> str:
 
 @dataclass(frozen=True)
 class FileStoreLayout:
-    """Path builder for the v3 filesystem-only run store."""
+    """Path builder for the v4 filesystem-only run store."""
 
     root: Path
-    layout_version: int = 3
+    layout_version: int = LAYOUT_VERSION
     shard_count: int = DEFAULT_SHARD_COUNT
 
     # Directory names
-    runs_dir: str = "runs"
-    metadata_dir: str = "metadata"
+    records_dir: str = "records"
+    outputs_dir: str = "outputs"
     artifacts_dir: str = "artifacts"
+    artifact_files_dir: str = "files"
+    artifact_metadata_dir: str = "metadata"
+    internal_dir: str = ".metalab"
     events_dir: str = "events"
     heartbeats_dir: str = "heartbeats"
     index_dir: str = "index"
-    logs_dir: str = "logs"
-    results_dir: str = "results"
-    experiments_dir: str = "experiments"
-    locks_dir: str = ".locks"
-    scratch_dir: str = ".scratch"
+    locks_dir: str = "locks"
+    scratch_dir: str = "scratch"
+    slurm_logs_dir: str = "slurm-logs"
 
     # File names
-    meta_file: str = "_meta.json"
-    manifest_file: str = "_manifest.json"
+    meta_file: str = "meta.json"
     root_manifest_file: str = "manifest.json"
     status_cache_file: str = "status-cache.json"
     success_cache_file: str = "success-cache.json"
@@ -53,7 +54,8 @@ class FileStoreLayout:
     duckdb_meta_file: str = "metalab.duckdb.meta.json"
     planned_runs_dir: str = "planned-runs"
     shard_map_file: str = "shard-map.ndjson"
-    run_shards_manifest_file: str = "manifest.json"
+    record_shards_manifest_file: str = "manifest.json"
+    submissions_file: str = "submissions.ndjson"
 
     def __repr__(self) -> str:
         """Return a concise string representation."""
@@ -76,53 +78,63 @@ class FileStoreLayout:
         value = int.from_bytes(digest[:8], "big")
         return f"{value % self.shard_count:04d}"
 
-    def run_path(self, run_id: str) -> Path:
+    def record_path(self, run_id: str) -> Path:
         """Path to the canonical run-record shard for a run id."""
-        return self.run_shard_path(run_id)
+        return self.record_shard_path(run_id)
 
-    def run_shard_dir(self, run_id: str) -> Path:
+    def record_shard_dir(self, run_id: str) -> Path:
         """Directory containing run-record shards."""
-        return self.run_shards_dir_path()
+        return self.record_shards_dir_path()
 
-    def run_shards_dir_path(self) -> Path:
+    def record_shards_dir_path(self) -> Path:
         """Path to canonical run-record shards."""
-        return self.root / self.runs_dir / "shards"
+        return self.records_dir_path()
 
-    def run_shard_path(self, run_id: str) -> Path:
+    def record_shard_path(self, run_id: str) -> Path:
         """Path to the run-record NDJSON shard for a run id."""
-        return self.run_shards_dir_path() / f"{self.shard_id(run_id)}.ndjson"
+        return self.record_shards_dir_path() / f"{self.shard_id(run_id)}.ndjson"
 
-    def run_shard_index_path(self, run_id: str) -> Path:
+    def record_shard_index_path(self, run_id: str) -> Path:
         """Path to the run-record byte index shard for a run id."""
-        return self.run_shards_dir_path() / f"{self.shard_id(run_id)}.idx"
+        return self.record_shards_dir_path() / f"{self.shard_id(run_id)}.idx"
 
-    def run_shards_manifest_path(self) -> Path:
-        """Path to the run shard manifest."""
-        return self.root / self.runs_dir / self.run_shards_manifest_file
+    def record_shards_manifest_path(self) -> Path:
+        """Path to the record shard manifest."""
+        return self.records_manifest_path()
 
-    def runs_dir_path(self) -> Path:
-        """Path to the runs directory."""
-        return self.root / self.runs_dir
+    def records_dir_path(self) -> Path:
+        """Path to canonical run-record shards."""
+        return self.root / self.records_dir
+
+    def records_manifest_path(self) -> Path:
+        """Path to the record shard manifest."""
+        return self.records_dir_path() / self.record_shards_manifest_file
+
+    def records_manifest_reference(self, shard_id: str) -> str:
+        """Relative manifest reference for a record shard."""
+        return f"{self.records_dir}/{shard_id}.ndjson"
 
     # ─────────────────────────────────────────────────────────────────
-    # Packed metadata paths
+    # Packed output paths
     # ─────────────────────────────────────────────────────────────────
 
-    def metadata_dir_path(self) -> Path:
-        """Path to packed metadata shards."""
-        return self.root / self.metadata_dir
+    def outputs_dir_path(self) -> Path:
+        """Path to packed output shards."""
+        return self.root / self.outputs_dir
 
-    def metadata_kind_dir_path(self, kind: str) -> Path:
-        """Path to one packed metadata kind."""
-        return self.metadata_dir_path() / kind
+    def output_kind_dir_path(self, kind: str) -> Path:
+        """Path to one packed output kind."""
+        if kind == "artifacts":
+            return self.artifact_metadata_dir_path()
+        return self.outputs_dir_path() / kind
 
-    def metadata_shard_path(self, kind: str, run_id: str) -> Path:
-        """Path to a metadata NDJSON shard for a run id."""
-        return self.metadata_kind_dir_path(kind) / f"{self.shard_id(run_id)}.ndjson"
+    def output_shard_path(self, kind: str, run_id: str) -> Path:
+        """Path to an output NDJSON shard for a run id."""
+        return self.output_kind_dir_path(kind) / f"{self.shard_id(run_id)}.ndjson"
 
-    def metadata_manifest_path(self) -> Path:
-        """Path to the metadata shard manifest."""
-        return self.metadata_dir_path() / "manifest.json"
+    def outputs_manifest_path(self) -> Path:
+        """Path to the output shard manifest."""
+        return self.outputs_dir_path() / "manifest.json"
 
     # ─────────────────────────────────────────────────────────────────
     # Artifact paths
@@ -130,66 +142,62 @@ class FileStoreLayout:
 
     def artifact_dir(self, run_id: str) -> Path:
         """Path to a run's artifact directory."""
-        return self.root / self.artifacts_dir / run_id[:2] / run_id
+        return self.artifact_files_dir_path() / run_id[:2] / run_id
 
     def artifact_manifest_path(self, run_id: str) -> Path:
-        """Path to packed artifact metadata shard for a run id."""
-        return self.metadata_shard_path("artifacts", run_id)
+        """Path to packed artifact descriptor shard for a run id."""
+        return self.output_shard_path("artifacts", run_id)
 
     def artifacts_dir_path(self) -> Path:
         """Path to the artifacts directory."""
-        return self.root / self.artifacts_dir
+        return self.outputs_dir_path() / self.artifacts_dir
+
+    def artifact_files_dir_path(self) -> Path:
+        """Path to artifact payload files."""
+        return self.artifacts_dir_path() / self.artifact_files_dir
+
+    def artifact_metadata_dir_path(self) -> Path:
+        """Path to packed artifact metadata shards."""
+        return self.artifacts_dir_path() / self.artifact_metadata_dir
 
     # ─────────────────────────────────────────────────────────────────
     # Log paths
     # ─────────────────────────────────────────────────────────────────
 
     def log_path(self, run_id: str, name: str) -> Path:
-        """Path to a packed log metadata shard for a run id."""
-        return self.metadata_shard_path("logs", run_id)
+        """Path to a packed log output shard for a run id."""
+        return self.output_shard_path("logs", run_id)
 
     def scratch_log_path(self, run_id: str, name: str) -> Path:
         """Non-canonical path for live log streaming before finalization."""
         return (
-            self.root
+            self.internal_dir_path()
             / self.scratch_dir
             / "logs"
             / self.shard_id(run_id)
             / f"{run_id}_{name}.log"
         )
 
-    def logs_dir_path(self) -> Path:
-        """Path to the logs directory."""
-        return self.root / self.logs_dir
-
     # ─────────────────────────────────────────────────────────────────
     # Result paths
     # ─────────────────────────────────────────────────────────────────
 
     def result_path(self, run_id: str, name: str) -> Path:
-        """Path to a packed result metadata shard for a run id."""
-        return self.metadata_shard_path("results", run_id)
+        """Path to a packed result output shard for a run id."""
+        return self.output_shard_path("results", run_id)
 
     def result_dir(self, run_id: str) -> Path:
-        """Path to packed result metadata shards."""
-        return self.metadata_kind_dir_path("results")
+        """Path to packed result output shards."""
+        return self.output_kind_dir_path("results")
 
-    def results_dir_path(self) -> Path:
-        """Path to the results directory."""
-        return self.root / self.results_dir
 
     # ─────────────────────────────────────────────────────────────────
-    # Experiment manifest paths
+    # Submission manifest paths
     # ─────────────────────────────────────────────────────────────────
 
-    def experiment_manifest_path(self, experiment_id: str, timestamp: str) -> Path:
-        """Path to an experiment manifest JSON file."""
-        safe_id = safe_experiment_id(experiment_id)
-        return self.root / self.experiments_dir / f"{safe_id}_{timestamp}.json"
-
-    def experiments_dir_path(self) -> Path:
-        """Path to the experiments directory."""
-        return self.root / self.experiments_dir
+    def submissions_path(self) -> Path:
+        """Path to append-only submission manifest history."""
+        return self.internal_dir_path() / self.submissions_file
 
     # ─────────────────────────────────────────────────────────────────
     # Lock paths
@@ -201,11 +209,11 @@ class FileStoreLayout:
 
     def shard_lock_path(self, shard_id: str) -> Path:
         """Path to a shard lock file."""
-        return self.root / self.locks_dir / "shards" / f"{shard_id}.lock"
+        return self.locks_dir_path() / "shards" / f"{shard_id}.lock"
 
     def locks_dir_path(self) -> Path:
         """Path to the locks directory."""
-        return self.root / self.locks_dir
+        return self.internal_dir_path() / self.locks_dir
 
     # ─────────────────────────────────────────────────────────────────
     # Meta file path
@@ -213,15 +221,19 @@ class FileStoreLayout:
 
     def meta_path(self) -> Path:
         """Path to the store metadata file."""
-        return self.root / self.meta_file
+        return self.internal_dir_path() / self.meta_file
 
     def root_manifest_path(self) -> Path:
         """Path to the active run-store manifest."""
         return self.root / self.root_manifest_file
 
+    def internal_dir_path(self) -> Path:
+        """Path to internal rebuildable metalab files."""
+        return self.root / self.internal_dir
+
     def events_dir_path(self) -> Path:
         """Path to the persistent event root."""
-        return self.root / self.events_dir
+        return self.internal_dir_path() / self.events_dir
 
     def event_log_path(self, job_id: str, worker_id: str) -> Path:
         """Path to a worker's append-only event log."""
@@ -230,7 +242,7 @@ class FileStoreLayout:
 
     def heartbeats_dir_path(self) -> Path:
         """Path to the heartbeat root."""
-        return self.root / self.heartbeats_dir
+        return self.internal_dir_path() / self.heartbeats_dir
 
     def heartbeat_path(self, job_id: str, worker_id: str) -> Path:
         """Path to a worker heartbeat JSON file."""
@@ -239,7 +251,7 @@ class FileStoreLayout:
 
     def index_dir_path(self) -> Path:
         """Path to the sidecar index directory."""
-        return self.root / self.index_dir
+        return self.internal_dir_path() / self.index_dir
 
     def status_cache_path(self) -> Path:
         """Path to the incremental status cache."""
@@ -269,6 +281,10 @@ class FileStoreLayout:
         """Path to the rebuildable latest run-record lookup map."""
         return self.index_dir_path() / self.shard_map_file
 
+    def slurm_logs_dir_path(self) -> Path:
+        """Path to SLURM stdout/stderr logs."""
+        return self.internal_dir_path() / self.slurm_logs_dir
+
     # ─────────────────────────────────────────────────────────────────
     # Directory management
     # ─────────────────────────────────────────────────────────────────
@@ -276,34 +292,36 @@ class FileStoreLayout:
     def ensure_directories(self) -> None:
         """Create all required directories if they don't exist."""
         for dir_name in [
-            self.runs_dir,
-            self.metadata_dir,
-            self.artifacts_dir,
-            self.events_dir,
-            self.heartbeats_dir,
-            self.index_dir,
-            self.logs_dir,
-            self.results_dir,
-            self.experiments_dir,
-            self.locks_dir,
-            self.scratch_dir,
+            self.outputs_dir,
+            self.internal_dir,
         ]:
             (self.root / dir_name).mkdir(parents=True, exist_ok=True)
-        self.run_shards_dir_path().mkdir(parents=True, exist_ok=True)
-        for kind in ("results", "artifacts", "logs"):
-            self.metadata_kind_dir_path(kind).mkdir(parents=True, exist_ok=True)
+        self.record_shards_dir_path().mkdir(parents=True, exist_ok=True)
+        for kind in ("results", "logs"):
+            self.output_kind_dir_path(kind).mkdir(parents=True, exist_ok=True)
+        self.artifact_files_dir_path().mkdir(parents=True, exist_ok=True)
+        self.artifact_metadata_dir_path().mkdir(parents=True, exist_ok=True)
+        for path in [
+            self.events_dir_path(),
+            self.heartbeats_dir_path(),
+            self.index_dir_path(),
+            self.locks_dir_path(),
+            self.internal_dir_path() / self.scratch_dir,
+            self.slurm_logs_dir_path(),
+        ]:
+            path.mkdir(parents=True, exist_ok=True)
 
     def all_directories(self) -> list[Path]:
         """List all layout directories."""
         return [
-            self.runs_dir_path(),
-            self.metadata_dir_path(),
+            self.records_dir_path(),
+            self.outputs_dir_path(),
             self.artifacts_dir_path(),
+            self.internal_dir_path(),
             self.events_dir_path(),
             self.heartbeats_dir_path(),
             self.index_dir_path(),
-            self.logs_dir_path(),
-            self.results_dir_path(),
-            self.experiments_dir_path(),
             self.locks_dir_path(),
+            self.internal_dir_path() / self.scratch_dir,
+            self.slurm_logs_dir_path(),
         ]

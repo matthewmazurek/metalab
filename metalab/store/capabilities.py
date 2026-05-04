@@ -46,7 +46,7 @@ class SupportsWorkingDirectory(Protocol):
 @runtime_checkable
 class SupportsExperimentManifests(Protocol):
     """
-    Store capability: persists versioned experiment manifests.
+    Store capability: persists experiment submission manifests.
 
     Used by:
     - Runner: to store experiment configuration at submission time
@@ -61,7 +61,7 @@ class SupportsExperimentManifests(Protocol):
         timestamp: str | None = None,
     ) -> None:
         """
-        Store an experiment manifest.
+        Store an experiment submission manifest.
 
         Args:
             experiment_id: The experiment identifier.

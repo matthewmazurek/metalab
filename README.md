@@ -56,23 +56,24 @@ metalab export ./runs --format csv --out results.csv
 
 ## Run Store Layout
 
-New stores use a clean v3 hash-sharded metadata layout:
+New stores use a clean v4 hash-sharded output layout:
 
 ```text
 manifest.json
-runs/manifest.json
-runs/shards/{shard_id}.ndjson
-runs/shards/{shard_id}.idx
-metadata/manifest.json
-metadata/results/{shard_id}.ndjson
-metadata/artifacts/{shard_id}.ndjson
-metadata/logs/{shard_id}.ndjson
-events/{job_id}/{worker_id}.ndjson
-heartbeats/{job_id}/{worker_id}.json
-artifacts/{prefix}/{run_id}/...
-index/status-cache.json
-index/shard-map.ndjson
-index/metalab.duckdb
+records/manifest.json
+records/{shard_id}.ndjson
+records/{shard_id}.idx
+outputs/manifest.json
+outputs/results/{shard_id}.ndjson
+outputs/logs/{shard_id}.ndjson
+outputs/artifacts/metadata/{shard_id}.ndjson
+outputs/artifacts/files/{prefix}/{run_id}/...
+.metalab/events/{job_id}/{worker_id}.ndjson
+.metalab/heartbeats/{job_id}/{worker_id}.json
+.metalab/index/status-cache.json
+.metalab/index/shard-map.ndjson
+.metalab/index/metalab.duckdb
+.metalab/submissions.ndjson
 ```
 
 Run-record shards are canonical. Artifact payload files remain regular

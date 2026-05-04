@@ -35,6 +35,7 @@ from uuid import uuid4
 from metalab.events import Event, emit_event
 from metalab.executor.handle import RunStatus
 from metalab.result import Results
+from metalab.store.layout import FileStoreLayout
 from metalab.types import Status
 
 if TYPE_CHECKING:
@@ -601,7 +602,7 @@ class SlurmExecutor:
         store_path = _get_store_path(store)
 
         # Create logs directory
-        logs_dir = store_path / "slurm_logs"
+        logs_dir = FileStoreLayout(store_path).slurm_logs_dir_path()
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Compute chunking: each array task processes chunk_size runs

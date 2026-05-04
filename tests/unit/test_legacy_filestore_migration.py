@@ -55,7 +55,7 @@ def _write_legacy_record(root: Path, run_id: str, *, done: bool) -> None:
 def test_legacy_migration_only_promotes_done_successes(tmp_path):
     module = _load_migration_module()
     legacy = tmp_path / "legacy"
-    output = tmp_path / "v3"
+    output = tmp_path / "v4"
     _write_legacy_record(legacy, "aaaaaaaaaaaaaaaa", done=True)
     _write_legacy_record(legacy, "bbbbbbbbbbbbbbbb", done=False)
 
@@ -64,6 +64,15 @@ def test_legacy_migration_only_promotes_done_successes(tmp_path):
     assert counts["planned"] == 2
     assert counts["migrated"] == 1
     assert counts["left_pending"] == 1
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["layout_version"] == 4
+    assert (output / "records").exists()
+    assert (output / "outputs").exists()
+    assert (output / "outputs" / "artifacts" / "metadata").exists()
+    assert not (output / "runs").exists()
+    assert not (output / "metadata").exists()
+    assert not (output / "artifacts").exists()
+    assert (output / ".metalab" / "events" / "legacy-migration" / "legacy.ndjson").exists()
 
     migrated = FileStoreConfig(root=str(output)).connect().get_run_record(
         "aaaaaaaaaaaaaaaa"
@@ -86,7 +95,7 @@ def test_legacy_migration_only_promotes_done_successes(tmp_path):
 def test_legacy_migration_dry_run_uses_fast_count_path(tmp_path):
     module = _load_migration_module()
     legacy = tmp_path / "legacy"
-    output = tmp_path / "v3"
+    output = tmp_path / "v4"
     _write_legacy_record(legacy, "aaaaaaaaaaaaaaaa", done=True)
     _write_legacy_record(legacy, "bbbbbbbbbbbbbbbb", done=False)
 

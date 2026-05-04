@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from metalab.store.layout import FileStoreLayout
+
 EVENT_KINDS = {
     "planned_batch",
     "started",
@@ -95,7 +97,7 @@ class FileEventSink:
 
 def iter_event_files(root: Path) -> list[Path]:
     """Return all event shard files in deterministic order."""
-    events_root = root / "events"
+    events_root = FileStoreLayout(root).events_dir_path()
     if not events_root.exists():
         return []
     return sorted(events_root.glob("*/*.ndjson"))

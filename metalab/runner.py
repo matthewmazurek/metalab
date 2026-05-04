@@ -71,8 +71,11 @@ def _write_experiment_manifest(
     context_fingerprint: str,
     total_runs: int,
     run_ids: list[str] | None = None,
+    job_id: str | None = None,
+    executor_type: str | None = None,
+    resolved_context_manifest: dict | None = None,
 ) -> None:
-    """Write versioned experiment metadata to the store."""
+    """Append submission experiment metadata to the store."""
     from datetime import datetime
 
     from metalab.manifest import build_experiment_manifest
@@ -83,6 +86,16 @@ def _write_experiment_manifest(
         total_runs=total_runs,
         run_ids=run_ids,
     )
+    if job_id is not None:
+        exp_manifest["job_id"] = job_id
+        exp_manifest["submission_id"] = job_id
+    if executor_type is not None:
+        exp_manifest["executor_type"] = executor_type
+    if resolved_context_manifest:
+        exp_manifest["resolved_context"] = {
+            "context_fingerprint": context_fingerprint,
+            "resolved_fields": resolved_context_manifest,
+        }
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if isinstance(store, SupportsExperimentManifests):
@@ -91,7 +104,7 @@ def _write_experiment_manifest(
             exp_manifest,
             timestamp=timestamp,
         )
-        logger.debug(f"Saved experiment manifest: {experiment.experiment_id}")
+        logger.debug(f"Saved submission manifest: {experiment.experiment_id}")
 
 
 def prepare_experiment_plan(
@@ -111,27 +124,6 @@ def prepare_experiment_plan(
     # Resolve context - computes lazy hashes for FilePath/DirPath
     resolved_context, manifest = resolve_context(experiment.context)
     ctx_fp = fingerprint(resolved_context)
-
-    # Optionally persist the resolved manifest for auditability
-    if persist_manifest and manifest and isinstance(store, SupportsWorkingDirectory):
-        import json
-
-        manifest_path = (
-            store.get_working_directory()
-            / f"{experiment.experiment_id}_context_manifest.json"
-        )
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("w") as f:
-            json.dump(
-                {
-                    "experiment_id": experiment.experiment_id,
-                    "context_fingerprint": ctx_fp,
-                    "resolved_fields": manifest,
-                },
-                f,
-                indent=2,
-            )
-        logger.debug(f"Saved context manifest to {manifest_path}")
 
     # First pass: compute all run_ids and store resolved params/seeds.
     run_entries: list[RunPlanEntry] = []
@@ -201,7 +193,7 @@ def prepare_experiment_plan(
                     "experiment_id": experiment.experiment_id,
                     "expected_run_count": len(all_run_ids),
                     "expected_run_ids_inline": False,
-                    "expected_run_ids_path": "index/planned-runs/{prefix}.ndjson",
+                    "expected_run_ids_path": ".metalab/index/planned-runs/{prefix}.ndjson",
                     "executor_type": executor_type,
                     "job_id": job_id,
                     "created_at": datetime.now().isoformat(),
@@ -211,9 +203,17 @@ def prepare_experiment_plan(
         except Exception as e:
             logger.warning(f"Failed to write root manifest: {e}")
 
-    # Write compact experiment manifest; run IDs live in planned-runs sidecars.
+    # Append compact submission manifest; run IDs live in planned-runs sidecars.
     if persist_manifest:
-        _write_experiment_manifest(experiment, store, ctx_fp, len(all_run_ids))
+        _write_experiment_manifest(
+            experiment,
+            store,
+            ctx_fp,
+            len(all_run_ids),
+            job_id=job_id,
+            executor_type=executor_type,
+            resolved_context_manifest=manifest or None,
+        )
 
     plan = ExperimentPlan(
         experiment=experiment,
@@ -343,7 +343,7 @@ def run(
     else:
         config = store
 
-    # The provided path is the run store. Clean-break v3 stores do not
+    # The provided path is the run store. Clean-break v4 stores do not
     # auto-scope into experiment subdirectories.
     resolved_store: "Store" = config.connect()
     store_label = type(resolved_store).__name__

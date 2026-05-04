@@ -589,7 +589,7 @@ class Capture:
                 self._logger.removeHandler(self._log_handler)
 
         # Finalize streamed logs into the store. FileStore returns a scratch
-        # path here; the canonical log entry is the packed metadata row.
+        # path here; the canonical log entry is the packed output row.
         if self._log_path and self._log_path.exists() and hasattr(self._store, "put_log"):
             try:
                 log_content = self._log_path.read_text(encoding="utf-8")
