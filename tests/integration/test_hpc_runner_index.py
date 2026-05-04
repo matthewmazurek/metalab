@@ -4,7 +4,7 @@ import json
 
 import metalab
 from metalab import ProcessExecutor, RunRecord, Status, ThreadExecutor
-from metalab.index import export, rebuild_index, summary
+from metalab.index import export, index_is_current, rebuild_index, summary
 from metalab.store.file import FileStoreConfig
 
 
@@ -24,7 +24,7 @@ def _experiment():
     )
 
 
-def test_local_run_writes_v2_store_and_resumes(tmp_path):
+def test_local_run_writes_v3_store_and_resumes(tmp_path):
     exp = _experiment()
 
     handle = metalab.run(
@@ -38,11 +38,18 @@ def test_local_run_writes_v2_store_and_resumes(tmp_path):
     assert len(results) == 4
     assert (tmp_path / "manifest.json").exists()
     manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["layout_version"] == 3
+    assert manifest["metadata_layout"] == "hash-mod-sharded-ndjson"
+    assert manifest["shard_count"] == 64
     assert manifest["expected_run_count"] == 4
     assert "expected_run_ids" not in manifest
     assert manifest["expected_run_ids_path"] == "index/planned-runs/{prefix}.ndjson"
     assert len(list((tmp_path / "index" / "planned-runs").glob("*.ndjson"))) >= 1
-    assert len(list((tmp_path / "runs").glob("*/*.json"))) == 4
+    assert len(list((tmp_path / "runs").glob("*/*.json"))) == 0
+    assert len(list((tmp_path / "runs" / "shards").glob("*.ndjson"))) >= 1
+    assert len(list((tmp_path / "runs" / "shards").glob("*.idx"))) >= 1
+    assert len(list((tmp_path / "metadata" / "logs").glob("*.ndjson"))) >= 1
+    assert len(list((tmp_path / "logs").glob("*/*.log"))) == 0
     assert len(list((tmp_path / "events").glob("*/*.ndjson"))) >= 1
     assert len(list((tmp_path / "heartbeats").glob("*/*.json"))) >= 1
     events = [
@@ -57,6 +64,44 @@ def test_local_run_writes_v2_store_and_resumes(tmp_path):
 
     second = metalab.run(exp, store=str(tmp_path), verbose=False)
     assert second.status.skipped == 4
+
+
+def test_load_results_uses_indexed_facade_without_eager_records(tmp_path):
+    exp = _experiment()
+    metalab.run(exp, store=str(tmp_path), verbose=False).result()
+
+    results = metalab.load_results(str(tmp_path), indexed=True)
+
+    assert isinstance(results, metalab.IndexedResults)
+    assert index_is_current(tmp_path)
+    assert len(results) == 4
+    assert len(results.successful) == 4
+    assert results.summary()["by_status"] == {"success": 4}
+    assert results[0].status == Status.SUCCESS
+
+    rows = results.table()
+    assert len(rows) == 4
+    assert "param_x" in rows[0]
+    assert "score" in rows[0]
+
+    eager = metalab.load_results(str(tmp_path), indexed=False)
+    assert isinstance(eager, metalab.Results)
+
+
+def test_index_freshness_uses_event_offsets_not_run_tree_mtime(tmp_path):
+    exp = _experiment()
+    metalab.run(exp, store=str(tmp_path), verbose=False).result()
+    rebuild_index(tmp_path, force=True)
+    assert index_is_current(tmp_path)
+
+    run_shard = next((tmp_path / "runs" / "shards").glob("*.ndjson"))
+    run_shard.touch()
+    assert index_is_current(tmp_path)
+
+    event_path = next((tmp_path / "events").glob("*/*.ndjson"))
+    with event_path.open("a", encoding="utf-8") as f:
+        f.write("\n")
+    assert not index_is_current(tmp_path)
 
 
 def test_resume_reruns_running_records(tmp_path):
@@ -91,7 +136,30 @@ def test_resume_reruns_malformed_records(tmp_path):
 
     store = FileStoreConfig(root=str(tmp_path)).connect()
     malformed_record = store.list_run_records()[0]
-    store.layout.run_path(malformed_record.run_id).write_text("{bad json", encoding="utf-8")
+    shard_path = store.layout.run_shard_path(malformed_record.run_id)
+    offset = shard_path.stat().st_size
+    bad = b"{bad json\n"
+    with shard_path.open("ab") as handle:
+        handle.write(bad)
+    existing_sequences = [
+        json.loads(line)["sequence"]
+        for line in store.layout.run_shard_index_path(malformed_record.run_id)
+        .read_text()
+        .splitlines()
+        if line.strip()
+    ]
+    index_row = {
+        "run_id": malformed_record.run_id,
+        "shard_id": store.layout.shard_id(malformed_record.run_id),
+        "offset": offset,
+        "length": len(bad),
+        "status": "success",
+        "sequence": max(existing_sequences) + 1,
+    }
+    with store.layout.run_shard_index_path(malformed_record.run_id).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(index_row, sort_keys=True) + "\n")
+    with store.layout.shard_map_path().open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(index_row, sort_keys=True) + "\n")
 
     rerun = metalab.run(exp, store=str(tmp_path), verbose=False)
     assert rerun.status.skipped == 3

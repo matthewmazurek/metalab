@@ -188,7 +188,6 @@ def run_array_task(store_root: str) -> int:
             store=store,
             worker_id=worker_id,
             job_id=spec.get("job_id", array_job_id),
-            derived_metric_refs=spec.get("derived_metric_refs"),
             capture_third_party_logs=True,
         )
 

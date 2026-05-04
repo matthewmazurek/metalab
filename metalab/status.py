@@ -182,7 +182,7 @@ def read_status(
         cache_path.write_text(
             json.dumps(
                 {
-                    "layout_version": 2,
+                    "layout_version": 3,
                     "format": "compact-v1",
                     "updated_at": datetime.now().isoformat(),
                     "offsets": new_offsets,

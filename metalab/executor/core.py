@@ -38,7 +38,6 @@ def execute_payload(
     store: "Store",
     worker_id: str,
     job_id: str = "",
-    derived_metric_refs: list[str] | None = None,
     capture_third_party_logs: bool = False,
 ) -> RunRecord:
     """
@@ -49,7 +48,7 @@ def execute_payload(
     2. Write RUNNING record to store
     3. Execute the operation
     4. Handle success/failure
-    5. Compute derived metrics (if configured)
+    5. Persist the final run record
 
     Args:
         run_id: Unique identifier for this run.
@@ -62,7 +61,6 @@ def execute_payload(
         operation: The operation to execute.
         store: Store for persisting results and artifacts.
         worker_id: Identifier for the worker (e.g., "thread:1", "slurm:123_0").
-        derived_metric_refs: Optional list of derived metric function references.
         capture_third_party_logs: If True, capture root logger output.
 
     Returns:
@@ -179,10 +177,6 @@ def execute_payload(
             artifacts=capture_data["artifacts"],
         )
 
-        # Compute derived metrics if configured
-        if derived_metric_refs:
-            _compute_derived_metrics(result, store, derived_metric_refs)
-
         # Persist final record for durability (survives crashes/disconnects)
         try:
             store.put_run_record(result)
@@ -288,36 +282,3 @@ def execute_payload(
                 log_content = log_buffer.getvalue()
                 if log_content:
                     store.put_log(run_id, "logging", log_content)
-
-
-def _compute_derived_metrics(
-    record: RunRecord,
-    store: "Store",
-    metric_refs: list[str],
-) -> None:
-    """
-    Compute and store derived metrics for a completed run.
-
-    Args:
-        record: The completed run record.
-        store: The store for persisting derived metrics.
-        metric_refs: List of function references ('module:func' format).
-    """
-    from metalab.derived import compute_derived_for_run, import_derived_metric
-    from metalab.result import Run
-
-    # Create Run object from record
-    run = Run(record, store)
-
-    # Import and apply metric functions
-    functions = []
-    for ref in metric_refs:
-        try:
-            func = import_derived_metric(ref)
-            functions.append(func)
-        except Exception as e:
-            logger.warning(f"Failed to import derived metric '{ref}': {e}")
-
-    if functions:
-        derived = compute_derived_for_run(run, functions)
-        store.put_derived(record.run_id, derived)

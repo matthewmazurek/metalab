@@ -56,21 +56,33 @@ metalab export ./runs --format csv --out results.csv
 
 ## Run Store Layout
 
-New stores use a clean v2 layout:
+New stores use a clean v3 hash-sharded metadata layout:
 
 ```text
 manifest.json
-runs/{prefix}/{run_id}.json
+runs/manifest.json
+runs/shards/{shard_id}.ndjson
+runs/shards/{shard_id}.idx
+metadata/manifest.json
+metadata/results/{shard_id}.ndjson
+metadata/artifacts/{shard_id}.ndjson
+metadata/logs/{shard_id}.ndjson
 events/{job_id}/{worker_id}.ndjson
 heartbeats/{job_id}/{worker_id}.json
-logs/{prefix}/{run_id}.log
 artifacts/{prefix}/{run_id}/...
 index/status-cache.json
+index/shard-map.ndjson
 index/metalab.duckdb
 ```
 
-Run JSON files are canonical. Event logs, heartbeats, status cache, and DuckDB
-indexes are accelerators that can be regenerated.
+Run-record shards are canonical. Artifact payload files remain regular
+filesystem artifacts. Event logs, heartbeats, status cache, shard maps, and
+DuckDB indexes are accelerators that can be regenerated.
+
+`metalab.load_results(PATH)` is the public Python entry point for completed
+results. When DuckDB is installed, it opens/rebuilds the sidecar index under the
+hood and keeps run records lazy for summaries, filters, and tables. Pass
+`indexed=False` to force direct eager loading from canonical run shards.
 
 ## CLI
 

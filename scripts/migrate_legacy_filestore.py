@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off migration from the legacy flat FileStore to the v2 HPC run store.
+"""One-off migration from the legacy flat FileStore to the v3 HPC run store.
 
 This intentionally lives outside the metalab CLI. It is for rescuing old
 experiments so the clean-break runner can resume them safely.
@@ -8,16 +8,55 @@ experiments so the clean-break runner can resume them safely.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import mmap
+import re
 import shutil
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+DEFAULT_SHARD_COUNT = 64
+METADATA_LAYOUT = "hash-mod-sharded-ndjson"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _shard_id(run_id: str, shard_count: int = DEFAULT_SHARD_COUNT) -> str:
+    digest = hashlib.sha256(run_id.encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], "big")
+    return f"{value % shard_count:04d}"
+
+
+def _read_top_level_json_string(path: Path, field: str) -> str | None:
+    """Return a simple top-level string field without decoding the full record.
+
+    Legacy records can contain large artifact metadata. Dry runs only need a
+    few scalar fields for counting, so avoid paying the full JSON parse cost.
+    """
+
+    pattern = re.compile(
+        rb'"' + re.escape(field.encode("utf-8")) + rb'"\s*:\s*"((?:\\.|[^"\\])*)"'
+    )
+    try:
+        with path.open("rb") as handle:
+            if path.stat().st_size == 0:
+                return None
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                match = pattern.search(mapped)
+                if match is None:
+                    return None
+                value = bytes(match.group(1))
+    except OSError:
+        return None
+    try:
+        return json.loads(b'"' + value + b'"')
+    except json.JSONDecodeError:
+        return None
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -33,6 +72,81 @@ def _write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp = path.with_suffix(f".tmp.{datetime.now().timestamp()}")
     tmp.write_text(content, encoding="utf-8")
     tmp.rename(path)
+
+
+def _json_line(data: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(data, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _write_run_shards(
+    output_root: Path,
+    records: list[dict[str, Any]],
+    *,
+    shard_count: int,
+) -> None:
+    rows_by_shard: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        rows_by_shard.setdefault(_shard_id(record["run_id"], shard_count), []).append(record)
+
+    shard_map_rows: list[dict[str, Any]] = []
+    sequence = 0
+    for shard_id, rows in sorted(rows_by_shard.items()):
+        data_path = output_root / "runs" / "shards" / f"{shard_id}.ndjson"
+        idx_path = output_root / "runs" / "shards" / f"{shard_id}.idx"
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        offset = 0
+        data_lines: list[bytes] = []
+        idx_rows: list[dict[str, Any]] = []
+        for record in rows:
+            sequence += 1
+            line = _json_line(record)
+            idx_row = {
+                "run_id": record["run_id"],
+                "shard_id": shard_id,
+                "offset": offset,
+                "length": len(line),
+                "status": record["status"],
+                "sequence": sequence,
+            }
+            data_lines.append(line)
+            idx_rows.append(idx_row)
+            shard_map_rows.append(idx_row)
+            offset += len(line)
+        tmp = data_path.with_suffix(f".tmp.{datetime.now().timestamp()}")
+        tmp.write_bytes(b"".join(data_lines))
+        tmp.rename(data_path)
+        _write_ndjson(idx_path, idx_rows)
+
+    _write_ndjson(output_root / "index" / "shard-map.ndjson", shard_map_rows)
+    _write_json(
+        output_root / "runs" / "manifest.json",
+        {
+            "layout_version": 3,
+            "metadata_layout": METADATA_LAYOUT,
+            "shard_hash": "sha256",
+            "shard_count": shard_count,
+            "record_schema_version": "2",
+            "shards": [
+                f"runs/shards/{idx:04d}.ndjson" for idx in range(shard_count)
+            ],
+        },
+    )
+
+
+def _write_metadata_shards(
+    output_root: Path,
+    kind: str,
+    rows: list[dict[str, Any]],
+    *,
+    shard_count: int,
+) -> None:
+    rows_by_shard: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_shard.setdefault(_shard_id(row["run_id"], shard_count), []).append(row)
+    for shard_id, shard_rows in sorted(rows_by_shard.items()):
+        _write_ndjson(output_root / "metadata" / kind / f"{shard_id}.ndjson", shard_rows)
 
 
 def _parse_time(value: Any, fallback: datetime) -> datetime:
@@ -124,7 +238,7 @@ def _normalize_artifacts(
     return normalized
 
 
-def _v2_record(
+def _run_record(
     data: dict[str, Any],
     *,
     run_id: str,
@@ -177,23 +291,107 @@ def _copy_sidecars(legacy_root: Path, output_root: Path, run_id: str) -> None:
         legacy_root / "artifacts" / run_id,
         output_root / "artifacts" / prefix / run_id,
     )
-    _copy_tree(
-        legacy_root / "results" / run_id,
-        output_root / "results" / prefix / run_id,
-    )
 
-    derived = legacy_root / "derived" / f"{run_id}.json"
-    if derived.exists():
-        dst = output_root / "derived" / prefix / f"{run_id}.json"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(derived, dst)
 
+def _legacy_result_rows(legacy_root: Path, run_id: str, sequence_start: int) -> list[dict[str, Any]]:
+    result_dir = legacy_root / "results" / run_id
+    rows: list[dict[str, Any]] = []
+    if not result_dir.exists():
+        return rows
+    sequence = sequence_start
+    for path in sorted(result_dir.glob("*.json")):
+        try:
+            result = _read_json(path)
+        except Exception:
+            continue
+        sequence += 1
+        rows.append(
+            {
+                "run_id": run_id,
+                "kind": "results",
+                "name": path.stem,
+                "result": result,
+                "sequence": sequence,
+                "written_at": datetime.now().isoformat(),
+            }
+        )
+    return rows
+
+
+def _legacy_log_rows(legacy_root: Path, run_id: str, sequence_start: int) -> list[dict[str, Any]]:
     logs_dir = legacy_root / "logs"
-    if logs_dir.exists():
-        for log_path in logs_dir.glob(f"{run_id}_*.log"):
-            dst = output_root / "logs" / prefix / log_path.name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(log_path, dst)
+    rows: list[dict[str, Any]] = []
+    if not logs_dir.exists():
+        return rows
+    sequence = sequence_start
+    for log_path in sorted(logs_dir.glob(f"{run_id}_*.log")):
+        sequence += 1
+        rows.append(
+            {
+                "run_id": run_id,
+                "kind": "logs",
+                "name": log_path.stem[len(run_id) + 1 :],
+                "content": log_path.read_text(encoding="utf-8"),
+                "label": None,
+                "sequence": sequence,
+                "written_at": datetime.now().isoformat(),
+            }
+        )
+    return rows
+
+
+def _artifact_rows(record: dict[str, Any], sequence_start: int) -> list[dict[str, Any]]:
+    rows = []
+    sequence = sequence_start
+    for artifact in record.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        sequence += 1
+        rows.append(
+            {
+                "run_id": record["run_id"],
+                "kind": "artifacts",
+                "name": artifact.get("name", ""),
+                "descriptor": artifact,
+                "sequence": sequence,
+                "written_at": datetime.now().isoformat(),
+            }
+        )
+    return rows
+
+
+def _fast_dry_run(
+    record_paths: Iterable[Path],
+    *,
+    trust_success_without_done: bool,
+) -> Counter[str]:
+    """Count migratable legacy records without materializing run records."""
+
+    counts: Counter[str] = Counter()
+    planned = 0
+    migrated = 0
+    for path in record_paths:
+        status = _read_top_level_json_string(path, "status")
+        if status is None:
+            counts["malformed_json"] += 1
+            continue
+
+        run_id = _read_top_level_json_string(path, "run_id") or path.stem
+        if not run_id:
+            counts["missing_run_id"] += 1
+            continue
+
+        planned += 1
+        done_marker = path.with_suffix(".done").exists()
+        if status == "success" and (done_marker or trust_success_without_done):
+            counts["success"] += 1
+            migrated += 1
+        else:
+            counts["left_pending"] += 1
+
+    counts["planned"] = planned
+    counts["migrated"] = migrated
+    return counts
 
 
 def migrate(
@@ -204,6 +402,8 @@ def migrate(
     trust_success_without_done: bool = False,
     copy_sidecars: bool = True,
     dry_run: bool = False,
+    strict_dry_run: bool = False,
+    shard_count: int = DEFAULT_SHARD_COUNT,
 ) -> Counter[str]:
     if legacy_root.resolve() == output_root.resolve():
         raise ValueError("Refusing to migrate in place; choose a fresh output directory")
@@ -211,6 +411,12 @@ def migrate(
         raise ValueError(f"Legacy store has no runs directory: {legacy_root / 'runs'}")
     if output_root.exists() and any(output_root.iterdir()) and not dry_run:
         raise ValueError(f"Output directory is not empty: {output_root}")
+
+    if dry_run and not strict_dry_run:
+        return _fast_dry_run(
+            (legacy_root / "runs").glob("*.json"),
+            trust_success_without_done=trust_success_without_done,
+        )
 
     record_paths = sorted((legacy_root / "runs").glob("*.json"))
     records: list[tuple[Path, dict[str, Any]]] = []
@@ -227,6 +433,13 @@ def migrate(
     )
     planned_run_ids: list[str] = []
     migrated_run_ids: list[str] = []
+    migrated_records: list[dict[str, Any]] = []
+    metadata_rows: dict[str, list[dict[str, Any]]] = {
+        "results": [],
+        "artifacts": [],
+        "logs": [],
+    }
+    metadata_sequence = 0
     event_rows: list[dict[str, Any]] = []
 
     for path, data in records:
@@ -243,7 +456,7 @@ def migrate(
             counts["left_pending"] += 1
             continue
 
-        record = _v2_record(
+        record = _run_record(
             data,
             run_id=run_id,
             experiment_id=inferred_experiment_id,
@@ -253,6 +466,16 @@ def migrate(
         )
         counts["success"] += 1
         migrated_run_ids.append(run_id)
+        migrated_records.append(record)
+        result_rows = _legacy_result_rows(legacy_root, run_id, metadata_sequence)
+        metadata_sequence += len(result_rows)
+        artifact_rows = _artifact_rows(record, metadata_sequence)
+        metadata_sequence += len(artifact_rows)
+        log_rows = _legacy_log_rows(legacy_root, run_id, metadata_sequence)
+        metadata_sequence += len(log_rows)
+        metadata_rows["results"].extend(result_rows)
+        metadata_rows["artifacts"].extend(artifact_rows)
+        metadata_rows["logs"].extend(log_rows)
         event_rows.append(
             {
                 "event_id": f"migration-{run_id}",
@@ -271,16 +494,32 @@ def migrate(
         )
 
         if not dry_run:
-            _write_json(output_root / "runs" / run_id[:2] / f"{run_id}.json", record)
             if copy_sidecars:
                 _copy_sidecars(legacy_root, output_root, run_id)
 
     if not dry_run:
+        _write_run_shards(output_root, migrated_records, shard_count=shard_count)
+        for kind, rows in metadata_rows.items():
+            _write_metadata_shards(output_root, kind, rows, shard_count=shard_count)
+        _write_json(
+            output_root / "metadata" / "manifest.json",
+            {
+                "layout_version": 3,
+                "metadata_layout": METADATA_LAYOUT,
+                "shard_hash": "sha256",
+                "shard_count": shard_count,
+                "kinds": ["results", "artifacts", "logs"],
+            },
+        )
         _write_json(
             output_root / "_meta.json",
             {
                 "created_by": "metalab",
-                "layout_version": 2,
+                "layout_version": 3,
+                "metadata_layout": METADATA_LAYOUT,
+                "shard_hash": "sha256",
+                "shard_count": shard_count,
+                "record_schema_version": "2",
                 "schema_version": "2",
                 "migration_source": str(legacy_root),
             },
@@ -288,7 +527,11 @@ def migrate(
         _write_json(
             output_root / "manifest.json",
             {
-                "layout_version": 2,
+                "layout_version": 3,
+                "metadata_layout": METADATA_LAYOUT,
+                "shard_hash": "sha256",
+                "shard_count": shard_count,
+                "record_schema_version": "2",
                 "experiment_id": inferred_experiment_id,
                 "expected_run_count": len(planned_run_ids),
                 "expected_run_ids_inline": False,
@@ -303,7 +546,9 @@ def migrate(
 
         shards: dict[str, list[dict[str, str]]] = {}
         for run_id in planned_run_ids:
-            shards.setdefault(run_id[:2], []).append({"run_id": run_id})
+            shards.setdefault(run_id[:2], []).append(
+                {"run_id": run_id, "shard_id": _shard_id(run_id, shard_count)}
+            )
         for prefix, rows in shards.items():
             _write_ndjson(output_root / "index" / "planned-runs" / f"{prefix}.ndjson", rows)
         _write_ndjson(output_root / "events" / "legacy-migration" / "legacy.ndjson", event_rows)
@@ -315,7 +560,7 @@ def migrate(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Migrate legacy flat FileStore successes to a v2 sharded HPC store."
+        description="Migrate legacy flat FileStore successes to a v3 hash-sharded HPC store."
     )
     parser.add_argument("legacy_store", type=Path)
     parser.add_argument("output_store", type=Path)
@@ -328,9 +573,20 @@ def main() -> int:
     parser.add_argument(
         "--no-sidecars",
         action="store_true",
-        help="Do not copy artifacts/results/derived/logs into the v2 layout.",
+        help="Do not copy artifact payloads into the v3 layout.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report counts without writing files.")
+    parser.add_argument(
+        "--strict-dry-run",
+        action="store_true",
+        help="With --dry-run, fully parse and normalize records instead of using the fast count pass.",
+    )
+    parser.add_argument(
+        "--shard-count",
+        type=int,
+        default=DEFAULT_SHARD_COUNT,
+        help="Number of hash-mod metadata shards to create.",
+    )
     args = parser.parse_args()
 
     counts = migrate(
@@ -340,6 +596,8 @@ def main() -> int:
         trust_success_without_done=args.trust_success_without_done,
         copy_sidecars=not args.no_sidecars,
         dry_run=args.dry_run,
+        strict_dry_run=args.strict_dry_run,
+        shard_count=args.shard_count,
     )
     print(
         "legacy migration: "
@@ -349,7 +607,7 @@ def main() -> int:
     if args.dry_run:
         print("dry run: no files written")
     else:
-        print(f"wrote v2 store: {args.output_store.resolve()}")
+        print(f"wrote v3 hash-sharded store: {args.output_store.resolve()}")
     return 0
 
 

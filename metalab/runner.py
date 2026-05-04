@@ -20,7 +20,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from metalab.derived import DerivedMetricFn
     from metalab.events import EventCallback
     from metalab.executor.base import Executor
     from metalab.experiment import Experiment
@@ -37,7 +36,7 @@ from metalab._ids import (
 from metalab.executor.base import ExperimentPlan, RunPlanEntry
 from metalab.executor.handle import RunHandle
 from metalab.executor.thread import ThreadExecutor
-from metalab.result import Results
+from metalab.result import IndexedResults, Results
 from metalab.store import (
     DEFAULT_STORE_ROOT,
     SupportsExperimentManifests,
@@ -100,7 +99,6 @@ def prepare_experiment_plan(
     store: Store,
     resume: bool = True,
     persist_manifest: bool = True,
-    derived_metric_refs: list[str] | None = None,
     job_id: str | None = None,
     executor_type: str = "local",
 ) -> ExperimentPlan:
@@ -224,7 +222,6 @@ def prepare_experiment_plan(
         run_entries=run_entries,
         job_id=job_id,
         executor_type=executor_type,
-        derived_metric_refs=derived_metric_refs,
         resolved_context_manifest=manifest or None,
     )
 
@@ -266,7 +263,6 @@ def run(
     executor: "Executor | None" = None,
     resume: bool = True,
     on_event: "EventCallback | None" = None,
-    derived_metrics: "list[str | DerivedMetricFn] | None" = None,
     verbose: bool = True,
 ) -> RunHandle:
     """
@@ -291,11 +287,6 @@ def run(
             - SlurmExecutor(...) for cluster execution
         resume: Skip existing successful runs (default: True).
         on_event: Optional event callback for custom event handling.
-        derived_metrics: List of derived metric functions or import references.
-            These are post-hoc computations that do NOT affect run fingerprints.
-            Functions must be importable (not lambdas). Can be specified as:
-            - Function references: "myproject.metrics:final_loss"
-            - Callable functions: final_loss (must have __module__ and __name__)
         verbose: Log resolved store, executor, and run counts to stderr
             (default: True).  Automatically configures a handler on the
             ``metalab`` logger if none exists.  Set to ``False`` to silence.
@@ -329,10 +320,6 @@ def run(
         print(f"Event: {event.kind}")
     handle = metalab.run(exp, on_event=my_callback)
 
-    # With derived metrics
-    handle = metalab.run(exp, derived_metrics=[final_loss, convergence_stats])
-    results = handle.result()  # Derived metrics computed and stored per-run
-
     # With StoreConfig (pre-configured)
     config = FileStoreConfig(root="./experiments")
     handle = metalab.run(exp, store=config)
@@ -344,7 +331,6 @@ def run(
     if verbose:
         _ensure_verbose_logging()
 
-    from metalab.derived import get_func_ref
     from metalab.store.locator import parse_to_config
 
     # Resolve store to config, then scope and connect
@@ -357,7 +343,7 @@ def run(
     else:
         config = store
 
-    # The provided path is the run store. Clean-break v2 stores do not
+    # The provided path is the run store. Clean-break v3 stores do not
     # auto-scope into experiment subdirectories.
     resolved_store: "Store" = config.connect()
     store_label = type(resolved_store).__name__
@@ -372,22 +358,10 @@ def run(
     else:
         logger.info("Executor: %s", type(executor).__name__)
 
-    # Convert derived_metrics to references
-    derived_metric_refs: list[str] | None = None
-    if derived_metrics:
-        derived_metric_refs = []
-        for metric in derived_metrics:
-            if isinstance(metric, str):
-                derived_metric_refs.append(metric)
-            else:
-                # Convert callable to reference
-                derived_metric_refs.append(get_func_ref(metric))
-
     plan = prepare_experiment_plan(
         experiment=experiment,
         store=resolved_store,
         resume=resume,
-        derived_metric_refs=derived_metric_refs,
         job_id=f"job-{uuid.uuid4().hex[:8]}",
         executor_type=type(executor).__name__,
     )
@@ -413,7 +387,10 @@ def run(
 def load_results(
     store: "str | StoreConfig",
     experiment_id: str | None = None,
-) -> Results:
+    *,
+    indexed: bool | str = "auto",
+    refresh_index: bool = False,
+) -> Results | IndexedResults:
     """
     Load results from a store.
 
@@ -422,6 +399,10 @@ def load_results(
     Args:
         store: Store path or StoreConfig.
         experiment_id: Optional filter by experiment ID.
+        indexed: Use the DuckDB sidecar index when available. ``"auto"``
+            uses it when DuckDB can be opened and falls back to eager file
+            loading otherwise. Set ``False`` to force eager loading.
+        refresh_index: Rebuild the DuckDB sidecar before opening indexed results.
 
     Returns:
         Results containing the loaded runs.
@@ -457,6 +438,16 @@ def load_results(
         config = store
 
     resolved_store = config.connect()
+    if indexed is not False:
+        try:
+            return IndexedResults.from_store(
+                resolved_store,
+                experiment_id=experiment_id,
+                refresh=refresh_index,
+            )
+        except RuntimeError:
+            if indexed is True:
+                raise
     return Results.from_store(resolved_store, experiment_id=experiment_id)
 
 

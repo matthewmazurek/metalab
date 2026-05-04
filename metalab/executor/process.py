@@ -61,7 +61,6 @@ def _process_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
         store=store,
         worker_id=f"process:{os.getpid()}",
         job_id=payload.job_id,
-        derived_metric_refs=payload.derived_metric_refs,
         capture_third_party_logs=True,
     )
 

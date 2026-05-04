@@ -115,7 +115,7 @@ from metalab.params import (
 )
 
 # Result
-from metalab.result import ExperimentInfo, Results, Run
+from metalab.result import ExperimentInfo, IndexedResults, Results, Run
 
 # High-level run facade
 from metalab.runner import load_results, reconnect, run
@@ -179,6 +179,7 @@ __all__ = [
     "Experiment",
     # Result
     "ExperimentInfo",
+    "IndexedResults",
     "Results",
     "Run",
     # Run

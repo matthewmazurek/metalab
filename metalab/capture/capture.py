@@ -96,7 +96,7 @@ class Capture:
         # Buffered data (metrics and artifacts only - logs stream directly)
         self._metrics: dict[str, Any] = {}
         self._stepped_metrics: list[dict[str, Any]] = []
-        self._results: list[dict[str, Any]] = []  # Structured data for derived metrics
+        self._results: list[dict[str, Any]] = []  # Structured operation outputs
         self._artifacts: list[ArtifactDescriptor] = []
         self._finalized = False
 
@@ -310,7 +310,7 @@ class Capture:
         """
         Capture structured result data.
 
-        Data is stored as compact structured JSON for derived metrics.
+        Data is stored as compact structured JSON for later inspection.
         Unlike artifacts, data should remain small and query-friendly.
 
         Args:
@@ -326,7 +326,7 @@ class Capture:
 
         Example:
         ```python
-        # Store a transition matrix for derived metric computation
+        # Store a transition matrix for later inspection
         capture.data("transition_matrix", matrix)
 
         # Store a dictionary of scores
@@ -588,19 +588,14 @@ class Capture:
             if self._logger and self._log_handler in self._logger.handlers:
                 self._logger.removeHandler(self._log_handler)
 
-        # Upload logs for stores that need it
-        # - SupportsLogPath: writes directly to persistent path, no upload needed
-        # - Other stores with put_log: need explicit upload
-        if self._log_path and self._log_path.exists():
-            if not isinstance(self._store, SupportsLogPath) and hasattr(
-                self._store, "put_log"
-            ):
-                # Store needs explicit log upload
-                try:
-                    log_content = self._log_path.read_text(encoding="utf-8")
-                    self._store.put_log(self._run_id, "run", log_content)
-                except Exception:
-                    pass  # Best effort
+        # Finalize streamed logs into the store. FileStore returns a scratch
+        # path here; the canonical log entry is the packed metadata row.
+        if self._log_path and self._log_path.exists() and hasattr(self._store, "put_log"):
+            try:
+                log_content = self._log_path.read_text(encoding="utf-8")
+                self._store.put_log(self._run_id, "run", log_content)
+            except Exception:
+                pass  # Best effort
 
         # Store results to stores that support structured results
         if isinstance(self._store, SupportsStructuredResults):

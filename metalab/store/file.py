@@ -1,4 +1,4 @@
-"""Filesystem-only v2 run store for HPC execution."""
+"""Filesystem-only v3 hash-sharded run store for HPC execution."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import fcntl
 import json
 import logging
 import shutil
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,8 +28,8 @@ from metalab.schema import (
 )
 from metalab.store.config import StoreConfig
 from metalab.store.events import FileEventSink
-from metalab.store.layout import FileStoreLayout, safe_experiment_id
-from metalab.types import ArtifactDescriptor, Metric, RunRecord, Status
+from metalab.store.layout import METADATA_LAYOUT, FileStoreLayout, safe_experiment_id
+from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,16 @@ class FileStore:
         if config.experiment_id:
             effective_root = effective_root / safe_experiment_id(config.experiment_id)
 
-        self._layout = FileStoreLayout(effective_root)
+        shard_count = 64
+        meta_path = effective_root / "_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                shard_count = int(meta.get("shard_count", shard_count))
+            except Exception:
+                pass
+
+        self._layout = FileStoreLayout(effective_root, shard_count=shard_count)
         self._ensure_layout()
 
     @property
@@ -202,13 +212,27 @@ class FileStore:
         if not meta_path.exists():
             meta_data: dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
-                "layout_version": 2,
+                "layout_version": 3,
+                "metadata_layout": METADATA_LAYOUT,
+                "shard_hash": "sha256",
+                "shard_count": self._layout.shard_count,
+                "record_schema_version": SCHEMA_VERSION,
                 "created_by": "metalab",
             }
             # Include experiment_id for explicitly scoped stores.
             if self._config.experiment_id:
                 meta_data["experiment_id"] = self._config.experiment_id
             self._atomic_write_json(meta_path, meta_data)
+        else:
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                raise ValueError(f"Malformed metalab store metadata: {meta_path}") from e
+            if meta.get("layout_version") != 3:
+                raise ValueError(
+                    f"Unsupported metalab file store layout at {self._layout.root}: "
+                    f"expected layout_version=3"
+                )
 
     @property
     def root(self) -> Path:
@@ -259,10 +283,24 @@ class FileStore:
         content = json.dumps(data, indent=2, sort_keys=True)
         FileStore._atomic_write(path, content.encode("utf-8"))
 
+    @staticmethod
+    def _json_line(data: dict[str, Any]) -> bytes:
+        """Serialize one compact JSON row for NDJSON append."""
+        return (
+            json.dumps(data, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+
     @contextmanager
     def _run_lock(self, run_id: str) -> Generator[None, None, None]:
-        """Acquire a per-run lock using flock."""
+        """Acquire the shard lock for a run id using flock."""
         lock_path = self._layout.lock_path(run_id)
+        with self._path_lock(lock_path):
+            yield
+
+    @contextmanager
+    def _path_lock(self, lock_path: Path) -> Generator[None, None, None]:
+        """Acquire a filesystem lock at an arbitrary path."""
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.touch()
 
@@ -273,64 +311,228 @@ class FileStore:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    def _append_json_row(self, path: Path, row: dict[str, Any]) -> tuple[int, int]:
+        """Append one NDJSON row and return byte offset and length."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = self._json_line(row)
+        with path.open("ab") as handle:
+            offset = handle.tell()
+            handle.write(line)
+            handle.flush()
+        return offset, len(line)
+
+    def _iter_ndjson(self, path: Path) -> Generator[dict[str, Any], None, None]:
+        """Yield JSON rows from an NDJSON file, skipping malformed rows."""
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception as e:
+                    logger.warning(f"Failed to load row {path}:{line_no}: {e}")
+                    continue
+                if isinstance(data, dict):
+                    yield data
+
+    def _latest_run_index_entries(self) -> dict[str, dict[str, Any]]:
+        """Return latest run index entry per run id by sequence."""
+        latest: dict[str, dict[str, Any]] = {}
+        paths = [self._layout.shard_map_path()]
+        if not paths[0].exists():
+            paths = sorted(self._layout.run_shards_dir_path().glob("*.idx"))
+        for path in paths:
+            for row in self._iter_ndjson(path):
+                run_id = row.get("run_id")
+                if not isinstance(run_id, str):
+                    continue
+                prev = latest.get(run_id)
+                if prev is None or int(row.get("sequence", 0)) >= int(
+                    prev.get("sequence", 0)
+                ):
+                    latest[run_id] = row
+        return latest
+
+    def _run_shard_freshness(self) -> dict[str, list[int]]:
+        """Return cheap freshness signals for canonical run shards."""
+        freshness: dict[str, list[int]] = {}
+        for path in sorted(self._layout.run_shards_dir_path().glob("*.ndjson")):
+            stat = path.stat()
+            freshness[str(path.relative_to(self._layout.root))] = [
+                stat.st_size,
+                stat.st_mtime_ns,
+            ]
+        return freshness
+
+    def _load_success_cache(self) -> set[str] | None:
+        """Load fresh successful run ids, or return None when stale/missing."""
+        path = self._layout.success_cache_path()
+        if not path.exists():
+            return None
+        try:
+            cache = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if cache.get("layout_version") != 1:
+            return None
+        if cache.get("shards") != self._run_shard_freshness():
+            return None
+        run_ids = cache.get("success_run_ids")
+        if not isinstance(run_ids, list):
+            return None
+        return {run_id for run_id in run_ids if isinstance(run_id, str)}
+
+    def _write_success_cache(self, success_run_ids: set[str]) -> None:
+        """Atomically write the rebuildable successful-run cache."""
+        self._atomic_write_json(
+            self._layout.success_cache_path(),
+            {
+                "layout_version": 1,
+                "built_at": datetime.now().isoformat(),
+                "shards": self._run_shard_freshness(),
+                "success_run_ids": sorted(success_run_ids),
+            },
+        )
+
+    def _success_run_ids(self) -> set[str]:
+        """Return successful run ids using a freshness-checked cache."""
+        cached = self._load_success_cache()
+        if cached is not None:
+            return cached
+
+        success_ids: set[str] = set()
+        for row in self._latest_run_index_entries().values():
+            record = self._read_run_at_index(row)
+            if record is not None and record.status == Status.SUCCESS:
+                success_ids.add(record.run_id)
+        self._write_success_cache(success_ids)
+        return success_ids
+
+    def _latest_run_index_entry(self, run_id: str) -> dict[str, Any] | None:
+        """Return latest run index entry for a run id."""
+        latest: dict[str, Any] | None = None
+        for row in self._iter_ndjson(self._layout.run_shard_index_path(run_id)):
+            if row.get("run_id") != run_id:
+                continue
+            if latest is None or int(row.get("sequence", 0)) >= int(
+                latest.get("sequence", 0)
+            ):
+                latest = row
+        return latest
+
+    def _read_run_at_index(self, row: dict[str, Any]) -> RunRecord | None:
+        """Read a run record via a byte index row."""
+        shard_id = row.get("shard_id")
+        if not isinstance(shard_id, str):
+            return None
+        path = self._layout.run_shards_dir_path() / f"{shard_id}.ndjson"
+        try:
+            with path.open("rb") as handle:
+                handle.seek(int(row["offset"]))
+                payload = handle.read(int(row["length"]))
+            data = json.loads(payload.decode("utf-8"))
+            return load_run_record(data)
+        except Exception as e:
+            logger.warning(f"Failed to load run record from {path}: {e}")
+            return None
+
+    def _append_metadata(
+        self,
+        kind: str,
+        run_id: str,
+        row: dict[str, Any],
+    ) -> None:
+        """Append one packed metadata row."""
+        sequence = time.time_ns()
+        envelope = {
+            "run_id": run_id,
+            "kind": kind,
+            "sequence": sequence,
+            "written_at": datetime.now().isoformat(),
+            **row,
+        }
+        with self._run_lock(run_id):
+            self._append_json_row(self._layout.metadata_shard_path(kind, run_id), envelope)
+
+    def _latest_metadata_rows(
+        self,
+        kind: str,
+        run_id: str,
+        *,
+        key_field: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return latest metadata rows for a run, keyed by field or singleton."""
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self._iter_ndjson(self._layout.metadata_shard_path(kind, run_id)):
+            if row.get("run_id") != run_id:
+                continue
+            key = str(row.get(key_field)) if key_field else "_"
+            prev = latest.get(key)
+            if prev is None or int(row.get("sequence", 0)) >= int(
+                prev.get("sequence", 0)
+            ):
+                latest[key] = row
+        return latest
+
     # =========================================================================
     # Run record operations
     # =========================================================================
 
     def put_run_record(self, record: RunRecord) -> None:
-        """Persist a run record atomically."""
-        path = self._layout.run_path(record.run_id)
-
+        """Persist a run record as an append-only canonical shard row."""
+        shard_id = self._layout.shard_id(record.run_id)
+        data_path = self._layout.run_shard_path(record.run_id)
+        index_path = self._layout.run_shard_index_path(record.run_id)
+        sequence = time.time_ns()
         with self._run_lock(record.run_id):
             data = dump_run_record(record)
-            self._atomic_write_json(path, data)
+            offset, length = self._append_json_row(data_path, data)
+            index_row = {
+                "run_id": record.run_id,
+                "shard_id": shard_id,
+                "offset": offset,
+                "length": length,
+                "status": record.status.value,
+                "sequence": sequence,
+            }
+            self._append_json_row(index_path, index_row)
+            with self._path_lock(self._layout.index_dir_path() / "shard-map.lock"):
+                self._append_json_row(self._layout.shard_map_path(), index_row)
 
     def get_run_record(self, run_id: str) -> RunRecord | None:
         """Retrieve a run record by ID."""
-        path = self._layout.run_path(run_id)
-
-        if not path.exists():
+        index_row = self._latest_run_index_entry(run_id)
+        if index_row is None:
             return None
-
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return load_run_record(data)
-        except Exception as e:
-            logger.warning(f"Failed to load run record {path}: {e}")
-            return None
+        return self._read_run_at_index(index_row)
 
     def list_run_records(self, experiment_id: str | None = None) -> list[RunRecord]:
         """List run records, optionally filtered by experiment."""
         records = []
-        runs_dir = self._layout.runs_dir_path()
-
-        if not runs_dir.exists():
-            return records
-
-        for path in sorted(runs_dir.glob("*/*.json")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                record = load_run_record(data)
-
-                if experiment_id is None or record.experiment_id == experiment_id:
-                    records.append(record)
-            except Exception as e:
-                logger.warning(f"Failed to load run record {path}: {e}")
+        for row in self._latest_run_index_entries().values():
+            record = self._read_run_at_index(row)
+            if record is None:
+                continue
+            if experiment_id is None or record.experiment_id == experiment_id:
+                records.append(record)
 
         return records
 
     def run_exists(self, run_id: str) -> bool:
         """Check if a run record exists."""
-        return self._layout.run_path(run_id).exists()
+        return self.get_run_record(run_id) is not None
 
     def get_run_statuses(self, run_ids: list[str]) -> dict[str, Status]:
-        """Bulk lookup run statuses from canonical run records."""
-        statuses: dict[str, Status] = {}
-        for run_id in run_ids:
-            record = self.get_run_record(run_id)
-            if record is not None:
-                statuses[run_id] = record.status
-        return statuses
+        """Bulk lookup successful run statuses for resume."""
+        success_ids = self._success_run_ids()
+        return {
+            run_id: Status.SUCCESS
+            for run_id in run_ids
+            if run_id in success_ids
+        }
 
     def successful_run_ids(self, experiment_id: str) -> set[str]:
         """Return successful run ids for an experiment."""
@@ -343,8 +545,84 @@ class FileStore:
     def write_root_manifest(self, manifest: dict[str, Any]) -> None:
         """Write the root run-store manifest."""
         self._atomic_write_json(
-            self._layout.root_manifest_path(), {"layout_version": 2, **manifest}
+            self._layout.root_manifest_path(),
+            {
+                "layout_version": 3,
+                "metadata_layout": METADATA_LAYOUT,
+                "shard_hash": "sha256",
+                "shard_count": self._layout.shard_count,
+                "record_schema_version": SCHEMA_VERSION,
+                **manifest,
+            },
         )
+        self._write_shard_manifests()
+
+    def _write_shard_manifests(self) -> None:
+        """Write compact manifests for canonical packed metadata layout."""
+        common = {
+            "layout_version": 3,
+            "metadata_layout": METADATA_LAYOUT,
+            "shard_hash": "sha256",
+            "shard_count": self._layout.shard_count,
+        }
+        self._atomic_write_json(
+            self._layout.run_shards_manifest_path(),
+            {
+                **common,
+                "record_schema_version": SCHEMA_VERSION,
+                "shards": [
+                    f"runs/shards/{idx:04d}.ndjson"
+                    for idx in range(self._layout.shard_count)
+                ],
+            },
+        )
+        self._atomic_write_json(
+            self._layout.metadata_manifest_path(),
+            {
+                **common,
+                "kinds": ["results", "artifacts", "logs"],
+            },
+        )
+
+    def rebuild_shard_indexes(self) -> None:
+        """Rebuild run-record shard indexes and shard-map from canonical shards."""
+        latest_rows: list[dict[str, Any]] = []
+        for idx_path in self._layout.run_shards_dir_path().glob("*.idx"):
+            idx_path.unlink()
+        shard_map = self._layout.shard_map_path()
+        if shard_map.exists():
+            shard_map.unlink()
+
+        sequence = 0
+        for data_path in sorted(self._layout.run_shards_dir_path().glob("*.ndjson")):
+            shard_id = data_path.stem
+            idx_path = data_path.with_suffix(".idx")
+            offset = 0
+            with data_path.open("rb") as handle:
+                for raw_line in handle:
+                    length = len(raw_line)
+                    try:
+                        data = json.loads(raw_line.decode("utf-8"))
+                        record = load_run_record(data)
+                    except Exception as e:
+                        logger.warning(f"Skipping malformed run shard row {data_path}: {e}")
+                        offset += length
+                        continue
+                    sequence += 1
+                    row = {
+                        "run_id": record.run_id,
+                        "shard_id": shard_id,
+                        "offset": offset,
+                        "length": length,
+                        "status": record.status.value,
+                        "sequence": sequence,
+                    }
+                    self._append_json_row(idx_path, row)
+                    latest_rows.append(row)
+                    offset += length
+
+        for row in latest_rows:
+            self._append_json_row(shard_map, row)
 
     def write_planned_run_ids(self, run_ids: list[str]) -> None:
         """Write expected run IDs to sharded sidecar files."""
@@ -356,7 +634,14 @@ class FileStore:
         planned_dir.mkdir(parents=True, exist_ok=True)
         for prefix, shard_run_ids in shards.items():
             content = "".join(
-                json.dumps({"run_id": run_id}, sort_keys=True) + "\n"
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "shard_id": self._layout.shard_id(run_id),
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
                 for run_id in shard_run_ids
             )
             self._atomic_write(
@@ -448,15 +733,14 @@ class FileStore:
         if dest_path.exists():
             logger.warning(f"Artifact {dest_name} already exists, overwriting")
 
-        with self._run_lock(run_id):
-            # Copy or write the artifact
-            if isinstance(data, Path):
-                shutil.copy2(data, dest_path)
-            else:
-                self._atomic_write(dest_path, data)
+        # Copy or write the artifact payload. The packed metadata append below
+        # takes the shard lock; avoid recursively acquiring the same flock.
+        if isinstance(data, Path):
+            shutil.copy2(data, dest_path)
+        else:
+            self._atomic_write(dest_path, data)
 
-            # Update manifest
-            self._update_manifest(run_id, descriptor, str(dest_path))
+        self._update_manifest(run_id, descriptor, str(dest_path))
 
         # Return updated descriptor with new URI
         return ArtifactDescriptor(
@@ -476,16 +760,7 @@ class FileStore:
         descriptor: ArtifactDescriptor,
         uri: str,
     ) -> None:
-        """Update the artifact manifest for a run."""
-        manifest_path = self._layout.artifact_manifest_path(run_id)
-
-        # Load existing manifest
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        else:
-            manifest = {"artifacts": []}
-
-        # Add or update entry (strip internal _run_id from metadata)
+        """Update the packed artifact metadata for a run."""
         clean_metadata = {
             k: v for k, v in descriptor.metadata.items() if not k.startswith("_")
         }
@@ -501,15 +776,14 @@ class FileStore:
                 metadata=clean_metadata,
             )
         )
-
-        # Remove existing entry with same name (overwrite)
-        manifest["artifacts"] = [
-            a for a in manifest["artifacts"] if a.get("name") != descriptor.name
-        ]
-        manifest["artifacts"].append(updated_descriptor)
-
-        # Write manifest atomically
-        self._atomic_write_json(manifest_path, manifest)
+        self._append_metadata(
+            "artifacts",
+            run_id,
+            {
+                "name": descriptor.name,
+                "descriptor": updated_descriptor,
+            },
+        )
 
     def get_artifact(self, uri: str) -> bytes:
         """Retrieve artifact data."""
@@ -535,37 +809,13 @@ class FileStore:
 
     def list_artifacts(self, run_id: str) -> list[ArtifactDescriptor]:
         """List artifacts for a run."""
-        manifest_path = self._layout.artifact_manifest_path(run_id)
-
-        if not manifest_path.exists():
-            return []
-
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return [load_artifact_descriptor(a) for a in manifest.get("artifacts", [])]
-
-    # =========================================================================
-    # Derived metrics operations
-    # =========================================================================
-
-    def put_derived(self, run_id: str, derived: dict[str, Metric]) -> None:
-        """Persist derived metrics for a run."""
-        path = self._layout.derived_path(run_id)
-
-        with self._run_lock(run_id):
-            self._atomic_write_json(path, derived)
-
-    def get_derived(self, run_id: str) -> dict[str, Metric] | None:
-        """Retrieve derived metrics for a run."""
-        path = self._layout.derived_path(run_id)
-
-        if not path.exists():
-            return None
-
-        return json.loads(path.read_text(encoding="utf-8"))
-
-    def derived_exists(self, run_id: str) -> bool:
-        """Check if derived metrics exist for a run."""
-        return self._layout.derived_path(run_id).exists()
+        rows = self._latest_metadata_rows("artifacts", run_id, key_field="name")
+        artifacts = []
+        for row in rows.values():
+            descriptor = row.get("descriptor")
+            if isinstance(descriptor, dict):
+                artifacts.append(load_artifact_descriptor(descriptor))
+        return sorted(artifacts, key=lambda item: item.name)
 
     # =========================================================================
     # Structured results operations
@@ -583,39 +833,35 @@ class FileStore:
         """
         Store structured result data for a run.
 
-        Results are stored in JSON format at results/{run_id}/{name}.json.
+        Results are stored as append-only packed metadata rows.
         """
-        result_dir = self._layout.result_dir(run_id)
-        result_dir.mkdir(parents=True, exist_ok=True)
-        path = self._layout.result_path(run_id, name)
-
         result_obj = {
             "data": data,
             "dtype": dtype,
             "shape": shape,
             "metadata": metadata or {},
         }
-
-        with self._run_lock(run_id):
-            self._atomic_write_json(path, result_obj)
+        self._append_metadata(
+            "results",
+            run_id,
+            {
+                "name": name,
+                "result": result_obj,
+            },
+        )
 
     def get_result(self, run_id: str, name: str) -> dict[str, Any] | None:
         """Retrieve structured result data."""
-        path = self._layout.result_path(run_id, name)
-
-        if not path.exists():
+        rows = self._latest_metadata_rows("results", run_id, key_field="name")
+        row = rows.get(name)
+        if row is None:
             return None
-
-        return json.loads(path.read_text(encoding="utf-8"))
+        result = row.get("result")
+        return result if isinstance(result, dict) else None
 
     def list_results(self, run_id: str) -> list[str]:
         """List result names for a run."""
-        result_dir = self._layout.result_dir(run_id)
-
-        if not result_dir.exists():
-            return []
-
-        return [p.stem for p in result_dir.glob("*.json")]
+        return sorted(self._latest_metadata_rows("results", run_id, key_field="name"))
 
     # =========================================================================
     # Log operations
@@ -628,10 +874,16 @@ class FileStore:
         content: str,
         label: str | None = None,
     ) -> None:
-        """Store a log file for a run."""
-        log_path = self._layout.log_path(run_id, name)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(log_path, content.encode("utf-8"))
+        """Store finalized log content as packed metadata."""
+        self._append_metadata(
+            "logs",
+            run_id,
+            {
+                "name": name,
+                "content": content,
+                "label": label,
+            },
+        )
 
     def get_log_path(self, run_id: str, name: str) -> Path:
         """
@@ -639,7 +891,7 @@ class FileStore:
 
         Enables streaming loggers to write directly to the store.
         """
-        log_path = self._layout.log_path(run_id, name)
+        log_path = self._layout.scratch_log_path(run_id, name)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         return log_path
 
@@ -647,14 +899,12 @@ class FileStore:
         """
         Retrieve a log file.
 
-        Searches for logs matching the run_id in the v2 sharded layout.
+        Searches packed log metadata for the run id.
         """
-        # Try new format: {run_id}_{name}.log
-        new_path = self._layout.log_path(run_id, name)
-        if new_path.exists():
-            return new_path.read_text(encoding="utf-8")
-
-        return None
+        rows = self._latest_metadata_rows("logs", run_id, key_field="name")
+        row = rows.get(name)
+        content = row.get("content") if row else None
+        return content if isinstance(content, str) else None
 
     def list_logs(self, run_id: str) -> list[str]:
         """
@@ -662,15 +912,7 @@ class FileStore:
 
         Returns a list of log names (e.g., ["run", "stdout", "stderr"]).
         """
-        log_names: set[str] = set()
-
-        shard_dir = self._layout.logs_dir_path() / run_id[:2]
-        if shard_dir.exists():
-            for log_file in shard_dir.glob(f"{run_id}_*.log"):
-                name = log_file.stem[len(run_id) + 1 :]
-                log_names.add(name)
-
-        return sorted(log_names)
+        return sorted(self._latest_metadata_rows("logs", run_id, key_field="name"))
 
     # =========================================================================
     # Capability: SupportsExperimentManifests
@@ -727,32 +969,18 @@ class FileStore:
     # =========================================================================
 
     def delete_run(self, run_id: str) -> None:
-        """Delete a run and all its artifacts/logs/derived metrics/results."""
+        """Delete non-canonical payload/scratch files for a run.
+
+        Canonical append-only shard entries are immutable. Deleting a canonical
+        run would require a future tombstone/compaction operation.
+        """
         with self._run_lock(run_id):
-            # Delete run record
-            run_path = self._layout.run_path(run_id)
-            if run_path.exists():
-                run_path.unlink()
-
-            # Delete derived metrics
-            derived_path = self._layout.derived_path(run_id)
-            if derived_path.exists():
-                derived_path.unlink()
-
-            # Delete results
-            result_dir = self._layout.result_dir(run_id)
-            if result_dir.exists():
-                shutil.rmtree(result_dir)
-
-            # Delete artifacts
             artifact_dir = self._layout.artifact_dir(run_id)
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
-
-            # Delete logs
-            log_dir = self._layout.logs_dir_path() / run_id[:2]
-            for log_file in log_dir.glob(f"{run_id}_*.log"):
-                log_file.unlink()
+            scratch_log = self._layout.scratch_log_path(run_id, "run")
+            if scratch_log.exists():
+                scratch_log.unlink()
 
         # Delete lock file
         lock_path = self._layout.lock_path(run_id)

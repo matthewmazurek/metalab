@@ -55,7 +55,7 @@ def _write_legacy_record(root: Path, run_id: str, *, done: bool) -> None:
 def test_legacy_migration_only_promotes_done_successes(tmp_path):
     module = _load_migration_module()
     legacy = tmp_path / "legacy"
-    output = tmp_path / "v2"
+    output = tmp_path / "v3"
     _write_legacy_record(legacy, "aaaaaaaaaaaaaaaa", done=True)
     _write_legacy_record(legacy, "bbbbbbbbbbbbbbbb", done=False)
 
@@ -81,3 +81,23 @@ def test_legacy_migration_only_promotes_done_successes(tmp_path):
     assert status.total == 2
     assert status.success == 1
     assert status.pending == 1
+
+
+def test_legacy_migration_dry_run_uses_fast_count_path(tmp_path):
+    module = _load_migration_module()
+    legacy = tmp_path / "legacy"
+    output = tmp_path / "v3"
+    _write_legacy_record(legacy, "aaaaaaaaaaaaaaaa", done=True)
+    _write_legacy_record(legacy, "bbbbbbbbbbbbbbbb", done=False)
+
+    def fail_if_normalized(*args, **kwargs):
+        raise AssertionError("dry-run should not normalize full run records")
+
+    module._run_record = fail_if_normalized
+
+    counts = module.migrate(legacy, output, dry_run=True)
+
+    assert counts["planned"] == 2
+    assert counts["migrated"] == 1
+    assert counts["left_pending"] == 1
+    assert not output.exists()

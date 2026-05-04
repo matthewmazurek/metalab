@@ -138,8 +138,8 @@ class SupportsStructuredResults(Protocol):
     Store capability: stores structured result data inline (not as artifacts).
 
     Used by:
-    - Capture: to store intermediate data for derived metrics
-    - Derived metric computation: to retrieve stored data
+    - Capture: to store structured operation outputs
+    - Result access: to retrieve stored data
 
     FileStore implements this with JSON files.
     FileStore does not (results stored in capture summary as fallback).

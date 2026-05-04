@@ -35,6 +35,7 @@ from uuid import uuid4
 from metalab.events import Event, emit_event
 from metalab.executor.handle import RunStatus
 from metalab.result import Results
+from metalab.types import Status
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
@@ -530,7 +531,6 @@ def _write_array_spec(
         "chunk_size": chunk_size,
         "total_chunks": (total_runs + chunk_size - 1) // chunk_size,
         "shards": shards,
-        "derived_metric_refs": None,
         "store_locator": store_locator,
         "job_id": job_id,
     }
@@ -576,7 +576,6 @@ class SlurmExecutor:
             context_fingerprint=plan.context_fingerprint,
             total_runs=plan.total_runs,
             skipped_count=plan.skipped_count,
-            derived_metric_refs=plan.derived_metric_refs,
             job_id=plan.job_id,
         )
 
@@ -588,7 +587,6 @@ class SlurmExecutor:
         context_fingerprint: str,
         total_runs: int,
         skipped_count: int = 0,
-        derived_metric_refs: list[str] | None = None,
         job_id: str | None = None,
     ) -> "SlurmRunHandle":
         """Implementation shared by direct and plan-based indexed submission."""
@@ -630,15 +628,6 @@ class SlurmExecutor:
             store_locator=store_locator,
             job_id=job_id,
         )
-
-        # Update spec with derived metrics if provided
-        if derived_metric_refs:
-            spec_path = store_path / "slurm_array_spec.json"
-            with open(spec_path) as f:
-                spec = json.load(f)
-            spec["derived_metric_refs"] = derived_metric_refs
-            with open(spec_path, "w") as f:
-                json.dump(spec, f, indent=2)
 
         # Submit each shard
         job_ids: list[str] = []
@@ -866,7 +855,7 @@ class SlurmRunHandle:
     RunHandle implementation for index-addressed SLURM arrays.
 
     Tracks job status via:
-    - persistent event logs in the v2 run store for completed run counts
+    - persistent event logs in the run store for completed run counts
     - squeue for active chunk counts (RUNNING, PENDING)
     - sacct for terminal chunk counts (COMPLETED, FAILED, etc.)
 
@@ -1086,25 +1075,16 @@ class SlurmRunHandle:
 
     def _count_failed_runs(self) -> int:
         """
-        Count failed runs by scanning run records.
+        Count failed runs from canonical store records.
 
-        This scans canonical run records and is only called when we need
+        This streams canonical run shards and is only called when we need
         accurate failure counts.
         """
-        runs_dir = self._store_path / "runs"
-        if not runs_dir.exists():
-            return 0
-
-        failed = 0
-        for path in runs_dir.glob("*/*.json"):
-            try:
-                with path.open() as f:
-                    data = json.load(f)
-                if data.get("status") == "failed":
-                    failed += 1
-            except (json.JSONDecodeError, OSError):
-                continue
-        return failed
+        return sum(
+            1
+            for record in self._store.list_run_records()
+            if record.status == Status.FAILED
+        )
 
     @property
     def is_complete(self) -> bool:
@@ -1241,7 +1221,7 @@ class SlurmRunHandle:
             )
 
         if manifest.get("submission_mode") != "array_indexed":
-            raise ValueError("Unsupported SLURM manifest; expected v2 indexed arrays.")
+            raise ValueError("Unsupported SLURM manifest; expected indexed arrays.")
 
         return cls(
             store=store,

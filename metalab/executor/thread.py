@@ -132,7 +132,6 @@ class ThreadExecutor:
             store=store,
             worker_id=self._get_worker_id(),
             job_id=payload.job_id,
-            derived_metric_refs=payload.derived_metric_refs,
             capture_third_party_logs=False,
         )
 

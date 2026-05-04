@@ -50,7 +50,6 @@ class ExperimentPlan:
     run_entries: list[RunPlanEntry]
     job_id: str
     executor_type: str
-    derived_metric_refs: list[str] | None = None
     resolved_context_manifest: dict[str, Any] | None = None
 
     @property
@@ -97,7 +96,6 @@ class ExperimentPlan:
                 },
                 metadata=self.experiment.metadata,
                 operation_ref=self.experiment.operation.ref,
-                derived_metric_refs=self.derived_metric_refs,
                 job_id=self.job_id,
             )
             for entry in self.pending_entries

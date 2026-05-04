@@ -32,8 +32,6 @@ class RunPayload:
         fingerprints: Dict with context_fingerprint, params_fingerprint, seed_fingerprint.
         metadata: Experiment-level metadata (not fingerprinted, passed to Runtime).
         operation_ref: Reference to operation (e.g., "module:name").
-        derived_metric_refs: List of derived metric function references (e.g., ["module:func"]).
-            These are post-hoc computations and do NOT affect run fingerprints.
     """
 
     run_id: str
@@ -45,7 +43,6 @@ class RunPayload:
     fingerprints: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     operation_ref: str = ""
-    derived_metric_refs: list[str] | None = None
     job_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,9 +59,6 @@ class RunPayload:
             "operation_ref": self.operation_ref,
             "job_id": self.job_id,
         }
-        # Only include derived_metric_refs if set (not part of fingerprint)
-        if self.derived_metric_refs is not None:
-            result["derived_metric_refs"] = self.derived_metric_refs
         return result
 
     @classmethod
@@ -82,7 +76,6 @@ class RunPayload:
                 "metadata", data.get("runtime_hints", {})
             ),  # BC: accept old name
             operation_ref=data.get("operation_ref", ""),
-            derived_metric_refs=data.get("derived_metric_refs"),
             job_id=data.get("job_id", ""),
         )
 

@@ -14,6 +14,7 @@ Provides:
 from __future__ import annotations
 
 import inspect
+import json
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,7 +22,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, overload
 
 if TYPE_CHECKING:
-    from metalab.derived import DerivedMetricFn
     from metalab.store.base import Store
 
 from metalab.store.capabilities import SupportsArtifactOpen, SupportsStructuredResults
@@ -325,9 +325,7 @@ class Run:
         """
         Load structured result data by name.
 
-        Structured data is stored via capture.data() and is optimized for
-        derived metric functions. Data is stored in JSON files at
-        results/{prefix}/{run_id}/{name}.json.
+        Structured data is stored via capture.data() as packed metadata.
 
         Args:
             name: The data name.
@@ -341,10 +339,7 @@ class Run:
 
         Example:
         ```python
-        # In a derived metric function
-        def compute_metrics(run: Run) -> dict:
-            matrix = run.data("transition_matrix")
-            return {"sparsity": np.count_nonzero(matrix) / matrix.size}
+        matrix = run.data("transition_matrix")
         ```
         """
         if not isinstance(self._store, SupportsStructuredResults):
@@ -379,16 +374,6 @@ class Run:
         if not isinstance(self._store, SupportsStructuredResults):
             return []
         return self._store.list_results(self.run_id)
-
-    @property
-    def derived(self) -> dict[str, Any]:
-        """
-        Derived metrics computed post-hoc.
-
-        These are stored separately from the run record in /derived/{run_id}.json.
-        Returns an empty dict if no derived metrics exist.
-        """
-        return self._store.get_derived(self.run_id) or {}
 
     def __repr__(self) -> str:
         return f"Run({self.run_id[:8]}..., status={self.status.value})"
@@ -508,8 +493,6 @@ class Results:
         include_params: bool = True,
         include_metrics: bool = True,
         include_record: bool = True,
-        include_derived: bool = False,
-        derived_metrics: "list[DerivedMetricFn] | None" = None,
         artifact_reducers: (
             dict[str, ArtifactReducer | ContextAwareReducer] | None
         ) = None,
@@ -521,34 +504,19 @@ class Results:
         - Resolved parameters (prefixed with 'param_')
         - Captured metrics
         - Record metadata (run_id, status, duration, etc.)
-        - Persisted derived metrics (from /derived/{run_id}.json)
-        - On-the-fly derived metrics via reducer functions
+        - Optional on-the-fly artifact reducers
 
         Args:
             include_params: Include params_resolved columns (prefixed with 'param_').
             include_metrics: Include metrics columns.
             include_record: Include record fields (run_id, status, duration, etc.).
-            include_derived: Include persisted derived metrics from /derived/.
-            derived_metrics: List of derived metric functions for on-the-fly
-                computation (not persisted). Each function receives a Run object
-                and returns dict[str, Metric].
-            artifact_reducers: (Deprecated, use derived_metrics) Dict mapping
-                artifact name to reducer function.
+            artifact_reducers: Dict mapping artifact name to reducer function.
 
         Returns:
             pandas DataFrame with the requested columns.
 
         Raises:
             ImportError: If pandas is not installed.
-
-        Example (include persisted derived metrics):
-            df = results.to_dataframe(include_derived=True)
-
-        Example (on-the-fly derived metric):
-            def final_loss(run):
-                return {"final_loss": run.artifact("loss_history")[-1]}
-
-            df = results.to_dataframe(derived_metrics=[final_loss])
 
         Example (artifact reducer):
             def reduce_history(arr):
@@ -589,27 +557,6 @@ class Results:
             if include_metrics:
                 for key, value in run.metrics.items():
                     row[key] = value
-
-            # Include persisted derived metrics
-            if include_derived:
-                derived = run.derived
-                for key, value in derived.items():
-                    row[f"derived_{key}"] = value
-
-            # Apply on-the-fly derived metrics
-            if derived_metrics:
-                for func in derived_metrics:
-                    try:
-                        reduced = func(run)
-                        row.update(reduced)
-                    except Exception as e:
-                        import warnings
-
-                        func_name = getattr(func, "__name__", str(func))
-                        warnings.warn(
-                            f"Derived metric '{func_name}' failed on run "
-                            f"{run.run_id[:8]}: {e}"
-                        )
 
             # Apply artifact reducers
             if artifact_reducers:
@@ -705,40 +652,6 @@ class Results:
 
         df.to_csv(path, index=False)
         return path
-
-    def compute_derived(
-        self,
-        metrics: "list[DerivedMetricFn]",
-        *,
-        overwrite: bool = False,
-    ) -> None:
-        """
-        Compute derived metrics for all runs and persist to store.
-
-        This method computes derived metrics from run artifacts/params/metrics
-        and stores them in /derived/{run_id}.json for each run.
-
-        Args:
-            metrics: List of derived metric functions. Each function receives
-                a Run object and returns dict[str, Metric].
-            overwrite: If True, recompute even if derived metrics exist.
-
-        Example:
-            def final_loss(run: Run) -> dict[str, Metric]:
-                loss_history = run.artifact("loss_history")
-                return {"final_loss": float(loss_history[-1])}
-
-            results.compute_derived([final_loss])
-        """
-        from metalab.derived import compute_derived_for_run
-
-        for run in self.runs:
-            # Skip if already exists and not overwriting
-            if not overwrite and self._store.derived_exists(run.run_id):
-                continue
-
-            derived = compute_derived_for_run(run, metrics)
-            self._store.put_derived(run.run_id, derived)
 
     def load(self, run_id: str, artifact_name: str) -> Any:
         """
@@ -990,3 +903,373 @@ class Results:
         summary = self.summary()
         status_parts = [f"{k}={v}" for k, v in summary["by_status"].items()]
         return f"Results({summary['total_runs']} runs: {', '.join(status_parts)})"
+
+
+class IndexedResults:
+    """DuckDB-backed Results facade that keeps run records lazy."""
+
+    def __init__(
+        self,
+        *,
+        store: Store,
+        db_path: Path,
+        experiment_id: str | None = None,
+        status: Status | None = None,
+        field_filters: list[tuple[str, str, Any]] | None = None,
+    ) -> None:
+        self._store = store
+        self._db_path = db_path
+        self._experiment_id = experiment_id
+        self._status = status
+        self._field_filters = field_filters or []
+
+    @classmethod
+    def from_store(
+        cls,
+        store: Store,
+        experiment_id: str | None = None,
+        *,
+        refresh: bool = False,
+    ) -> IndexedResults:
+        """Open or build the DuckDB sidecar index for a file store."""
+        from metalab.index import index_is_current, rebuild_index
+        from metalab.store.layout import FileStoreLayout
+
+        root = getattr(store, "root", None)
+        if root is None:
+            raise RuntimeError("Indexed results require a filesystem store")
+
+        root_path = Path(root)
+        db_path = FileStoreLayout(root_path).duckdb_path()
+        if refresh or not index_is_current(root_path):
+            db_path = rebuild_index(root_path, force=True)
+        return cls(store=store, db_path=db_path, experiment_id=experiment_id)
+
+    @property
+    def store(self) -> Store:
+        """The store containing the run data and sidecars."""
+        return self._store
+
+    @property
+    def records(self) -> list[RunRecord]:
+        """Materialize all run records. Prefer iteration or indexed summaries at scale."""
+        return list(self._iter_records())
+
+    @property
+    def runs(self) -> list[Run]:
+        """Materialize all runs. Prefer iteration at scale."""
+        return [Run(record, self._store) for record in self._iter_records()]
+
+    def _connect(self) -> Any:
+        from metalab.index import _duckdb
+
+        return _duckdb().connect(str(self._db_path), read_only=True)
+
+    def _where_sql(self) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if self._experiment_id is not None:
+            clauses.append("r.experiment_id = ?")
+            params.append(self._experiment_id)
+        if self._status is not None:
+            clauses.append("r.status = ?")
+            params.append(self._status.value)
+        for index, (namespace, name, value) in enumerate(self._field_filters):
+            alias = f"f{index}"
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM fields {alias} "
+                f"WHERE {alias}.run_id = r.run_id "
+                f"AND {alias}.namespace = ? "
+                f"AND {alias}.field_name = ? "
+                f"AND {alias}.field_value = ?)"
+            )
+            params.extend([namespace, name, str(value)])
+        if not clauses:
+            return "", params
+        return "WHERE " + " AND ".join(clauses), params
+
+    def _iter_records(self) -> Iterator[RunRecord]:
+        where_sql, params = self._where_sql()
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                f"SELECT run_id FROM runs r {where_sql} ORDER BY started_at",
+                params,
+            )
+            while rows := cursor.fetchmany(1000):
+                for (run_id,) in rows:
+                    record = self._store.get_run_record(run_id)
+                    if record is not None:
+                        yield record
+        finally:
+            conn.close()
+
+    def _count(self) -> int:
+        where_sql, params = self._where_sql()
+        conn = self._connect()
+        try:
+            return int(
+                conn.execute(f"SELECT COUNT(*) FROM runs r {where_sql}", params).fetchone()[0]
+            )
+        finally:
+            conn.close()
+
+    def __len__(self) -> int:
+        return self._count()
+
+    def __iter__(self) -> Iterator[Run]:
+        for record in self._iter_records():
+            yield Run(record, self._store)
+
+    @overload
+    def __getitem__(self, index: int) -> Run: ...
+    @overload
+    def __getitem__(self, index: slice) -> Results: ...
+
+    def __getitem__(self, index: int | slice) -> Run | Results:
+        if isinstance(index, slice):
+            start = index.start or 0
+            stop = index.stop if index.stop is not None else self._count()
+            step = index.step or 1
+            return Results(
+                store=self._store,
+                records=[
+                    record
+                    for row_index, record in enumerate(self._iter_records())
+                    if start <= row_index < stop and (row_index - start) % step == 0
+                ],
+            )
+        if index < 0:
+            index = self._count() + index
+        where_sql, params = self._where_sql()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                f"SELECT run_id FROM runs r {where_sql} ORDER BY started_at LIMIT 1 OFFSET ?",
+                [*params, index],
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise IndexError(index)
+        record = self._store.get_run_record(row[0])
+        if record is None:
+            raise IndexError(index)
+        return Run(record, self._store)
+
+    @property
+    def successful(self) -> IndexedResults:
+        return self.filter(status=Status.SUCCESS)
+
+    @property
+    def failed(self) -> IndexedResults:
+        return self.filter(status=Status.FAILED)
+
+    def filter(
+        self,
+        status: str | Status | None = None,
+        tags: list[str] | None = None,
+        **params: Any,
+    ) -> IndexedResults | Results:
+        if tags is not None:
+            # Tags are not in the current DuckDB sidecar schema; materialize for this uncommon path.
+            return Results(store=self._store, records=self.records).filter(
+                status=status,
+                tags=tags,
+                **params,
+            )  # type: ignore[return-value]
+        next_status = self._status
+        if status is not None:
+            next_status = Status(status) if isinstance(status, str) else status
+        filters = list(self._field_filters)
+        for key, value in params.items():
+            namespace = "params" if key.startswith("param_") else "metrics"
+            field_name = key.removeprefix("param_")
+            filters.append((namespace, field_name, value))
+        return IndexedResults(
+            store=self._store,
+            db_path=self._db_path,
+            experiment_id=self._experiment_id,
+            status=next_status,
+            field_filters=filters,
+        )
+
+    def summary(self) -> dict[str, Any]:
+        where_sql, params = self._where_sql()
+        conn = self._connect()
+        try:
+            status_rows = conn.execute(
+                f"SELECT status, COUNT(*) FROM runs r {where_sql} GROUP BY status",
+                params,
+            ).fetchall()
+            duration_row = conn.execute(
+                f"""
+                SELECT AVG(duration_ms), MIN(duration_ms), MAX(duration_ms)
+                FROM runs r {where_sql}
+                """,
+                params,
+            ).fetchone()
+        finally:
+            conn.close()
+        total = sum(count for _, count in status_rows)
+        avg_duration, min_duration, max_duration = duration_row
+        return {
+            "total_runs": total,
+            "by_status": {status: count for status, count in status_rows},
+            "avg_duration_ms": avg_duration or 0,
+            "min_duration_ms": min_duration or 0,
+            "max_duration_ms": max_duration or 0,
+        }
+
+    @staticmethod
+    def _decode_json(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return json.loads(value)
+        return {}
+
+    def table(self, as_dataframe: bool = False) -> list[dict[str, Any]] | Any:
+        where_sql, params = self._where_sql()
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT run_id, experiment_id, status, duration_ms, started_at, finished_at,
+                       params_json, metrics_json
+                FROM runs r {where_sql}
+                ORDER BY started_at
+                """,
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+        table_rows = []
+        for row in rows:
+            params_json = self._decode_json(row[6])
+            metrics_json = self._decode_json(row[7])
+            table_rows.append(
+                {
+                    "run_id": row[0],
+                    "experiment_id": row[1],
+                    "status": row[2],
+                    "duration_ms": row[3],
+                    "started_at": str(row[4]),
+                    "finished_at": str(row[5]),
+                    **{f"param_{key}": value for key, value in params_json.items()},
+                    **metrics_json,
+                }
+            )
+        if not as_dataframe:
+            return table_rows
+        try:
+            import pandas as pd
+
+            return pd.DataFrame(table_rows)
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for as_dataframe=True. "
+                "Install it with: pip install metalab[pandas]"
+            ) from e
+
+    def to_dataframe(
+        self,
+        *,
+        include_params: bool = True,
+        include_metrics: bool = True,
+        include_record: bool = True,
+        artifact_reducers: (
+            dict[str, ArtifactReducer | ContextAwareReducer] | None
+        ) = None,
+    ) -> Any:
+        if artifact_reducers:
+            return Results(store=self._store, records=self.records).to_dataframe(
+                include_params=include_params,
+                include_metrics=include_metrics,
+                include_record=include_record,
+                artifact_reducers=artifact_reducers,
+            )
+
+        df = self.table(as_dataframe=True)
+        if not include_params:
+            df = df.drop(columns=[c for c in df.columns if c.startswith("param_")])
+        if not include_metrics:
+            metric_cols = [
+                c
+                for c in df.columns
+                if c
+                not in {
+                    "run_id",
+                    "experiment_id",
+                    "status",
+                    "duration_ms",
+                    "started_at",
+                    "finished_at",
+                }
+                and not c.startswith("param_")
+            ]
+            df = df.drop(columns=metric_cols)
+        if not include_record:
+            df = df.drop(
+                columns=[
+                    "run_id",
+                    "experiment_id",
+                    "status",
+                    "duration_ms",
+                    "started_at",
+                    "finished_at",
+                ],
+                errors="ignore",
+            )
+        return df
+
+    def to_csv(
+        self,
+        path: str | Path,
+        *,
+        include_fingerprints: bool = False,
+        timestamp: bool = False,
+    ) -> Path:
+        # Keep the public behavior aligned with Results.to_csv by exporting the
+        # flattened table. For very large exports, prefer the CLI parquet export.
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for to_csv(). "
+                "Install it with: pip install metalab[pandas]"
+            ) from e
+
+        path = Path(path)
+        if path.is_dir() or not path.suffix:
+            path.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = path / f"results_{ts}.csv"
+        elif timestamp:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = path.with_stem(f"{path.stem}_{ts}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(self.table(as_dataframe=False)).to_csv(path, index=False)
+        return path
+
+    def load(self, run_id: str, artifact_name: str) -> Any:
+        record = self._store.get_run_record(run_id)
+        if record is None:
+            raise FileNotFoundError(f"Run '{run_id}' not found in results")
+        return Run(record, self._store).artifact(artifact_name)
+
+    def display(
+        self,
+        *,
+        group_by: list[str] | None = None,
+        show_summary: bool = True,
+    ) -> None:
+        Results(store=self._store, records=self.records).display(
+            group_by=group_by,
+            show_summary=show_summary,
+        )
+
+    def __repr__(self) -> str:
+        summary = self.summary()
+        status_parts = [f"{k}={v}" for k, v in summary["by_status"].items()]
+        return f"IndexedResults({summary['total_runs']} runs: {', '.join(status_parts)})"
