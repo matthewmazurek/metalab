@@ -43,6 +43,7 @@ class FileStoreLayout:
     root_manifest_file: str = "manifest.json"
     status_cache_file: str = "status-cache.json"
     duckdb_file: str = "metalab.duckdb"
+    planned_runs_dir: str = "planned-runs"
 
     def __repr__(self) -> str:
         """Return a concise string representation."""
@@ -191,6 +192,14 @@ class FileStoreLayout:
     def duckdb_path(self) -> Path:
         """Path to the DuckDB sidecar index."""
         return self.index_dir_path() / self.duckdb_file
+
+    def planned_runs_dir_path(self) -> Path:
+        """Path to sharded planned run id files."""
+        return self.index_dir_path() / self.planned_runs_dir
+
+    def planned_runs_path(self, prefix: str) -> Path:
+        """Path to one planned run id shard."""
+        return self.planned_runs_dir_path() / f"{prefix}.ndjson"
 
     # ─────────────────────────────────────────────────────────────────
     # Directory management

@@ -63,7 +63,7 @@ def build_experiment_manifest(
         experiment: The experiment to serialize.
         context_fingerprint: The computed context fingerprint.
         total_runs: The total number of runs in this experiment.
-        run_ids: Optional list of all expected run IDs for this experiment.
+        run_ids: Deprecated; ignored to keep manifests compact at HPC scale.
 
     Returns:
         A JSON-serializable dict containing the full experiment configuration.
@@ -84,7 +84,8 @@ def build_experiment_manifest(
         "context_fingerprint": context_fingerprint,
         "metadata": experiment.metadata,
         "total_runs": total_runs,
-        "run_ids": run_ids,
+        "run_ids_inline": False,
+        "run_ids_path": "index/planned-runs/{prefix}.ndjson",
         "submitted_at": datetime.now().isoformat(),
     }
 

@@ -17,13 +17,12 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from metalab.derived import DerivedMetricFn
     from metalab.events import EventCallback
     from metalab.executor.base import Executor
-    from metalab.executor.slurm import SlurmExecutor
     from metalab.experiment import Experiment
     from metalab.store.base import Store
     from metalab.store.config import StoreConfig
@@ -35,8 +34,8 @@ from metalab._ids import (
     fingerprint_seeds,
     resolve_context,
 )
+from metalab.executor.base import ExperimentPlan, RunPlanEntry
 from metalab.executor.handle import RunHandle
-from metalab.executor.payload import RunPayload
 from metalab.executor.thread import ThreadExecutor
 from metalab.result import Results
 from metalab.store import (
@@ -44,7 +43,6 @@ from metalab.store import (
     SupportsExperimentManifests,
     SupportsWorkingDirectory,
 )
-from metalab.types import Status
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +95,7 @@ def _write_experiment_manifest(
         logger.debug(f"Saved experiment manifest: {experiment.experiment_id}")
 
 
-def generate_payloads(
+def prepare_experiment_plan(
     experiment: Experiment,
     store: Store,
     resume: bool = True,
@@ -105,20 +103,12 @@ def generate_payloads(
     derived_metric_refs: list[str] | None = None,
     job_id: str | None = None,
     executor_type: str = "local",
-) -> tuple[list[RunPayload], list[str]]:
-    """
-    Generate payloads for an experiment.
+) -> ExperimentPlan:
+    """Prepare an executor-agnostic experiment submission plan.
 
-    Args:
-        experiment: The experiment to run.
-        store: Store for checking existing runs.
-        resume: If True, skip already-completed runs.
-        persist_manifest: If True, save resolved context manifest for auditability.
-        derived_metric_refs: List of derived metric function references ('module:func').
-            These are post-hoc computations that do NOT affect run fingerprints.
-
-    Returns:
-        Tuple of (payloads to execute, all run IDs including skipped).
+    The runner owns experiment planning policy: context resolution, deterministic
+    run IDs, resume decisions, root manifest writes, and runner-side events.
+    Executors own only submission mechanics.
     """
     # Resolve context - computes lazy hashes for FilePath/DirPath
     resolved_context, manifest = resolve_context(experiment.context)
@@ -145,12 +135,8 @@ def generate_payloads(
             )
         logger.debug(f"Saved context manifest to {manifest_path}")
 
-    # First pass: compute all run_ids and store resolved params/seeds
-    # We need this before writing the manifest so we can include run_ids
-    all_run_ids = []
-    run_data: list[tuple[str, dict, Any, str, str]] = (
-        []
-    )  # (run_id, resolved_params, seed_bundle, params_fp, seed_fp)
+    # First pass: compute all run_ids and store resolved params/seeds.
+    run_entries: list[RunPlanEntry] = []
 
     for param_case in experiment.params:
         # Resolve params if resolver is provided
@@ -176,10 +162,39 @@ def generate_payloads(
                 code_fp=experiment.operation.code_hash,
             )
 
-            all_run_ids.append(run_id)
-            run_data.append((run_id, resolved_params, seed_bundle, params_fp, seed_fp))
+            run_entries.append(
+                RunPlanEntry(
+                    run_id=run_id,
+                    params_resolved=resolved_params,
+                    seed_bundle=seed_bundle,
+                    params_fingerprint=params_fp,
+                    seed_fingerprint=seed_fp,
+                )
+            )
 
     job_id = job_id or f"job-{uuid.uuid4().hex[:8]}"
+    all_run_ids = [entry.run_id for entry in run_entries]
+    if hasattr(store, "write_planned_run_ids"):
+        try:
+            store.write_planned_run_ids(all_run_ids)
+        except Exception as e:
+            logger.warning(f"Failed to write planned run ids: {e}")
+    statuses = (
+        store.get_run_statuses(all_run_ids)
+        if resume and hasattr(store, "get_run_statuses")
+        else {}
+    )
+    run_entries = [
+        RunPlanEntry(
+            run_id=entry.run_id,
+            params_resolved=entry.params_resolved,
+            seed_bundle=entry.seed_bundle,
+            params_fingerprint=entry.params_fingerprint,
+            seed_fingerprint=entry.seed_fingerprint,
+            status=statuses.get(entry.run_id),
+        )
+        for entry in run_entries
+    ]
 
     if hasattr(store, "write_root_manifest"):
         try:
@@ -187,7 +202,8 @@ def generate_payloads(
                 {
                     "experiment_id": experiment.experiment_id,
                     "expected_run_count": len(all_run_ids),
-                    "expected_run_ids": all_run_ids,
+                    "expected_run_ids_inline": False,
+                    "expected_run_ids_path": "index/planned-runs/{prefix}.ndjson",
                     "executor_type": executor_type,
                     "job_id": job_id,
                     "created_at": datetime.now().isoformat(),
@@ -197,11 +213,20 @@ def generate_payloads(
         except Exception as e:
             logger.warning(f"Failed to write root manifest: {e}")
 
-    # Write experiment manifest (versioned by timestamp) - now includes run_ids
+    # Write compact experiment manifest; run IDs live in planned-runs sidecars.
     if persist_manifest:
-        _write_experiment_manifest(
-            experiment, store, ctx_fp, len(all_run_ids), all_run_ids
-        )
+        _write_experiment_manifest(experiment, store, ctx_fp, len(all_run_ids))
+
+    plan = ExperimentPlan(
+        experiment=experiment,
+        store=store,
+        context_fingerprint=ctx_fp,
+        run_entries=run_entries,
+        job_id=job_id,
+        executor_type=executor_type,
+        derived_metric_refs=derived_metric_refs,
+        resolved_context_manifest=manifest or None,
+    )
 
     runner_sink = None
     if hasattr(store, "event_sink"):
@@ -217,173 +242,28 @@ def generate_payloads(
         except Exception:
             runner_sink = None
 
-    # Second pass: create payloads, skipping successful runs when resuming
-    payloads = []
-    statuses = store.get_run_statuses(all_run_ids) if resume and hasattr(store, "get_run_statuses") else {}
+    if runner_sink is not None:
+        for entry in plan.run_entries:
+            if entry.should_skip:
+                try:
+                    runner_sink.emit(
+                        "skipped",
+                        run_id=entry.run_id,
+                        payload={
+                            "reason": "already success",
+                            "params": entry.params_resolved,
+                        },
+                    )
+                except Exception:
+                    pass
 
-    for run_id, resolved_params, seed_bundle, params_fp, seed_fp in run_data:
-        # Check for resume
-        if resume:
-            status = statuses.get(run_id)
-            if status == Status.SUCCESS:
-                if runner_sink is not None:
-                    try:
-                        runner_sink.emit(
-                            "skipped",
-                            run_id=run_id,
-                            payload={
-                                "reason": "already success",
-                                "params": resolved_params,
-                            },
-                        )
-                    except Exception:
-                        pass
-                continue
-
-        payload = RunPayload(
-            run_id=run_id,
-            experiment_id=experiment.experiment_id,
-            context_spec=experiment.context,
-            params_resolved=resolved_params,
-            seed_bundle=seed_bundle,
-            store_locator=store.config.to_dict(),
-            fingerprints={
-                "context": ctx_fp,
-                "params": params_fp,
-                "seed": seed_fp,
-            },
-            metadata=experiment.metadata,
-            operation_ref=experiment.operation.ref,
-            derived_metric_refs=derived_metric_refs,
-            job_id=job_id,
-        )
-
-        payloads.append(payload)
-
-    return payloads, all_run_ids
-
-
-def _run_slurm_indexed(
-    experiment: "Experiment",
-    store: "Store",
-    executor: "SlurmExecutor",
-    resume: bool = True,
-    derived_metric_refs: list[str] | None = None,
-) -> "RunHandle":
-    """
-    Submit experiment via index-addressed SLURM array.
-
-    This avoids the per-task pickle overhead of submitit by:
-    1. Writing a single array spec file with experiment configuration
-    2. Submitting SLURM array job(s) via sbatch
-    3. Each task reconstructs its parameters from SLURM_ARRAY_TASK_ID
-
-    Args:
-        experiment: The experiment to run.
-        store: Store for persisting results.
-        executor: The SLURM executor.
-        resume: Skip existing successful runs.
-        derived_metric_refs: Optional derived metric function references.
-
-    Returns:
-        SlurmRunHandle for tracking and awaiting results.
-    """
-    from metalab._canonical import fingerprint
-    from metalab._ids import resolve_context
-
-    # Resolve context - computes lazy hashes for FilePath/DirPath
-    resolved_context, manifest = resolve_context(experiment.context)
-    ctx_fp = fingerprint(resolved_context)
-
-    # Compute total runs
-    total_runs = len(experiment.params) * len(experiment.seeds)
-
-    # Compute expected run ids and count existing successful runs if resuming.
-    skipped_count = 0
-    all_run_ids: list[str] = []
-    for param_case in experiment.params:
-        if experiment.param_resolver is not None:
-            resolver = experiment.param_resolver
-            if hasattr(resolver, "resolve"):
-                resolved_params = resolver.resolve({}, param_case.params)
-            else:
-                resolved_params = resolver({}, param_case.params)
-        else:
-            resolved_params = param_case.params
-
-        params_fp = fingerprint_params(resolved_params)
-        for seed_bundle in experiment.seeds:
-            seed_fp = fingerprint_seeds(seed_bundle)
-            run_id = compute_run_id(
-                experiment_id=experiment.experiment_id,
-                context_fp=ctx_fp,
-                params_fp=params_fp,
-                seed_fp=seed_fp,
-                code_fp=experiment.operation.code_hash,
-            )
-            all_run_ids.append(run_id)
-
-    if resume and hasattr(store, "get_run_statuses"):
-        statuses = store.get_run_statuses(all_run_ids)
-        skipped_count = sum(1 for status in statuses.values() if status == Status.SUCCESS)
-
-    # Optionally persist the resolved manifest for auditability
-    if manifest and isinstance(store, SupportsWorkingDirectory):
-        import json
-
-        manifest_path = (
-            store.get_working_directory()
-            / f"{experiment.experiment_id}_context_manifest.json"
-        )
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("w") as f:
-            json.dump(
-                {
-                    "experiment_id": experiment.experiment_id,
-                    "context_fingerprint": ctx_fp,
-                    "resolved_fields": manifest,
-                },
-                f,
-                indent=2,
-            )
-        logger.debug(f"Saved context manifest to {manifest_path}")
-
-    # Write versioned experiment metadata.
-    _write_experiment_manifest(experiment, store, ctx_fp, total_runs)
-
-    job_id = f"slurm-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    if hasattr(store, "write_root_manifest"):
-        store.write_root_manifest(
-            {
-                "experiment_id": experiment.experiment_id,
-                "expected_run_count": total_runs,
-                "expected_run_ids": all_run_ids,
-                "executor_type": "SlurmExecutor",
-                "job_id": job_id,
-                "created_at": datetime.now().isoformat(),
-                "context_fingerprint": ctx_fp,
-            }
-        )
-
-    # Submit via indexed array
-    handle = executor.submit_indexed(
-        experiment=experiment,
-        store=store,
-        context_fingerprint=ctx_fp,
-        total_runs=total_runs,
-        skipped_count=skipped_count,
-        derived_metric_refs=derived_metric_refs,
-        job_id=job_id,
-    )
-
-    return handle
+    return plan
 
 
 def run(
     experiment: "Experiment",
     store: "str | StoreConfig | None" = None,
     executor: "Executor | None" = None,
-    file_root: str | None = None,
     resume: bool = True,
     on_event: "EventCallback | None" = None,
     derived_metrics: "list[str | DerivedMetricFn] | None" = None,
@@ -409,7 +289,6 @@ def run(
             - ThreadExecutor(max_workers=N) for thread-based parallelism
             - ProcessExecutor(max_workers=N) for process-based parallelism
             - SlurmExecutor(...) for cluster execution
-        file_root: Ignored; retained temporarily for call-site compatibility.
         resume: Skip existing successful runs (default: True).
         on_event: Optional event callback for custom event handling.
         derived_metrics: List of derived metric functions or import references.
@@ -474,11 +353,7 @@ def run(
         store = DEFAULT_STORE_ROOT
 
     if isinstance(store, str):
-        config = (
-            parse_to_config(store, file_root=file_root)
-            if file_root
-            else parse_to_config(store)
-        )
+        config = parse_to_config(store)
     else:
         config = store
 
@@ -508,48 +383,25 @@ def run(
                 # Convert callable to reference
                 derived_metric_refs.append(get_func_ref(metric))
 
-    # Check if using SLURM executor with index-addressed arrays
-    from metalab.executor.slurm import SlurmExecutor
-
-    if isinstance(executor, SlurmExecutor):
-        # Use index-addressed SLURM array submission
-        handle = _run_slurm_indexed(
-            experiment=experiment,
-            store=resolved_store,
-            executor=executor,
-            resume=resume,
-            derived_metric_refs=derived_metric_refs,
+    plan = prepare_experiment_plan(
+        experiment=experiment,
+        store=resolved_store,
+        resume=resume,
+        derived_metric_refs=derived_metric_refs,
+        job_id=f"job-{uuid.uuid4().hex[:8]}",
+        executor_type=type(executor).__name__,
+    )
+    if plan.skipped_count > 0:
+        logger.info(
+            "Runs: %d total, %d already completed (resume), %d to execute",
+            plan.total_runs,
+            plan.skipped_count,
+            len(plan.pending_entries),
         )
-        all_run_ids_count = len(experiment.params) * len(experiment.seeds)
-        logger.info("Runs: %d total (SLURM indexed)", all_run_ids_count)
     else:
-        # Standard payload-based submission for other executors
-        job_id = f"job-{uuid.uuid4().hex[:8]}"
-        payloads, all_run_ids = generate_payloads(
-            experiment,
-            resolved_store,
-            resume,
-            derived_metric_refs=derived_metric_refs,
-            job_id=job_id,
-            executor_type=type(executor).__name__,
-        )
-        all_run_ids_count = len(all_run_ids)
-        skipped = all_run_ids_count - len(payloads)
-        if skipped > 0:
-            logger.info(
-                "Runs: %d total, %d already completed (resume), %d to execute",
-                all_run_ids_count, skipped, len(payloads),
-            )
-        else:
-            logger.info("Runs: %d to execute", all_run_ids_count)
+        logger.info("Runs: %d to execute", plan.total_runs)
 
-        # Submit to executor
-        handle = executor.submit(
-            payloads=payloads,
-            store=resolved_store,
-            operation=experiment.operation,
-            run_ids=all_run_ids,
-        )
+    handle = executor.submit_experiment(plan)
 
     # Wire up on_event callback if provided.
     if on_event is not None:

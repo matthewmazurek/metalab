@@ -27,6 +27,7 @@ def test_v2_layout_uses_sharded_paths(tmp_path):
     assert layout.log_path(run_id, "run") == tmp_path / "logs" / "ab" / f"{run_id}_run.log"
     assert layout.artifact_dir(run_id) == tmp_path / "artifacts" / "ab" / run_id
     assert layout.duckdb_path() == tmp_path / "index" / "metalab.duckdb"
+    assert layout.planned_runs_path("ab") == tmp_path / "index" / "planned-runs" / "ab.ndjson"
 
 
 def test_persistent_event_roundtrip():
@@ -90,6 +91,44 @@ def test_status_reads_events_and_heartbeats_incrementally(tmp_path):
     status = read_status(tmp_path)
     assert status.pending == 0
     assert status.stale_workers == 0
+
+
+def test_status_handles_large_event_stream_with_compact_cache(tmp_path):
+    total = 100_000
+    store = FileStoreConfig(root=str(tmp_path)).connect()
+    store.write_root_manifest(
+        {
+            "experiment_id": "exp:1",
+            "expected_run_count": total,
+            "executor_type": "local",
+            "job_id": "job1",
+            "created_at": datetime.now().isoformat(),
+        }
+    )
+    event_path = FileStoreLayout(tmp_path).event_log_path("job1", "worker1")
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    with event_path.open("w", encoding="utf-8") as f:
+        for idx in range(total):
+            f.write(
+                json.dumps(
+                    {
+                        "kind": "finished",
+                        "run_id": f"run-{idx:06d}",
+                        "timestamp": "2026-01-01T00:00:00",
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+
+    status = read_status(tmp_path)
+
+    assert status.total == total
+    assert status.success == total
+    assert status.pending == 0
+    cache = json.loads((tmp_path / "index" / "status-cache.json").read_text())
+    assert cache["format"] == "compact-v1"
+    assert cache["per_run"]["run-000000"][0] == "s"
 
 
 def test_observer_projects_fields_and_uses_offsets(tmp_path):

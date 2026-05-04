@@ -10,6 +10,14 @@ from typing import Any
 
 from metalab.store.events import iter_event_files
 
+KIND_TO_CODE = {
+    "started": "r",
+    "finished": "s",
+    "failed": "f",
+    "skipped": "k",
+}
+CODE_TO_KIND = {code: kind for kind, code in KIND_TO_CODE.items()}
+
 
 @dataclass
 class StoreStatus:
@@ -42,6 +50,28 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _decode_cached_state(state: Any) -> dict[str, str] | None:
+    """Decode legacy or compact cached per-run state."""
+    if isinstance(state, str):
+        return {"kind": CODE_TO_KIND.get(state, state), "timestamp": ""}
+    if isinstance(state, list) and state:
+        return {
+            "kind": CODE_TO_KIND.get(str(state[0]), str(state[0])),
+            "timestamp": str(state[1]) if len(state) > 1 else "",
+        }
+    if isinstance(state, dict):
+        return {
+            "kind": CODE_TO_KIND.get(str(state.get("kind", "")), str(state.get("kind", ""))),
+            "timestamp": str(state.get("timestamp", "")),
+        }
+    return None
+
+
+def _encode_cached_state(state: dict[str, str]) -> list[str]:
+    """Encode cached per-run state compactly."""
+    return [KIND_TO_CODE.get(state.get("kind", ""), state.get("kind", "")), state.get("timestamp", "")]
+
+
 def read_status(
     store_root: str | Path,
     *,
@@ -60,13 +90,9 @@ def read_status(
     if cache:
         offsets = {k: int(v) for k, v in cache.get("offsets", {}).items()}
         for run_id, state in dict(cache.get("per_run", {})).items():
-            if isinstance(state, str):
-                per_run[run_id] = {"kind": state, "timestamp": ""}
-            elif isinstance(state, dict):
-                per_run[run_id] = {
-                    "kind": str(state.get("kind", "")),
-                    "timestamp": str(state.get("timestamp", "")),
-                }
+            decoded = _decode_cached_state(state)
+            if decoded is not None:
+                per_run[run_id] = decoded
 
     new_offsets = dict(offsets)
     for path in iter_event_files(root):
@@ -102,12 +128,15 @@ def read_status(
             json.dumps(
                 {
                     "layout_version": 2,
+                    "format": "compact-v1",
                     "updated_at": datetime.now().isoformat(),
                     "offsets": new_offsets,
-                    "per_run": per_run,
+                    "per_run": {
+                        run_id: _encode_cached_state(state)
+                        for run_id, state in per_run.items()
+                    },
                 },
-                indent=2,
-                sort_keys=True,
+                separators=(",", ":"),
             ),
             encoding="utf-8",
         )

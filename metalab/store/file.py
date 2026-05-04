@@ -346,6 +346,24 @@ class FileStore:
             self._layout.root_manifest_path(), {"layout_version": 2, **manifest}
         )
 
+    def write_planned_run_ids(self, run_ids: list[str]) -> None:
+        """Write expected run IDs to sharded sidecar files."""
+        shards: dict[str, list[str]] = {}
+        for run_id in run_ids:
+            shards.setdefault(run_id[:2], []).append(run_id)
+
+        planned_dir = self._layout.planned_runs_dir_path()
+        planned_dir.mkdir(parents=True, exist_ok=True)
+        for prefix, shard_run_ids in shards.items():
+            content = "".join(
+                json.dumps({"run_id": run_id}, sort_keys=True) + "\n"
+                for run_id in shard_run_ids
+            )
+            self._atomic_write(
+                self._layout.planned_runs_path(prefix),
+                content.encode("utf-8"),
+            )
+
     def get_root_manifest(self) -> dict[str, Any] | None:
         """Read the root run-store manifest."""
         path = self._layout.root_manifest_path()

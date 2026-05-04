@@ -34,13 +34,12 @@ from uuid import uuid4
 
 from metalab.events import Event, emit_event
 from metalab.executor.handle import RunStatus
-from metalab.executor.payload import RunPayload
 from metalab.result import Results
 
 if TYPE_CHECKING:
     from metalab.events import EventCallback
+    from metalab.executor.base import ExperimentPlan
     from metalab.experiment import Experiment
-    from metalab.operation import OperationWrapper
     from metalab.store.base import Store
 
 from metalab.store.capabilities import SupportsWorkingDirectory
@@ -569,8 +568,21 @@ class SlurmExecutor:
         """
         self._config = config or SlurmConfig()
 
-    def submit_indexed(
+    def submit_experiment(self, plan: "ExperimentPlan") -> "SlurmRunHandle":
+        """Submit an executor-agnostic experiment plan as indexed SLURM arrays."""
+        return self._submit_indexed(
+            experiment=plan.experiment,
+            store=plan.store,
+            context_fingerprint=plan.context_fingerprint,
+            total_runs=plan.total_runs,
+            skipped_count=plan.skipped_count,
+            derived_metric_refs=plan.derived_metric_refs,
+            job_id=plan.job_id,
+        )
+
+    def _submit_indexed(
         self,
+        *,
         experiment: "Experiment",
         store: "Store",
         context_fingerprint: str,
@@ -579,24 +591,7 @@ class SlurmExecutor:
         derived_metric_refs: list[str] | None = None,
         job_id: str | None = None,
     ) -> "SlurmRunHandle":
-        """
-        Submit an experiment as index-addressed SLURM arrays.
-
-        Args:
-            experiment: The experiment to run.
-            store: Store for persisting results.
-            context_fingerprint: Precomputed context fingerprint.
-            total_runs: Total number of runs (P * R).
-            skipped_count: Number of runs already completed (for resume).
-            derived_metric_refs: Optional derived metric function references.
-
-        Returns:
-            A SlurmRunHandle for tracking and awaiting results.
-
-        Raises:
-            ValueError: If param source doesn't support indexing.
-            RuntimeError: If sbatch submission fails.
-        """
+        """Implementation shared by direct and plan-based indexed submission."""
         # Validate that param source supports indexing
         if not hasattr(experiment.params, "__getitem__"):
             raise ValueError(
@@ -847,20 +842,6 @@ class SlurmExecutor:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
-
-    def submit(
-        self,
-        payloads: list[RunPayload],
-        store: "Store",
-        operation: "OperationWrapper",
-        run_ids: list[str] | None = None,
-    ) -> "SlurmRunHandle":
-        """SLURM execution is only supported through indexed array submission."""
-        raise RuntimeError(
-            "SlurmExecutor.submit() is not supported. "
-            "Use metalab.run(..., executor=SlurmExecutor(...)) so the runner can "
-            "write the array spec and v2 run-store manifest."
-        )
 
     def shutdown(self, wait: bool = True) -> None:
         """No-op for SLURM executor (jobs run independently)."""
