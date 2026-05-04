@@ -77,6 +77,14 @@ class Store(Protocol):
         """
         ...
 
+    def get_run_statuses(self, run_ids: list[str]) -> dict[str, Any]:
+        """Bulk lookup run statuses by run id."""
+        ...
+
+    def successful_run_ids(self, experiment_id: str) -> set[str]:
+        """Return successful run ids for an experiment."""
+        ...
+
     # Artifact operations
 
     def put_artifact(

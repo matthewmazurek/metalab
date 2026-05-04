@@ -10,9 +10,9 @@ Each array task:
 2. Computes (param_idx, seed_idx) from SLURM_ARRAY_TASK_ID + shard offset
 3. Reconstructs ParamCase and SeedBundle using index-based access
 4. Computes run_id deterministically
-5. Checks for completion (run record + .done marker)
+5. Checks for completion (successful canonical run record)
 6. If not complete, executes the run via execute_payload()
-7. Writes .done marker after completion
+7. Writes persistent events and heartbeats through the store
 
 Environment contract:
 - SLURM_ARRAY_TASK_ID: The array task index (0-based within shard)
@@ -30,8 +30,9 @@ import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
 if TYPE_CHECKING:
-    from metalab.store.base import Store
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -135,19 +136,10 @@ def run_array_task(store_root: str) -> int:
     from metalab.executor.core import execute_payload
     from metalab.manifest import deserialize_param_source, deserialize_seed_plan
     from metalab.operation import import_operation
-    from metalab.store.config import StoreConfig
     from metalab.store.file import FileStoreConfig
-    from metalab.store.locator import create_store
     from metalab.types import Status
 
-    # Resolve store backend from spec (may be FileStore or PostgresStore)
-    store_locator = spec.get("store_locator")
-    if store_locator is None:
-        store = FileStoreConfig(root=str(store_path)).connect()
-    elif isinstance(store_locator, dict):
-        store = StoreConfig.from_dict(store_locator).connect()
-    else:
-        store = create_store(store_locator)
+    store = FileStoreConfig(root=str(store_path)).connect()
     params_source = deserialize_param_source(spec["params"])
     seed_plan = deserialize_seed_plan(spec["seeds"])
     operation = import_operation(spec["operation_ref"])
@@ -195,6 +187,7 @@ def run_array_task(store_root: str) -> int:
             operation=operation,
             store=store,
             worker_id=worker_id,
+            job_id=spec.get("job_id", array_job_id),
             derived_metric_refs=spec.get("derived_metric_refs"),
             capture_third_party_logs=True,
         )
@@ -203,7 +196,6 @@ def run_array_task(store_root: str) -> int:
         store.put_run_record(result)
 
         if result.status == Status.SUCCESS:
-            _write_done_marker(store_path, run_id)
             logger.info(f"Run {run_id} completed successfully")
         else:
             logger.error(f"Run {run_id} failed: {result.error}")
@@ -218,21 +210,17 @@ def _is_run_complete(store: Any, run_id: str, work_dir: Path) -> bool:
     """
     Check if a run is complete using robust completion detection.
 
-    A run is considered complete if:
-    1. A run record exists with Status.SUCCESS
-    2. AND a .done marker file exists
-
-    This prevents skipping runs that have partial/corrupt records.
+    A run is considered complete if its canonical run record exists and
+    has Status.SUCCESS.
 
     Args:
         store: The Store instance.
         run_id: The run ID to check.
-        work_dir: Path to the working directory for .done markers.
+        work_dir: Path to the working directory.
 
     Returns:
         True if the run is complete, False otherwise.
     """
-    from metalab.store.layout import FileStoreLayout
     from metalab.types import Status
 
     # Check for run record
@@ -246,38 +234,7 @@ def _is_run_complete(store: Any, run_id: str, work_dir: Path) -> bool:
     if record.status != Status.SUCCESS:
         return False
 
-    # Check for .done marker on filesystem (coordination marker)
-    layout = FileStoreLayout(work_dir)
-    done_marker = layout.runs_dir_path() / f"{run_id}.done"
-
-    return done_marker.exists()
-
-
-def _write_done_marker(store_path: Path, run_id: str) -> None:
-    """
-    Write the .done marker file atomically.
-
-    The .done marker signals that:
-    1. The run record has been fully written
-    2. All artifacts are persisted
-
-    Args:
-        store_path: Path to the store root.
-        run_id: The run ID.
-    """
-    from datetime import datetime
-
-    from metalab.store.file import FileStore
-    from metalab.store.layout import FileStoreLayout
-
-    layout = FileStoreLayout(store_path)
-    runs_dir = layout.runs_dir_path()
-    runs_dir.mkdir(parents=True, exist_ok=True)
-
-    done_marker = runs_dir / f"{run_id}.done"
-    content = {"completed_at": datetime.now().isoformat()}
-
-    FileStore._atomic_write_json(done_marker, content)
+    return True
 
 
 def _load_context_spec(store_path: Path) -> Any:

@@ -151,46 +151,5 @@ def resolve_executor(
     platform: str,
     overrides: dict[str, Any] | None = None,
 ) -> Any:  # Returns Executor | None
-    """
-    Create an executor from ``.metalab.toml`` defaults + per-experiment overrides.
-
-    Loads the project config (if present), resolves the named environment
-    profile, reads the ``[environments.*.executor]`` sub-table, merges it
-    with *overrides*, and creates the executor via
-    :class:`ExecutorConfigRegistry`.
-
-    Falls back to *overrides*-only if no ``.metalab.toml`` is found or the
-    platform name does not match a configured environment.
-
-    Args:
-        platform: Executor type name (e.g., ``"local"``, ``"slurm"``).
-            Also used to look up the matching environment profile in
-            ``.metalab.toml``.
-        overrides: Per-experiment executor overrides (e.g., from a YAML
-            config).  These take precedence over ``.metalab.toml`` defaults.
-
-    Returns:
-        An Executor instance, or None for single-threaded local execution.
-
-    Raises:
-        ValueError: If *platform* is not a registered executor type.
-    """
-    defaults: dict[str, Any] = {}
-    try:
-        from metalab.config import ProjectConfig
-
-        project_config = ProjectConfig.load()
-        resolved = project_config.resolve(platform)
-        defaults = dict(resolved.executor_resources)
-        logger.info(
-            "Loaded executor defaults from .metalab.toml [%s] (%d settings)",
-            platform,
-            len(defaults),
-        )
-    except FileNotFoundError:
-        logger.debug("No .metalab.toml found; using overrides only")
-    except (ValueError, ImportError):
-        logger.debug("Could not resolve environment %r; using overrides only", platform)
-
-    merged = {**defaults, **(overrides or {})}
-    return executor_from_config(platform, merged)
+    """Create an executor from explicit overrides only."""
+    return executor_from_config(platform, overrides or {})

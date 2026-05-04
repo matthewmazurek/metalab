@@ -60,6 +60,7 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
         operation=operation,
         store=store,
         worker_id=f"process:{worker_num}",
+        job_id=payload.job_id,
         derived_metric_refs=payload.derived_metric_refs,
         capture_third_party_logs=True,
     )
@@ -136,6 +137,7 @@ class ProcessExecutor:
             futures=futures,
             store=store,
             run_ids=all_run_ids,
+            job_id=payloads[0].job_id if payloads else None,
             skipped_run_ids=skipped_run_ids,
         )
 

@@ -1,35 +1,4 @@
-"""
-FileStore: Filesystem-based storage backend.
-
-Layout (when experiment_id provided):
-    {file_root}/
-    └── {experiment_id}/             # Experiment directory (sanitized)
-        ├── runs/{run_id}.json       # RunRecord (schema-versioned)
-        ├── derived/{run_id}.json    # Derived metrics (post-hoc computed)
-        ├── artifacts/{run_id}/      # Artifact files + _manifest.json
-        ├── logs/{run_id}_{name}.log # Log files
-        ├── results/{run_id}/{name}.json # Structured results
-        ├── experiments/{exp_id}_{ts}.json # Experiment manifests
-        ├── .locks/{run_id}.lock     # Per-run lock files
-        └── _meta.json               # Store metadata
-
-Layout (when no experiment_id - unscoped mode):
-    {root}/
-    ├── runs/{run_id}.json
-    ├── derived/{run_id}.json
-    ├── artifacts/{run_id}/
-    ├── logs/{run_id}_{name}.log
-    ├── results/{run_id}/{name}.json
-    ├── experiments/{exp_id}_{ts}.json
-    ├── .locks/{run_id}.lock
-    └── _meta.json
-
-Concurrency guarantees:
-
-- Atomic writes: temp file + os.rename()
-- Per-run locking: fcntl.flock() on {run_id}.lock
-- Artifact collision: overwrite with warning
-"""
+"""Filesystem-only v2 run store for HPC execution."""
 
 from __future__ import annotations
 
@@ -40,6 +9,7 @@ import shutil
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generator
 
@@ -56,8 +26,9 @@ from metalab.schema import (
     load_run_record,
 )
 from metalab.store.config import StoreConfig
+from metalab.store.events import FileEventSink
 from metalab.store.layout import FileStoreLayout, safe_experiment_id
-from metalab.types import ArtifactDescriptor, Metric, RunRecord
+from metalab.types import ArtifactDescriptor, Metric, RunRecord, Status
 
 logger = logging.getLogger(__name__)
 
@@ -231,9 +202,10 @@ class FileStore:
         if not meta_path.exists():
             meta_data: dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
+                "layout_version": 2,
                 "created_by": "metalab",
             }
-            # Include experiment_id for scoped stores (enables collection discovery)
+            # Include experiment_id for explicitly scoped stores.
             if self._config.experiment_id:
                 meta_data["experiment_id"] = self._config.experiment_id
             self._atomic_write_json(meta_path, meta_data)
@@ -320,8 +292,12 @@ class FileStore:
         if not path.exists():
             return None
 
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return load_run_record(data)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return load_run_record(data)
+        except Exception as e:
+            logger.warning(f"Failed to load run record {path}: {e}")
+            return None
 
     def list_run_records(self, experiment_id: str | None = None) -> list[RunRecord]:
         """List run records, optionally filtered by experiment."""
@@ -331,14 +307,14 @@ class FileStore:
         if not runs_dir.exists():
             return records
 
-        for path in runs_dir.glob("*.json"):
+        for path in sorted(runs_dir.glob("*/*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 record = load_run_record(data)
 
                 if experiment_id is None or record.experiment_id == experiment_id:
                     records.append(record)
-            except (json.JSONDecodeError, KeyError) as e:
+            except Exception as e:
                 logger.warning(f"Failed to load run record {path}: {e}")
 
         return records
@@ -346,6 +322,69 @@ class FileStore:
     def run_exists(self, run_id: str) -> bool:
         """Check if a run record exists."""
         return self._layout.run_path(run_id).exists()
+
+    def get_run_statuses(self, run_ids: list[str]) -> dict[str, Status]:
+        """Bulk lookup run statuses from canonical run records."""
+        statuses: dict[str, Status] = {}
+        for run_id in run_ids:
+            record = self.get_run_record(run_id)
+            if record is not None:
+                statuses[run_id] = record.status
+        return statuses
+
+    def successful_run_ids(self, experiment_id: str) -> set[str]:
+        """Return successful run ids for an experiment."""
+        return {
+            r.run_id
+            for r in self.list_run_records(experiment_id)
+            if r.status == Status.SUCCESS
+        }
+
+    def write_root_manifest(self, manifest: dict[str, Any]) -> None:
+        """Write the root run-store manifest."""
+        self._atomic_write_json(
+            self._layout.root_manifest_path(), {"layout_version": 2, **manifest}
+        )
+
+    def get_root_manifest(self) -> dict[str, Any] | None:
+        """Read the root run-store manifest."""
+        path = self._layout.root_manifest_path()
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def event_sink(self, job_id: str, worker_id: str, experiment_id: str) -> FileEventSink:
+        """Create an append-only event sink for a worker."""
+        return FileEventSink(
+            self._layout.event_log_path(job_id, worker_id),
+            experiment_id=experiment_id,
+            job_id=job_id,
+            worker_id=worker_id,
+        )
+
+    def put_heartbeat(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        experiment_id: str,
+        state: str,
+        current_run_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Update a worker heartbeat file."""
+        self._atomic_write_json(
+            self._layout.heartbeat_path(job_id, worker_id),
+            {
+                "job_id": job_id,
+                "worker_id": worker_id,
+                "experiment_id": experiment_id,
+                "state": state,
+                "current_run_id": current_run_id,
+                "updated_at": datetime.now().isoformat(),
+                "payload": payload or {},
+            },
+        )
 
     # =========================================================================
     # Artifact operations
@@ -361,7 +400,7 @@ class FileStore:
         run_id = descriptor.metadata.get("_run_id")
 
         if not run_id:
-            # Fallback: try to extract from path (legacy behavior)
+            # Fallback: try to extract from metalab scratch paths.
             if isinstance(data, Path):
                 for parent in data.parents:
                     if parent.name.startswith("metalab_"):
@@ -564,7 +603,13 @@ class FileStore:
     # Log operations
     # =========================================================================
 
-    def put_log(self, run_id: str, name: str, content: str) -> None:
+    def put_log(
+        self,
+        run_id: str,
+        name: str,
+        content: str,
+        label: str | None = None,
+    ) -> None:
         """Store a log file for a run."""
         log_path = self._layout.log_path(run_id, name)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -584,26 +629,12 @@ class FileStore:
         """
         Retrieve a log file.
 
-        Searches for logs matching the run_id. Handles legacy formats.
+        Searches for logs matching the run_id in the v2 sharded layout.
         """
-        log_dir = self._layout.logs_dir_path()
-
         # Try new format: {run_id}_{name}.log
         new_path = self._layout.log_path(run_id, name)
         if new_path.exists():
             return new_path.read_text(encoding="utf-8")
-
-        # Fall back to legacy label format: *_{short_id}_{name}.log
-        short_id = run_id[:8]
-        for pattern in [f"*_{short_id}_{name}.log"]:
-            matches = list(log_dir.glob(pattern))
-            if matches:
-                return matches[0].read_text(encoding="utf-8")
-
-        # Fall back to legacy nested format: {run_id}/{name}.txt
-        legacy_path = log_dir / run_id / f"{name}.txt"
-        if legacy_path.exists():
-            return legacy_path.read_text(encoding="utf-8")
 
         return None
 
@@ -613,26 +644,13 @@ class FileStore:
 
         Returns a list of log names (e.g., ["run", "stdout", "stderr"]).
         """
-        log_dir = self._layout.logs_dir_path()
-        short_id = run_id[:8]
         log_names: set[str] = set()
 
-        # Search new flat format
-        for pattern in [f"*_{short_id}_*.log", f"{run_id}_*.log"]:
-            for log_file in log_dir.glob(pattern):
-                filename = log_file.stem
-                if f"_{short_id}_" in filename:
-                    name = filename.split(f"_{short_id}_", 1)[-1]
-                    log_names.add(name)
-                elif filename.startswith(f"{run_id}_"):
-                    name = filename[len(run_id) + 1 :]
-                    log_names.add(name)
-
-        # Search legacy nested format
-        legacy_dir = log_dir / run_id
-        if legacy_dir.exists() and legacy_dir.is_dir():
-            for log_file in legacy_dir.glob("*.txt"):
-                log_names.add(log_file.stem)
+        shard_dir = self._layout.logs_dir_path() / run_id[:2]
+        if shard_dir.exists():
+            for log_file in shard_dir.glob(f"{run_id}_*.log"):
+                name = log_file.stem[len(run_id) + 1 :]
+                log_names.add(name)
 
         return sorted(log_names)
 
@@ -713,22 +731,10 @@ class FileStore:
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
 
-            # Delete logs - handle current and legacy formats
-            log_dir = self._layout.logs_dir_path()
-
-            # Delete current format: {run_id}_*.log
+            # Delete logs
+            log_dir = self._layout.logs_dir_path() / run_id[:2]
             for log_file in log_dir.glob(f"{run_id}_*.log"):
                 log_file.unlink()
-
-            # Delete legacy label format: *_{short_id}_*.log
-            short_id = run_id[:8]
-            for log_file in log_dir.glob(f"*_{short_id}_*.log"):
-                log_file.unlink()
-
-            # Delete legacy nested format
-            nested_log_dir = log_dir / run_id
-            if nested_log_dir.exists():
-                shutil.rmtree(nested_log_dir)
 
         # Delete lock file
         lock_path = self._layout.lock_path(run_id)

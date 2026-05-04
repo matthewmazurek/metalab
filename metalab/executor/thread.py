@@ -46,12 +46,21 @@ class ThreadExecutor:
         # Track worker numbers for logging
         self._worker_counter = 0
         self._worker_counter_lock = threading.Lock()
+        self._worker_generation = 0
+        self._worker_local = threading.local()
 
     def _get_worker_id(self) -> str:
-        """Get a unique worker ID for logging."""
+        """Get a stable worker ID for the current thread within this submit."""
+        if getattr(self._worker_local, "generation", None) == self._worker_generation:
+            return self._worker_local.worker_id
+
         with self._worker_counter_lock:
             self._worker_counter += 1
-            return f"thread:{self._worker_counter}"
+            worker_id = f"thread:{self._worker_counter}"
+
+        self._worker_local.generation = self._worker_generation
+        self._worker_local.worker_id = worker_id
+        return worker_id
 
     def submit(
         self,
@@ -79,6 +88,7 @@ class ThreadExecutor:
         # Reset worker counter for this batch
         with self._worker_counter_lock:
             self._worker_counter = 0
+            self._worker_generation += 1
 
         # Use provided run_ids or extract from payloads
         all_run_ids = run_ids if run_ids is not None else [p.run_id for p in payloads]
@@ -97,6 +107,7 @@ class ThreadExecutor:
             futures=futures,
             store=store,
             run_ids=all_run_ids,
+            job_id=payloads[0].job_id if payloads else None,
             skipped_run_ids=skipped_run_ids,
         )
 
@@ -119,6 +130,7 @@ class ThreadExecutor:
             operation=operation,
             store=store,
             worker_id=self._get_worker_id(),
+            job_id=payload.job_id,
             derived_metric_refs=payload.derived_metric_refs,
             capture_third_party_logs=False,
         )

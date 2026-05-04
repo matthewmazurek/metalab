@@ -326,9 +326,8 @@ class Run:
         Load structured result data by name.
 
         Structured data is stored via capture.data() and is optimized for
-        fast access by derived metric functions. With PostgresStore, data is
-        stored inline in the database (as JSON). With FileStore, data is stored
-        in JSON files at results/{run_id}/{name}.json.
+        derived metric functions. Data is stored in JSON files at
+        results/{prefix}/{run_id}/{name}.json.
 
         Args:
             name: The data name.
@@ -514,7 +513,6 @@ class Results:
         artifact_reducers: (
             dict[str, ArtifactReducer | ContextAwareReducer] | None
         ) = None,
-        progress: bool = False,
     ) -> Any:
         """
         Export results to a pandas DataFrame with optional artifact reduction.
@@ -536,7 +534,6 @@ class Results:
                 and returns dict[str, Metric].
             artifact_reducers: (Deprecated, use derived_metrics) Dict mapping
                 artifact name to reducer function.
-            progress: Show progress bar when loading artifacts (requires rich).
 
         Returns:
             pandas DataFrame with the requested columns.
@@ -553,7 +550,7 @@ class Results:
 
             df = results.to_dataframe(derived_metrics=[final_loss])
 
-        Example (artifact reducer - legacy):
+        Example (artifact reducer):
             def reduce_history(arr):
                 return {"final": arr[:, -1].mean(), "best": arr.min()}
 
@@ -570,19 +567,8 @@ class Results:
             ) from e
 
         rows = []
-        runs = self.runs
 
-        # Set up progress bar if requested
-        iterator: Any = runs
-        if progress:
-            try:
-                from rich.progress import track
-
-                iterator = track(runs, description="Loading runs...")
-            except ImportError:
-                pass  # Fall back to no progress bar
-
-        for run in iterator:
+        for run in self.runs:
             row: dict[str, Any] = {}
 
             # Include record fields
@@ -625,7 +611,7 @@ class Results:
                             f"{run.run_id[:8]}: {e}"
                         )
 
-            # Apply artifact reducers (legacy support)
+            # Apply artifact reducers
             if artifact_reducers:
                 for artifact_name, reducer in artifact_reducers.items():
                     try:
@@ -725,7 +711,6 @@ class Results:
         metrics: "list[DerivedMetricFn]",
         *,
         overwrite: bool = False,
-        progress: bool = False,
     ) -> None:
         """
         Compute derived metrics for all runs and persist to store.
@@ -737,7 +722,6 @@ class Results:
             metrics: List of derived metric functions. Each function receives
                 a Run object and returns dict[str, Metric].
             overwrite: If True, recompute even if derived metrics exist.
-            progress: Show progress bar (requires rich).
 
         Example:
             def final_loss(run: Run) -> dict[str, Metric]:
@@ -748,19 +732,7 @@ class Results:
         """
         from metalab.derived import compute_derived_for_run
 
-        runs = self.runs
-
-        # Set up progress bar if requested
-        iterator: Any = runs
-        if progress:
-            try:
-                from rich.progress import track
-
-                iterator = track(runs, description="Computing derived metrics...")
-            except ImportError:
-                pass  # Fall back to no progress bar
-
-        for run in iterator:
+        for run in self.runs:
             # Skip if already exists and not overwriting
             if not overwrite and self._store.derived_exists(run.run_id):
                 continue

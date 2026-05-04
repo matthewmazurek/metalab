@@ -13,7 +13,7 @@ Event-driven architecture:
 - Events are emitted when run state changes (started, finished, failed, skipped)
 - LocalRunHandle emits events synchronously from futures
 - SlurmRunHandle emits events when polling detects state changes
-- ProgressTrackers subscribe to these events for display
+- Callback consumers can subscribe to these events for custom hooks
 """
 
 from __future__ import annotations
@@ -85,10 +85,10 @@ class RunHandle(Protocol):
     - Cancel pending/running jobs (.cancel())
     - Subscribe to events via on_event callback
 
-    Event-driven progress tracking:
+    Event-driven callbacks:
         Events are emitted when run state changes. For local executors,
         events are pushed synchronously. For SLURM, events are derived
-        from store polling. ProgressTrackers subscribe to these events.
+        from store polling.
     """
 
     @property
@@ -142,7 +142,7 @@ class RunHandle(Protocol):
 
     def set_event_callback(self, callback: "EventCallback | None") -> None:
         """
-        Set the event callback for progress tracking.
+        Set the event callback.
 
         Args:
             callback: Function to receive events, or None to disable.
@@ -155,7 +155,7 @@ class LocalRunHandle:
     RunHandle implementation for local executors (thread/process pools).
 
     Wraps a list of futures and provides the RunHandle interface.
-    Emits events when run state changes for progress tracking.
+    Emits events when run state changes for callback consumers.
     """
 
     def __init__(
@@ -175,7 +175,7 @@ class LocalRunHandle:
             store: Store for persisting results.
             run_ids: All run IDs (including skipped).
             job_id: Optional job identifier. Generated if not provided.
-            on_event: Optional callback for progress events.
+            on_event: Optional lifecycle event callback.
             skipped_run_ids: Run IDs that were skipped due to resume.
         """
         self._futures = futures
@@ -241,7 +241,7 @@ class LocalRunHandle:
 
     def set_event_callback(self, callback: "EventCallback | None") -> None:
         """
-        Set the event callback for progress tracking.
+        Set the event callback.
 
         Args:
             callback: Function to receive events, or None to disable.
@@ -250,7 +250,7 @@ class LocalRunHandle:
 
         # If setting a new callback, emit skip events that may have been missed
         if callback is not None:
-            # Re-emit skip events (idempotent for progress trackers)
+            # Re-emit skip events for newly attached callback consumers.
             self._emit_skip_events()
 
     @property
@@ -342,7 +342,7 @@ class LocalRunHandle:
                 record = future.result(timeout=timeout)
                 records.append(record)
 
-                # Emit event BEFORE storage (so storage failures don't block progress)
+                # Emit event BEFORE storage (so storage failures don't block callbacks)
                 if run_id not in self._emitted_run_ids:
                     if record.status.value == "success":
                         emit_event(

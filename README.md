@@ -1,37 +1,41 @@
 # metalab
 
-A general experiment runner: `(ContextSpec, Params, SeedBundle) -> RunRecord + Artifacts`.
+`metalab` is a filesystem-native experiment runner for HPC workflows.
 
-metalab is a lightweight, backend-agnostic framework for reproducible experiments. Define your operation once, sweep parameters, control randomness, and capture results with built-in resume, deduplication, and parallel execution (local or SLURM).
+The core contract is:
 
-## Installation
+```text
+(ContextSpec, Params, SeedBundle) -> RunRecord + files
+```
+
+Workers coordinate only through a shared filesystem. There is no database
+service, dashboard service, tunnel, or remote daemon.
+
+## Install
 
 ```bash
 uv add git+https://github.com/matthewmazurek/metalab.git
 
 # Optional extras
-uv add "metalab[numpy] @ git+https://github.com/matthewmazurek/metalab.git"    # Array serialization for capture.data()/capture.artifact()
-uv add "metalab[pandas] @ git+https://github.com/matthewmazurek/metalab.git"   # DataFrame export helpers (results.to_dataframe / to_csv)
-uv add "metalab[rich] @ git+https://github.com/matthewmazurek/metalab.git"     # Rich progress bars and nicer CLI output
-uv add "metalab[postgres] @ git+https://github.com/matthewmazurek/metalab.git" # PostgreSQL store backend for large experiments
-uv add "metalab[atlas] @ git+https://github.com/matthewmazurek/metalab.git"   # Atlas web UI for browsing experiment results
-uv add "metalab[full] @ git+https://github.com/matthewmazurek/metalab.git"    # All of the above
+uv add "metalab[numpy] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[pandas] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[rich] @ git+https://github.com/matthewmazurek/metalab.git"
+uv add "metalab[hpc] @ git+https://github.com/matthewmazurek/metalab.git"
 ```
 
-## Getting Started (Minimal Project)
-
-Save this as `mvp.py`:
+## Minimal Experiment
 
 ```python
 import metalab
 
+
 @metalab.operation
 def train(params, seeds, capture):
     rng = seeds.rng()
-    score = rng.random() * params["scale"]
-    capture.metric("score", score)
+    capture.metric("score", rng.random() * params["scale"])
 
-exp = metalab.Experiment(
+
+experiment = metalab.Experiment(
     name="mvp",
     version="0.1",
     context={},
@@ -39,68 +43,52 @@ exp = metalab.Experiment(
     params=metalab.grid(scale=[0.1, 1.0, 10.0]),
     seeds=metalab.seeds(base=123, replicates=2),
 )
-
-results = metalab.run(exp).result()
-print(results.to_dataframe())
 ```
 
 Run it:
 
 ```bash
-python mvp.py
+metalab run mvp.py --store ./runs --executor local --workers 4
+metalab status ./runs
+metalab index rebuild ./runs
+metalab export ./runs --format csv --out results.csv
 ```
 
-What you get:
-- Deterministic run IDs from experiment + params + seeds
-- 6 runs (3 parameter values x 2 replicates)
-- Metrics captured in each run record
-- A quick table or DataFrame for analysis
+## Run Store Layout
 
-## Key Features (Quick Tour)
+New stores use a clean v2 layout:
 
-- **Context specs**: lightweight manifests with lazy hashing (`FilePath`/`DirPath`)
-- **Parameter sources**: grid, random, or manual
-- **Seed discipline**: `SeedBundle` with replicates and derived RNGs
-- **Capture system**: metrics, structured data, artifacts, logs
-- **Resume + dedupe**: stable run IDs skip completed work
-- **Parallel + SLURM**: local executors and cluster runs
-- **Stores**: filesystem by default, PostgreSQL for query acceleration
-
-## Storage
-
-By default, metalab stores everything on the filesystem:
-
-```python
-metalab.run(exp, store="./runs/my_exp")
+```text
+manifest.json
+runs/{prefix}/{run_id}.json
+events/{job_id}/{worker_id}.ndjson
+heartbeats/{job_id}/{worker_id}.json
+logs/{prefix}/{run_id}.log
+artifacts/{prefix}/{run_id}/...
+index/status-cache.json
+index/metalab.duckdb
 ```
 
-For large-scale experiments with many runs, add PostgreSQL for fast queries:
+Run JSON files are canonical. Event logs, heartbeats, status cache, and DuckDB
+indexes are accelerators that can be regenerated.
 
-```python
-# PostgresStore = FileStore (source of truth) + PostgresIndex (fast queries)
-metalab.run(
-    exp,
-    store="postgresql://localhost/db?file_root=/shared/experiments",
-)
+## CLI
+
+```bash
+metalab run experiment.py --store /scratch/me/runs --executor slurm
+metalab status /scratch/me/runs
+metalab observe /scratch/me/runs
+metalab index rebuild /scratch/me/runs
+metalab summary /scratch/me/runs --group-by params.lr --metric metrics.score
+metalab export /scratch/me/runs --format parquet --out results.parquet
 ```
 
-Files remain the source of truth—Postgres accelerates lookups. If the database is lost, rebuild the index from files:
+Local runs execute in the CLI process and return when work is complete. SLURM
+runs submit the array job, print the job id and store path, then exit; use
+`metalab observe /scratch/me/runs` to follow progress.
 
-```python
-from metalab.store import PostgresStore
-
-store = PostgresStore("postgresql://localhost/db", file_root="/shared/experiments")
-store.rebuild_index()  # Restores index from files
-```
-
-See [Storage](docs/storage.md) for details on store architecture and data transfer.
-
-## Learn More
-
-- [Key Concepts](docs/key-concepts.md)
-- [Execution (Local + SLURM)](docs/execution.md)
-- [Storage (FileStore + Postgres)](docs/storage.md)
-- [Remote Analysis Workflow](docs/remote-analysis-workflow.md)
+Runs are resume-first: completed successful run records are skipped, while
+missing, failed, stale, or malformed records are eligible to run again.
 
 ## Development
 
@@ -110,13 +98,3 @@ Python 3.11+ required.
 uv sync
 uv run pytest
 ```
-
-Enable the pre-commit hook to auto-rebuild the Atlas frontend when you change files in `atlas/frontend/`:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-## License
-
-MIT

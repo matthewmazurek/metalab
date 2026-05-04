@@ -310,9 +310,8 @@ class Capture:
         """
         Capture structured result data.
 
-        Data is stored in Postgres for fast access by derived metrics
-        and future Atlas visualization. Unlike artifacts, data is stored
-        inline in the database (as JSON), not as separate files.
+        Data is stored as compact structured JSON for derived metrics.
+        Unlike artifacts, data should remain small and query-friendly.
 
         Args:
             name: The data name.
@@ -590,7 +589,7 @@ class Capture:
                 self._logger.removeHandler(self._log_handler)
 
         # Upload logs for stores that need it
-        # - SupportsLogPath (FileStore/PostgresStore): writes directly to persistent path, no upload needed
+        # - SupportsLogPath: writes directly to persistent path, no upload needed
         # - Other stores with put_log: need explicit upload
         if self._log_path and self._log_path.exists():
             if not isinstance(self._store, SupportsLogPath) and hasattr(

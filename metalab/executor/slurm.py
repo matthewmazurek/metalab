@@ -26,12 +26,10 @@ import os
 import subprocess
 import tempfile
 import time
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
-
 from uuid import uuid4
 
 from metalab.events import Event, emit_event
@@ -505,6 +503,7 @@ def _write_array_spec(
     shards: list[dict[str, Any]],
     chunk_size: int,
     store_locator: dict[str, Any],
+    job_id: str,
 ) -> None:
     """Write array spec file for workers to reconstruct runs."""
     from metalab.manifest import serialize
@@ -534,6 +533,7 @@ def _write_array_spec(
         "shards": shards,
         "derived_metric_refs": None,
         "store_locator": store_locator,
+        "job_id": job_id,
     }
 
     spec_path = store_root / "slurm_array_spec.json"
@@ -577,6 +577,7 @@ class SlurmExecutor:
         total_runs: int,
         skipped_count: int = 0,
         derived_metric_refs: list[str] | None = None,
+        job_id: str | None = None,
     ) -> "SlurmRunHandle":
         """
         Submit an experiment as index-addressed SLURM arrays.
@@ -622,6 +623,7 @@ class SlurmExecutor:
         seed_replicates = len(experiment.seeds) if hasattr(experiment.seeds, "__len__") else 0  # type: ignore[arg-type]
 
         store_locator = store.config.to_dict()
+        job_id = job_id or f"slurm-{uuid4().hex[:8]}"
 
         # Write array spec (before submission so workers can read it)
         _write_array_spec(
@@ -631,6 +633,7 @@ class SlurmExecutor:
             shards=shards,
             chunk_size=chunk_size,
             store_locator=store_locator,
+            job_id=job_id,
         )
 
         # Update spec with derived metrics if provided
@@ -813,11 +816,18 @@ class SlurmExecutor:
         seed_replicates: int,
         skipped_count: int = 0,
     ) -> None:
-        """Write the lightweight manifest for reconnection and Atlas."""
+        """Write SLURM submission details into the root run manifest."""
         store_path = _get_store_path(store)
         manifest_path = store_path / "manifest.json"
 
-        manifest = {
+        manifest = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except Exception:
+                manifest = {}
+
+        manifest.update({
             "experiment_id": experiment_id,
             "executor_type": "slurm",
             "submission_mode": "array_indexed",
@@ -832,13 +842,12 @@ class SlurmExecutor:
             "max_array_size": self._config.max_array_size,
             "store_root": str(store_path),
             "submitted_at": datetime.now().isoformat(),
-        }
+        })
 
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
 
-    # Legacy submit method for backward compatibility
     def submit(
         self,
         payloads: list[RunPayload],
@@ -846,41 +855,11 @@ class SlurmExecutor:
         operation: "OperationWrapper",
         run_ids: list[str] | None = None,
     ) -> "SlurmRunHandle":
-        """
-        Legacy submit method - redirects to submit_indexed when possible.
-
-        This method exists for backward compatibility. New code should use
-        submit_indexed() directly via the runner.
-
-        For large experiments, this will raise an error directing users
-        to use the indexed submission path.
-        """
-        # For small experiments, we could theoretically still use the old approach,
-        # but we'll encourage migration to the new approach
-        if len(payloads) > 100:
-            raise RuntimeError(
-                f"Legacy submit() not supported for {len(payloads)} payloads. "
-                "Use metalab.run() which now uses index-addressed SLURM arrays automatically."
-            )
-
-        warnings.warn(
-            "SlurmExecutor.submit() is deprecated. "
-            "Use metalab.run() for automatic index-addressed array submission.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        # For very small experiments, create a minimal handle
-        all_run_ids = run_ids if run_ids is not None else [p.run_id for p in payloads]
-        submitted_run_ids = {p.run_id for p in payloads}
-        skipped_run_ids = [rid for rid in all_run_ids if rid not in submitted_run_ids]
-
-        return SlurmRunHandle(
-            store=store,
-            job_ids=[],
-            shards=[],
-            total_runs=len(all_run_ids),
-            skipped_count=len(skipped_run_ids),
+        """SLURM execution is only supported through indexed array submission."""
+        raise RuntimeError(
+            "SlurmExecutor.submit() is not supported. "
+            "Use metalab.run(..., executor=SlurmExecutor(...)) so the runner can "
+            "write the array spec and v2 run-store manifest."
         )
 
     def shutdown(self, wait: bool = True) -> None:
@@ -906,7 +885,7 @@ class SlurmRunHandle:
     RunHandle implementation for index-addressed SLURM arrays.
 
     Tracks job status via:
-    - .done markers in store for completed run counts (accurate)
+    - persistent event logs in the v2 run store for completed run counts
     - squeue for active chunk counts (RUNNING, PENDING)
     - sacct for terminal chunk counts (COMPLETED, FAILED, etc.)
 
@@ -936,7 +915,7 @@ class SlurmRunHandle:
             total_runs: Total number of runs.
             chunk_size: Number of runs per array task.
             skipped_count: Number of runs skipped (already complete).
-            on_event: Optional callback for progress events.
+            on_event: Optional lifecycle event callback.
         """
         self._store = store
         self._job_ids = job_ids
@@ -946,7 +925,7 @@ class SlurmRunHandle:
         self._skipped_count = skipped_count
         self._on_event = on_event
 
-        # Compute store path for .done marker counting
+        # Compute store path for event/status aggregation.
         self._store_path = _get_store_path(store)
 
         # Cache for sacct results (expensive to query)
@@ -954,13 +933,8 @@ class SlurmRunHandle:
         self._sacct_cache_time: datetime | None = None
         self._sacct_cache_ttl_seconds = 60  # Cache for 1 minute
 
-        # Cache for .done count (moderate cost to scan)
-        self._done_count_cache: int | None = None
-        self._done_count_cache_time: datetime | None = None
-        self._done_count_cache_ttl_seconds = 5  # Refresh every 5 seconds
-
     def set_event_callback(self, callback: "EventCallback | None") -> None:
-        """Set the event callback for progress tracking."""
+        """Set the event callback."""
         self._on_event = callback
 
     @property
@@ -987,44 +961,13 @@ class SlurmRunHandle:
             return self._store.get_working_directory()
         return None
 
-    def _count_done_markers(self) -> int:
-        """
-        Count completed runs via .done markers (cached).
-
-        This is the source of truth for completion, as each run writes
-        a .done marker atomically after success.
-        """
-        now = datetime.now()
-        if (
-            self._done_count_cache is not None
-            and self._done_count_cache_time is not None
-            and (now - self._done_count_cache_time).total_seconds()
-            < self._done_count_cache_ttl_seconds
-        ):
-            return self._done_count_cache
-
-        # Count .done files in runs directory
-        runs_dir = self._store_path / "runs"
-        if runs_dir.exists():
-            count = sum(1 for _ in runs_dir.glob("*.done"))
-        else:
-            count = 0
-
-        self._done_count_cache = count
-        self._done_count_cache_time = now
-        return count
-
     @property
     def status(self) -> RunStatus:
-        """
-        Current status using .done markers for completion counts.
+        """Current status from persistent events plus SLURM queue estimates."""
+        from metalab.status import read_status
 
-        Completion is determined by counting .done marker files, which
-        is accurate regardless of chunk_size. SLURM task counts are used
-        for running/pending estimates.
-        """
-        # Count completed runs from .done markers (source of truth)
-        completed = self._count_done_markers()
+        store_status = read_status(self._store_path)
+        completed = store_status.success
 
         if not self._job_ids:
             # No jobs submitted - completed count is all we have
@@ -1077,12 +1020,12 @@ class SlurmRunHandle:
 
         Returns:
             Dict with state buckets:
-            - completed: runs with .done markers
+            - completed: successful runs from persistent events
             - running, pending: estimated from SLURM chunk counts
             - failed: inferred when all chunks complete
             - total, skipped, chunk_size
         """
-        completed = self._count_done_markers()
+        completed = self.status.completed
 
         if not self._job_ids:
             return {
@@ -1164,15 +1107,15 @@ class SlurmRunHandle:
         """
         Count failed runs by scanning run records.
 
-        This is more expensive than counting .done markers, so only
-        called when we need accurate failure counts.
+        This scans canonical run records and is only called when we need
+        accurate failure counts.
         """
         runs_dir = self._store_path / "runs"
         if not runs_dir.exists():
             return 0
 
         failed = 0
-        for path in runs_dir.glob("*.json"):
+        for path in runs_dir.glob("*/*.json"):
             try:
                 with path.open() as f:
                     data = json.load(f)
@@ -1193,8 +1136,7 @@ class SlurmRunHandle:
         Block until all jobs complete and return Results.
 
         Includes a settling loop to handle sacct accounting lag.
-        Emits progress events so that progress trackers can update
-        in real time.
+        Emits lifecycle callback events when polling detects new terminal states.
 
         Args:
             timeout: Maximum seconds to wait. None means wait forever.
@@ -1243,17 +1185,6 @@ class SlurmRunHandle:
             prev_completed = status.completed
             prev_failed = status.failed
 
-            # Report running count to tracker via PROGRESS event
-            emit_event(
-                self._on_event,
-                Event.progress(
-                    None,
-                    current=status.completed,
-                    total=status.total,
-                    running=status.running,
-                ),
-            )
-
             if status.done == status.total:
                 # All done according to SLURM - start settling
                 if settled_at is None:
@@ -1300,7 +1231,7 @@ class SlurmRunHandle:
 
         Args:
             store: Store containing the manifest.
-            on_event: Optional callback for progress events.
+            on_event: Optional lifecycle event callback.
 
         Returns:
             A SlurmRunHandle for tracking and awaiting results.
@@ -1328,36 +1259,15 @@ class SlurmRunHandle:
                 "Only 'slurm' executors support reconnection."
             )
 
-        # Handle both old and new manifest formats
-        if manifest.get("submission_mode") == "array_indexed":
-            # New indexed format (chunk_size defaults to 1 for backward compat)
-            return cls(
-                store=store,
-                job_ids=manifest.get("job_ids", []),
-                shards=manifest.get("shards", []),
-                total_runs=manifest.get("total_runs", 0),
-                chunk_size=manifest.get("chunk_size", 1),
-                skipped_count=manifest.get("skipped_count", 0),
-                on_event=on_event,
-            )
-        else:
-            # Old submitit format - limited support
-            job_array_id = manifest.get("job_array_id")
-            total = manifest.get("total", len(manifest.get("run_ids", [])))
-            skipped = manifest.get("skipped", len(manifest.get("skipped_run_ids", [])))
+        if manifest.get("submission_mode") != "array_indexed":
+            raise ValueError("Unsupported SLURM manifest; expected v2 indexed arrays.")
 
-            warnings.warn(
-                "Reconnecting to old-format SLURM manifest. "
-                "Status tracking may be limited.",
-                stacklevel=2,
-            )
-
-            return cls(
-                store=store,
-                job_ids=[job_array_id] if job_array_id else [],
-                shards=[],
-                total_runs=total,
-                chunk_size=1,
-                skipped_count=skipped,
-                on_event=on_event,
-            )
+        return cls(
+            store=store,
+            job_ids=manifest.get("job_ids", []),
+            shards=manifest.get("shards", []),
+            total_runs=manifest.get("total_runs", 0),
+            chunk_size=manifest.get("chunk_size", 1),
+            skipped_count=manifest.get("skipped_count", 0),
+            on_event=on_event,
+        )
