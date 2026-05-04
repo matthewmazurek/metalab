@@ -406,6 +406,33 @@ def _latest_result_rows(layout: FileStoreLayout, run_id: str) -> dict[str, dict[
     return latest
 
 
+def _experiment_uns(root: Path, records: list[Any]) -> dict[str, Any]:
+    """Return self-describing experiment metadata for AnnData/Zarr exports."""
+    layout = FileStoreLayout(root)
+    root_manifest = {}
+    if layout.root_manifest_path().exists():
+        root_manifest = json.loads(layout.root_manifest_path().read_text(encoding="utf-8"))
+
+    experiment_id = root_manifest.get("experiment_id")
+    if experiment_id is None and records:
+        experiment_id = records[0].experiment_id
+
+    latest_submission: dict[str, Any] = {}
+    for row in iter_ndjson_rows(layout.submissions_path()):
+        manifest = row.get("manifest")
+        if row.get("experiment_id") == experiment_id and isinstance(manifest, dict):
+            latest_submission = manifest
+
+    return {
+        "experiment_id": experiment_id,
+        "name": latest_submission.get("name"),
+        "version": latest_submission.get("version"),
+        "description": latest_submission.get("description"),
+        "tags": latest_submission.get("tags", []),
+        "metadata": latest_submission.get("metadata", {}),
+    }
+
+
 def export_dataset(store_root: str | Path, *, out: str | Path) -> Path:
     """Export successful observation-oriented runs as AnnData/Zarr."""
     ad, np, pd = _anndata_stack()
@@ -449,10 +476,15 @@ def export_dataset(store_root: str | Path, *, out: str | Path) -> Path:
         "source_store": str(root),
         "source_is_run_store": True,
         "successful_runs": len(records),
+        "experiment": _experiment_uns(root, records),
         "export": {
             "target": "dataset",
             "format": "anndata-zarr",
             "zarr_format": 2,
+        },
+        "capture": {
+            "obsm": {},
+            "skipped": {},
         },
     }
 
@@ -470,13 +502,14 @@ def export_dataset(store_root: str | Path, *, out: str | Path) -> Path:
             skipped_results[name] = "stacked result is not observation-aligned"
             continue
         adata.obsm[name] = stacked.reshape((len(records), -1))
-        adata.uns["metalab"].setdefault("captured_results", {})[name] = {
+        original_shape = result_shapes.get(name, [None])[0] or list(stacked.shape[1:])
+        adata.uns["metalab"]["capture"]["obsm"][name] = {
             "stored_in": "obsm",
-            "original_shape": result_shapes.get(name, [None])[0],
+            "original_shape": original_shape,
             "stacked_shape": list(stacked.shape),
         }
     if skipped_results:
-        adata.uns["metalab"]["skipped_captured_results"] = skipped_results
+        adata.uns["metalab"]["capture"]["skipped"] = skipped_results
 
     from anndata._settings import settings as anndata_settings
 

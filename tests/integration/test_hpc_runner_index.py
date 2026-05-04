@@ -423,6 +423,19 @@ def test_typed_export_dataset_writes_anndata_zarr(tmp_path):
     assert "metrics.score" in adata.obs
     assert "curve" in adata.obsm
     assert adata.uns["metalab"]["source_is_run_store"] is True
+    experiment = adata.uns["metalab"]["experiment"]
+    assert experiment["experiment_id"] == "hpc:1"
+    assert experiment["name"] == "hpc"
+    assert experiment["version"] == "1"
+    assert experiment["description"] is None
+    assert list(experiment["tags"]) == []
+    assert experiment["metadata"] == {}
+    capture = adata.uns["metalab"]["capture"]
+    assert "curve" in capture["obsm"]
+    assert capture["obsm"]["curve"]["stored_in"] == "obsm"
+    assert list(capture["obsm"]["curve"]["original_shape"]) == [2]
+    assert list(capture["obsm"]["curve"]["stacked_shape"]) == [4, 2]
+    assert capture["skipped"] == {}
 
 
 def test_non_file_locator_is_rejected():
