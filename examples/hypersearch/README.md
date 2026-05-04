@@ -86,7 +86,7 @@ With the sidecar index, try:
 ```bash
 metalab index rebuild ./runs
 metalab summary ./runs --group-by params.lr --metric metrics.final_value
-metalab export ./runs --format parquet --out hypersearch.parquet
+metalab export table ./runs --out hypersearch.parquet
 ```
 
 ## Parameter Configuration

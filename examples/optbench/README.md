@@ -77,7 +77,7 @@ Build the local sidecar index and summarize/export results:
 metalab index rebuild ./runs
 metalab summary ./runs --group-by params.algorithm --metric metrics.final_f
 metalab summary ./runs --group-by params.problem --metric metrics.iterations_to_threshold
-metalab export ./runs --format parquet --out optbench.parquet
+metalab export table ./runs --out optbench.parquet
 ```
 
 Artifacts such as `convergence_curve` and `solution` remain on disk under the

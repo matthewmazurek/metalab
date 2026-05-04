@@ -182,7 +182,7 @@ if __name__ == "__main__":
     print(
         "  - metalab summary ./runs --group-by params.learning_rate --metric metrics.final_loss"
     )
-    print("  - metalab export ./runs --format csv --out curve_fit.csv")
+    print("  - metalab export table ./runs --out curve_fit.csv")
 
     # ==========================================================================
     # NEW: to_dataframe() with artifact reducers

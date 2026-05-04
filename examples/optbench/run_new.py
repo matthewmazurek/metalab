@@ -409,4 +409,4 @@ if __name__ == "__main__":
     print("=" * 60)
     print("With the sidecar index, try:")
     print("  - metalab summary ./runs --group-by params.algorithm --metric metrics.final_f")
-    print("  - metalab export ./runs --format parquet --out optbench.parquet")
+    print("  - metalab export table ./runs --out optbench.parquet")

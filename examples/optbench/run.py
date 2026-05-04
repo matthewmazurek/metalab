@@ -467,4 +467,4 @@ if __name__ == "__main__":
         "  - metalab summary ./runs --group-by params.problem "
         "--metric metrics.iterations_to_threshold"
     )
-    print("  - metalab export ./runs --format parquet --out optbench.parquet")
+    print("  - metalab export table ./runs --out optbench.parquet")

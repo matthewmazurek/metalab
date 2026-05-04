@@ -51,7 +51,7 @@ Run it:
 metalab run mvp.py --store ./runs --executor local --workers 4
 metalab status ./runs
 metalab index rebuild ./runs
-metalab export ./runs --format csv --out results.csv
+metalab export table ./runs --out results.csv
 ```
 
 ## Run Store Layout
@@ -95,8 +95,16 @@ metalab status /scratch/me/runs
 metalab observe /scratch/me/runs
 metalab index rebuild /scratch/me/runs
 metalab summary /scratch/me/runs --group-by params.lr --metric metrics.score
-metalab export /scratch/me/runs --format parquet --out results.parquet
+metalab export table /scratch/me/runs --out results.parquet
+metalab export snapshot /scratch/me/runs --out results.duckdb
+metalab export dataset /scratch/me/runs --out results.zarr
+metalab export archive /scratch/me/runs --out results.tar
 ```
+
+The canonical truth remains the run store. Export targets are typed views over
+that store: `table` writes flat CSV/Parquet/JSONL result tables, `snapshot`
+writes a portable DuckDB index copy, `dataset` writes an AnnData/Zarr object for
+observation-oriented experiments, and `archive` writes a tar copy of the store.
 
 Projects can also use a config-aware target:
 

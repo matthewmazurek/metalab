@@ -64,7 +64,7 @@ With the sidecar index, try:
 ```bash
 metalab index rebuild ./runs
 metalab summary ./runs --group-by params.learning_rate --metric metrics.final_loss
-metalab export ./runs --format csv --out curve_fit.csv
+metalab export table ./runs --out curve_fit.csv
 ```
 
 ## Parameter Grid

@@ -343,9 +343,22 @@ def _handle_summary(args: argparse.Namespace) -> int:
 
 
 def _handle_export(args: argparse.Namespace) -> int:
-    from metalab.index import export
+    from metalab.index import export_target
 
-    out = export(_require_store_path(args.store), fmt=args.format, out=args.out)
+    if args.store is None:
+        target = "table"
+        store = args.target_or_store
+    else:
+        target = args.target_or_store
+        store = args.store
+    if target not in {"table", "snapshot", "dataset", "archive"}:
+        raise ValueError("export target must be one of: table, snapshot, dataset, archive")
+    out = export_target(
+        _require_store_path(store),
+        target=target,
+        fmt=getattr(args, "format", None),
+        out=args.out,
+    )
     print(f"exported: {out}")
     return 0
 
@@ -435,9 +448,16 @@ def main() -> int:
     summary_p.add_argument("--metric")
     summary_p.set_defaults(func=_handle_summary)
 
-    export_p = sub.add_parser("export", help="Export indexed runs")
-    export_p.add_argument("store")
-    export_p.add_argument("--format", choices=["csv", "parquet", "jsonl"], required=True)
+    export_p = sub.add_parser(
+        "export",
+        help="Export run stores to typed targets: table, snapshot, dataset, archive",
+    )
+    export_p.add_argument(
+        "target_or_store",
+        help="Export target, or STORE for the legacy table export form",
+    )
+    export_p.add_argument("store", nargs="?")
+    export_p.add_argument("--format", choices=["csv", "parquet", "jsonl"])
     export_p.add_argument("--out", required=True)
     export_p.set_defaults(func=_handle_export)
 

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import tarfile
 
 import metalab
 from metalab import ProcessExecutor, RunRecord, Status, ThreadExecutor
-from metalab.index import export, index_is_current, rebuild_index, summary
+from metalab.index import export, export_target, index_is_current, rebuild_index, summary
 from metalab.store.file import FileStore, FileStoreConfig
 from metalab.store.layout import FileStoreLayout
 
 
 @metalab.operation
 def _op(params, seeds, capture):
-    capture.metric("score", params["x"] + seeds.replicate_index)
+    score = params["x"] + seeds.replicate_index
+    capture.metric("score", score)
+    capture.data("curve", [params["x"], score])
 
 
 def _experiment(context=None):
@@ -384,6 +387,42 @@ def test_duckdb_rebuild_summary_and_export(tmp_path):
     csv_path = export(tmp_path, fmt="csv", out=tmp_path / "runs.csv")
     assert csv_path.exists()
     assert "run_id" in csv_path.read_text()
+    assert "params.x" in csv_path.read_text()
+
+
+def test_typed_export_targets_table_snapshot_and_archive(tmp_path):
+    metalab.run(_experiment(), store=str(tmp_path), verbose=False).result()
+
+    table_path = export_target(tmp_path, target="table", out=tmp_path / "runs.jsonl")
+    assert table_path.exists()
+    table_row = json.loads(table_path.read_text().splitlines()[0])
+    assert "params.x" in table_row
+    assert "metrics.score" in table_row
+
+    snapshot_path = export_target(tmp_path, target="snapshot", out=tmp_path / "runs.duckdb")
+    assert snapshot_path.exists()
+
+    archive_path = export_target(tmp_path, target="archive", out=tmp_path / "runs.tar")
+    assert archive_path.exists()
+    with tarfile.open(archive_path) as archive:
+        names = set(archive.getnames())
+    assert "manifest.json" in names
+    assert "runs.tar" not in names
+
+
+def test_typed_export_dataset_writes_anndata_zarr(tmp_path):
+    import anndata as ad
+
+    metalab.run(_experiment(), store=str(tmp_path), verbose=False).result()
+
+    dataset_path = export_target(tmp_path, target="dataset", out=tmp_path / "runs.zarr")
+
+    adata = ad.read_zarr(dataset_path)
+    assert adata.n_obs == 4
+    assert "params.x" in adata.obs
+    assert "metrics.score" in adata.obs
+    assert "curve" in adata.obsm
+    assert adata.uns["metalab"]["source_is_run_store"] is True
 
 
 def test_non_file_locator_is_rejected():
