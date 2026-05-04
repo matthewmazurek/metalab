@@ -18,7 +18,7 @@ Provides:
 - SlurmExecutorConfig: Config for SLURM cluster execution
 """
 
-from metalab.executor.base import Executor
+from metalab.executor.base import Executor, ExperimentPlan, RunPlanEntry
 from metalab.executor.config import (
     ExecutorConfig,
     ExecutorConfigRegistry,
@@ -53,6 +53,8 @@ def __getattr__(name: str):
 
 __all__ = [
     "Executor",
+    "ExperimentPlan",
+    "RunPlanEntry",
     "ExecutorConfig",
     "ExecutorConfigRegistry",
     "executor_from_config",

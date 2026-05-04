@@ -46,6 +46,7 @@ class RunPayload:
     metadata: dict[str, Any] = field(default_factory=dict)
     operation_ref: str = ""
     derived_metric_refs: list[str] | None = None
+    job_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
@@ -59,6 +60,7 @@ class RunPayload:
             "fingerprints": self.fingerprints,
             "metadata": self.metadata,
             "operation_ref": self.operation_ref,
+            "job_id": self.job_id,
         }
         # Only include derived_metric_refs if set (not part of fingerprint)
         if self.derived_metric_refs is not None:
@@ -81,6 +83,7 @@ class RunPayload:
             ),  # BC: accept old name
             operation_ref=data.get("operation_ref", ""),
             derived_metric_refs=data.get("derived_metric_refs"),
+            job_id=data.get("job_id", ""),
         )
 
 

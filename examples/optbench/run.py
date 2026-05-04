@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 
@@ -397,7 +397,7 @@ if __name__ == "__main__":
     executor = ProcessExecutor(max_workers=4)
 
     print("\nRunning with ProcessExecutor (4 workers)...")
-    handle = metalab.run(exp, executor=executor, progress=True)
+    handle = metalab.run(exp, executor=executor)
     results = handle.result()
 
     # Analysis
@@ -455,31 +455,16 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"(display error: {e})")
 
-    # Atlas tips
+    # CLI analysis tips
     print("\n" + "=" * 60)
-    print("Atlas Visualization Tips")
+    print("CLI Analysis Tips")
     print("=" * 60)
-    print("In metalab-atlas, try these visualizations:")
+    print("With the sidecar index, try:")
     print("")
-    print("  SCATTER/LINE:")
-    print("    - metrics.final_f vs params.dim, group by params.algorithm")
-    print("    - convergence_curve artifact as line chart")
-    print("")
-    print("  BAR:")
-    print("    - Compare mean final_f by algorithm")
-    print("    - Compare iterations_to_threshold by problem")
-    print("")
-    print("  HEATMAP:")
-    print("    - params.algorithm × params.problem → metrics.final_f")
-    print("    - params.dim × params.lr → metrics.convergence_rate")
-    print("")
-    print("  RADAR:")
-    print("    - Compare algorithms across metrics:")
+    print("  - metalab index rebuild ./runs")
+    print("  - metalab summary ./runs --group-by params.algorithm --metric metrics.final_f")
     print(
-        "      convergence_rate, solution_distance, stability, iterations_to_threshold"
+        "  - metalab summary ./runs --group-by params.problem "
+        "--metric metrics.iterations_to_threshold"
     )
-    print("    - Group by params.algorithm to see multi-dimensional comparison")
-    print("")
-    print("  CANDLESTICK/HISTOGRAM:")
-    print("    - Distribution of final_f across replicates")
-    print("    - Compare variance between algorithms")
+    print("  - metalab export ./runs --format parquet --out optbench.parquet")

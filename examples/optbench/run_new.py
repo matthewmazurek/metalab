@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 
@@ -345,7 +345,7 @@ if __name__ == "__main__":
     executor = ProcessExecutor(max_workers=4)
 
     print("\nRunning with ProcessExecutor (4 workers)...")
-    handle = metalab.run(exp, executor=executor, progress=True)
+    handle = metalab.run(exp, executor=executor)
     results = handle.result()
 
     # Analysis
@@ -403,13 +403,10 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"(display error: {e})")
 
-    # Atlas tips
+    # CLI analysis tips
     print("\n" + "=" * 60)
-    print("Atlas Visualization Tips")
+    print("CLI Analysis Tips")
     print("=" * 60)
-    print("In metalab-atlas, try these visualizations:")
-    print("  - Plot: metrics.final_f vs params.dim, group by params.algorithm")
-    print("  - Plot: metrics.final_f vs params.problem, group by params.algorithm")
-    print("  - Compare: algorithms on the same problem")
-    print("  - View: convergence_curve artifact as line chart")
-    print("  - Filter: by converged=true to see successful optimizations")
+    print("With the sidecar index, try:")
+    print("  - metalab summary ./runs --group-by params.algorithm --metric metrics.final_f")
+    print("  - metalab export ./runs --format parquet --out optbench.parquet")

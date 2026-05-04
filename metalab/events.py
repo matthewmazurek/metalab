@@ -1,5 +1,5 @@
 """
-Events system: Stable event schema for hooks and progress tracking.
+Events system: Stable event schema for hooks.
 
 Ordering guarantees:
 - Synchronous emission: Events are emitted inline (callback blocks the run)
@@ -26,9 +26,8 @@ class EventKind(str, Enum):
     RUN_STARTED = "run_started"
     RUN_FINISHED = "run_finished"
     RUN_FAILED = "run_failed"
-    RUN_SKIPPED = "run_skipped"  # When resume=True and run already exists
+    RUN_SKIPPED = "run_skipped"  # When a successful run already exists
     ARTIFACT_SAVED = "artifact_saved"
-    PROGRESS = "progress"
     LOG = "log"
 
 
@@ -99,28 +98,6 @@ class Event:
             run_id=run_id,
             timestamp=datetime.now(),
             payload={"name": name, "uri": uri, **extra},
-        )
-
-    @classmethod
-    def progress(
-        cls,
-        run_id: str | None,
-        current: int,
-        total: int,
-        message: str = "",
-        running: int = 0,
-    ) -> Event:
-        """Create a progress event."""
-        return cls(
-            kind=EventKind.PROGRESS,
-            run_id=run_id,
-            timestamp=datetime.now(),
-            payload={
-                "current": current,
-                "total": total,
-                "message": message,
-                "running": running,
-            },
         )
 
     @classmethod
@@ -200,16 +177,6 @@ class EventEmitter:
     ) -> None:
         """Emit an artifact_saved event."""
         self.emit(Event.artifact_saved(run_id, name, uri, **extra))
-
-    def progress(
-        self,
-        current: int,
-        total: int,
-        message: str = "",
-        run_id: str | None = None,
-    ) -> None:
-        """Emit a progress event."""
-        self.emit(Event.progress(run_id, current, total, message))
 
     def log(
         self,

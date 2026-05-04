@@ -53,7 +53,7 @@ For CPU-bound optimization work, use ProcessExecutor to bypass Python's GIL:
 from metalab import ProcessExecutor
 
 executor = ProcessExecutor(max_workers=4)
-handle = metalab.run(exp, executor=executor, progress=True)
+handle = metalab.run(exp, executor=executor)
 ```
 
 ### Multiple Algorithms and Problems
@@ -69,33 +69,20 @@ params=metalab.grid(
 )
 ```
 
-## Atlas Visualization
+## CLI Analysis
 
-This example is designed to showcase multiple atlas chart types:
+Build the local sidecar index and summarize/export results:
 
-### Scatter/Line Charts
-- `metrics.final_f` vs `params.dim`, grouped by `params.algorithm`
-- `convergence_curve` artifact as line chart (convergence trajectory)
+```bash
+metalab index rebuild ./runs
+metalab summary ./runs --group-by params.algorithm --metric metrics.final_f
+metalab summary ./runs --group-by params.problem --metric metrics.iterations_to_threshold
+metalab export ./runs --format parquet --out optbench.parquet
+```
 
-### Bar Charts
-- Compare mean `final_f` by algorithm
-- Compare `iterations_to_threshold` by problem
-
-### Heatmap
-- `params.algorithm` × `params.problem` → `metrics.final_f`
-- `params.dim` × `params.lr` → `metrics.convergence_rate`
-
-### Radar Charts
-Compare algorithms across multiple dimensions:
-- `convergence_rate` - How fast the algorithm converges (higher = faster)
-- `solution_distance` - Distance from known optimum (lower = better)
-- `stability` - Variance in final iterations (lower = more stable)
-- `iterations_to_threshold` - Steps to reach f < 0.1 (lower = faster)
-
-### Candlestick/Histogram
-- Distribution of `final_f` across 5 replicates
-- Compare variance between algorithms
-- Show [min, q1, q3, max] for each algorithm/problem combination
+Artifacts such as `convergence_curve` and `solution` remain on disk under the
+run store. The first milestone indexes run summaries, params, metrics, errors,
+and events rather than building an artifact browser.
 
 ## Parameter Grid
 

@@ -41,7 +41,7 @@ handle = metalab.run(
     store="/scratch/runs/pi_mc",
     executor=metalab.SlurmExecutor(metalab.SlurmConfig(partition="gpu")),
 )
-print(handle.status)  # check progress without blocking
+print(handle.status)  # check status without blocking
 ```
 """
 
@@ -68,7 +68,7 @@ from metalab.executor import (
 )
 
 
-# Lazy import for SLURM (requires submitit) and PostgresStoreConfig (requires psycopg)
+# Lazy import for SLURM.
 def __getattr__(name: str):
     if name in ("SlurmExecutor", "SlurmConfig", "SlurmRunHandle"):
         from metalab.executor.slurm import SlurmConfig, SlurmExecutor, SlurmRunHandle
@@ -79,10 +79,6 @@ def __getattr__(name: str):
             return SlurmConfig
         elif name == "SlurmRunHandle":
             return SlurmRunHandle
-    if name == "PostgresStoreConfig":
-        from metalab.store.postgres import PostgresStoreConfig
-
-        return PostgresStoreConfig
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -117,16 +113,6 @@ from metalab.params import (
     uniform,
     with_resolver,
 )
-
-# Progress (optional rich support)
-from metalab.progress import (
-    MetricDisplay,
-    Progress,
-    ProgressTracker,
-    SimpleProgressTracker,
-    create_progress_tracker,
-)
-from metalab.progress.display import display_results
 
 # Result
 from metalab.result import ExperimentInfo, Results, Run
@@ -204,8 +190,6 @@ __all__ = [
     "StoreConfig",
     "FileStore",
     "FileStoreConfig",
-    # Lazy-loaded store configs
-    "PostgresStoreConfig",
     # Executor
     "Executor",
     "ThreadExecutor",
@@ -220,13 +204,6 @@ __all__ = [
     "SlurmRunHandle",
     # Executor config helpers
     "resolve_executor",
-    # Progress
-    "MetricDisplay",
-    "Progress",
-    "ProgressTracker",
-    "SimpleProgressTracker",
-    "create_progress_tracker",
-    "display_results",
     # Utilities / File hashing
     "file_hash",
     "dir_hash",

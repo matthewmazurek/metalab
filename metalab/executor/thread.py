@@ -16,6 +16,7 @@ from metalab.executor.payload import RunPayload
 from metalab.types import RunRecord
 
 if TYPE_CHECKING:
+    from metalab.executor.base import ExperimentPlan
     from metalab.operation import OperationWrapper
     from metalab.store.base import Store
 
@@ -46,32 +47,41 @@ class ThreadExecutor:
         # Track worker numbers for logging
         self._worker_counter = 0
         self._worker_counter_lock = threading.Lock()
+        self._worker_generation = 0
+        self._worker_local = threading.local()
 
     def _get_worker_id(self) -> str:
-        """Get a unique worker ID for logging."""
+        """Get a stable worker ID for the current thread within this submit."""
+        if getattr(self._worker_local, "generation", None) == self._worker_generation:
+            return self._worker_local.worker_id
+
         with self._worker_counter_lock:
             self._worker_counter += 1
-            return f"thread:{self._worker_counter}"
+            worker_id = f"thread:{self._worker_counter}"
 
-    def submit(
+        self._worker_local.generation = self._worker_generation
+        self._worker_local.worker_id = worker_id
+        return worker_id
+
+    def submit_experiment(self, plan: "ExperimentPlan") -> RunHandle:
+        """Submit an executor-agnostic experiment plan."""
+        return self._submit_payloads(
+            payloads=plan.to_payloads(),
+            store=plan.store,
+            operation=plan.experiment.operation,
+            run_ids=plan.all_run_ids,
+            job_id=plan.job_id,
+        )
+
+    def _submit_payloads(
         self,
         payloads: list[RunPayload],
         store: Store,
         operation: OperationWrapper,
         run_ids: list[str] | None = None,
-    ) -> RunHandle:
-        """
-        Submit payloads for execution and return a handle.
-
-        Args:
-            payloads: List of run payloads to execute.
-            store: Store for persisting results.
-            operation: The operation to run.
-            run_ids: All run IDs including skipped (for status tracking).
-
-        Returns:
-            A LocalRunHandle for tracking and awaiting results.
-        """
+        job_id: str | None = None,
+    ) -> LocalRunHandle:
+        """Submit materialized payloads to the thread pool."""
         # Store references for worker threads
         self._operation = operation
         self._store = store
@@ -79,6 +89,7 @@ class ThreadExecutor:
         # Reset worker counter for this batch
         with self._worker_counter_lock:
             self._worker_counter = 0
+            self._worker_generation += 1
 
         # Use provided run_ids or extract from payloads
         all_run_ids = run_ids if run_ids is not None else [p.run_id for p in payloads]
@@ -97,6 +108,7 @@ class ThreadExecutor:
             futures=futures,
             store=store,
             run_ids=all_run_ids,
+            job_id=job_id or (payloads[0].job_id if payloads else None),
             skipped_run_ids=skipped_run_ids,
         )
 
@@ -119,6 +131,7 @@ class ThreadExecutor:
             operation=operation,
             store=store,
             worker_id=self._get_worker_id(),
+            job_id=payload.job_id,
             derived_metric_refs=payload.derived_metric_refs,
             capture_third_party_logs=False,
         )

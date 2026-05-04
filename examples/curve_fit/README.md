@@ -10,7 +10,7 @@ This example demonstrates **stepped metrics**, **artifacts**, **logging**, and *
 | `capture.artifact()` | Save numpy arrays and JSON artifacts |
 | `capture.log()` | Operation logging |
 | `ThreadExecutor` | Explicit thread-based parallelism |
-| `progress=True` | Live progress display |
+| `metalab observe` | Live run monitoring |
 
 ## Running the Example
 
@@ -54,17 +54,18 @@ Use ThreadExecutor with configurable workers:
 
 ```python
 executor = ThreadExecutor(max_workers=4)
-handle = metalab.run(exp, executor=executor, progress=True)
+handle = metalab.run(exp, executor=executor)
 ```
 
-## Atlas Visualization
+## CLI Analysis
 
-In metalab-atlas, try these visualizations:
+With the sidecar index, try:
 
-1. **Loss vs Learning Rate**: Plot `metrics.final_loss` vs `params.learning_rate`, grouped by `params.n_iterations`
-2. **Convergence Curves**: View the `loss_history` artifact as a line chart
-3. **Run Comparison**: Compare runs with different learning rates side-by-side
-4. **Error Bars**: Aggregation across 3 replicates shows variance
+```bash
+metalab index rebuild ./runs
+metalab summary ./runs --group-by params.learning_rate --metric metrics.final_loss
+metalab export ./runs --format csv --out curve_fit.csv
+```
 
 ## Parameter Grid
 
@@ -72,7 +73,7 @@ In metalab-atlas, try these visualizations:
 |-----------|--------|---------|
 | `learning_rate` | [0.01, 0.05, 0.1] | X-axis sweep |
 | `n_iterations` | [5000, 10000] | Grouping dimension |
-| replicates | 3 | Error bars in atlas |
+| replicates | 3 | Aggregate summaries |
 
 **Total runs:** 18 (6 param combos × 3 seeds)
 **Runtime:** ~5-10 seconds

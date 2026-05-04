@@ -1,13 +1,4 @@
-"""
-Schema versioning and migration helpers.
-
-This module provides:
-- SCHEMA_VERSION constant for tracking data format versions
-- Tolerant loaders that handle missing fields gracefully
-- Migration stubs for future schema evolution
-
-Design principle: Old runs should remain readable even as the schema evolves.
-"""
+"""Strict v2 run-record serialization for the clean-break filesystem store."""
 
 from __future__ import annotations
 
@@ -17,15 +8,12 @@ from typing import Any
 from metalab.types import ArtifactDescriptor, Provenance, RunRecord, Status
 
 # Current schema version
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "2"
 
 
 def load_run_record(data: dict[str, Any]) -> RunRecord:
     """
-    Load a RunRecord from a dictionary, tolerating missing fields.
-
-    This function applies sensible defaults for fields that may be missing
-    in older schema versions, ensuring backward compatibility.
+    Load a RunRecord from a v2 dictionary.
 
     Args:
         data: Dictionary representation of a RunRecord.
@@ -37,23 +25,27 @@ def load_run_record(data: dict[str, Any]) -> RunRecord:
         >>> data = {"run_id": "abc123", "status": "success", ...}
         >>> record = load_run_record(data)
     """
+    version = data.get("_schema_version")
+    if version != SCHEMA_VERSION:
+        raise ValueError(f"Unsupported run-record schema: {version!r}")
+
     # Handle status as string or enum
-    status = data.get("status", "failed")
+    status = data["status"]
     if isinstance(status, str):
         status = Status(status)
 
     # Parse timestamps
-    started_at = data.get("started_at")
+    started_at = data["started_at"]
     if isinstance(started_at, str):
         started_at = datetime.fromisoformat(started_at)
     elif started_at is None:
-        started_at = datetime.now()
+        raise ValueError("Run record missing started_at")
 
-    finished_at = data.get("finished_at")
+    finished_at = data["finished_at"]
     if isinstance(finished_at, str):
         finished_at = datetime.fromisoformat(finished_at)
     elif finished_at is None:
-        finished_at = datetime.now()
+        raise ValueError("Run record missing finished_at")
 
     # Load provenance
     prov_data = data.get("provenance", {})
@@ -75,15 +67,15 @@ def load_run_record(data: dict[str, Any]) -> RunRecord:
         artifacts.append(load_artifact_descriptor(art_data))
 
     return RunRecord(
-        run_id=data.get("run_id", ""),
-        experiment_id=data.get("experiment_id", ""),
+        run_id=data["run_id"],
+        experiment_id=data["experiment_id"],
         status=status,
-        context_fingerprint=data.get("context_fingerprint", ""),
-        params_fingerprint=data.get("params_fingerprint", ""),
-        seed_fingerprint=data.get("seed_fingerprint", ""),
+        context_fingerprint=data["context_fingerprint"],
+        params_fingerprint=data["params_fingerprint"],
+        seed_fingerprint=data["seed_fingerprint"],
         started_at=started_at,
         finished_at=finished_at,
-        duration_ms=data.get("duration_ms", 0),
+        duration_ms=data["duration_ms"],
         metrics=data.get("metrics", {}),
         provenance=provenance,
         error=data.get("error"),
@@ -178,27 +170,6 @@ def dump_artifact_descriptor(descriptor: ArtifactDescriptor) -> dict[str, Any]:
     }
 
 
-# Migration stubs for future schema evolution
-
-
-def migrate_v01_to_v02(data: dict[str, Any]) -> dict[str, Any]:
-    """
-    Migrate data from schema v0.1 to v0.2.
-
-    Stub for future use - currently a no-op.
-    """
-    # Future migrations will be implemented here
-    return data
-
-
 def get_schema_version(data: dict[str, Any]) -> str:
-    """
-    Extract the schema version from serialized data.
-
-    Args:
-        data: Serialized record data.
-
-    Returns:
-        The schema version string, or "0.1" if not present.
-    """
-    return data.get("_schema_version", "0.1")
+    """Extract the schema version from serialized data."""
+    return data.get("_schema_version", "")

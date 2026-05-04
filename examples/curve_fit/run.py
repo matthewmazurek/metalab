@@ -9,7 +9,7 @@ This example demonstrates:
 - Artifacts: capture.artifact() for numpy arrays and JSON
 - Logging: capture.log() for operation messages
 - ThreadExecutor: explicit parallelism with max_workers
-- Progress tracking: progress=True for live progress display
+- Live monitoring: use `metalab observe STORE` from another terminal
 
 Domain: Fit exponential decay y = a * exp(-b * x) + c to noisy data via gradient descent.
 """
@@ -90,7 +90,7 @@ def fit_curve(params, seeds, capture):
         loss_history.append(loss)
 
         # NEW FEATURE: capture.metric() with step= for time-series metrics
-        # This creates a training curve viewable in atlas
+        # This creates a training curve artifact for later export/analysis.
         capture.metric("loss", float(loss), step=i)
 
         # Check for convergence
@@ -110,7 +110,7 @@ def fit_curve(params, seeds, capture):
     # NEW FEATURE: capture.artifact() for numpy arrays
     # These are saved and can be loaded later with run.artifact("name")
     capture.artifact("fitted_params", theta)  # numpy array [a, b, c]
-    capture.artifact("loss_history", np.array(loss_history))  # 1D array for atlas viz
+    capture.artifact("loss_history", np.array(loss_history))
 
     # Log final results
     capture.log(f"Final params: a={theta[0]:.3f}, b={theta[1]:.3f}, c={theta[2]:.3f}")
@@ -125,13 +125,13 @@ exp = metalab.Experiment(
     operation=fit_curve,
     # Grid search over learning rates and iteration counts
     params=metalab.grid(
-        learning_rate=[0.01, 0.05, 0.1],  # X-axis sweep in atlas
+        learning_rate=[0.01, 0.05, 0.1],
         n_iterations=[
             5_000,
             10_000,
         ],  # Grouping dimension (more iterations for visible runtime)
     ),
-    # 3 replicates for error bars in atlas
+    # 3 replicates for aggregate summaries.
     seeds=metalab.seeds(base=42, replicates=3),
 )
 
@@ -143,8 +143,7 @@ if __name__ == "__main__":
     # For CPU-bound work, ProcessExecutor is better; ThreadExecutor works for I/O or simple tasks
     executor = ThreadExecutor(max_workers=4)
 
-    # NEW FEATURE: progress=True for live progress display
-    handle = metalab.run(exp, executor=executor, progress=True)
+    handle = metalab.run(exp, executor=executor)
 
     # Block until complete
     results = handle.result()
@@ -170,21 +169,20 @@ if __name__ == "__main__":
     print(
         f"  fitted_params: a={fitted_params[0]:.3f}, b={fitted_params[1]:.3f}, c={fitted_params[2]:.3f}"
     )
-    print(f"  (true params:  a=2.000, b=0.500, c=0.500)")
+    print("  (true params:  a=2.000, b=0.500, c=0.500)")
 
     # Show loss history artifact shape
     loss_history = best_run.artifact("loss_history")
     print(f"  loss_history: {len(loss_history)} values")
 
     print("\n" + "=" * 60)
-    print("Atlas Visualization Tips")
+    print("CLI Analysis Tips")
     print("=" * 60)
-    print("In metalab-atlas, try these visualizations:")
+    print("With the sidecar index, try:")
     print(
-        "  - Plot metrics.final_loss vs params.learning_rate, group by params.n_iterations"
+        "  - metalab summary ./runs --group-by params.learning_rate --metric metrics.final_loss"
     )
-    print("  - View loss_history artifact as a line chart (1D array)")
-    print("  - Compare runs with different learning rates side-by-side")
+    print("  - metalab export ./runs --format csv --out curve_fit.csv")
 
     # ==========================================================================
     # NEW: to_dataframe() with artifact reducers

@@ -6,9 +6,7 @@ This module provides:
 - StoreConfig: Abstract base class for store configurations
 - ConfigRegistry: Registry mapping scheme names to config classes
 
-Store backends are discovered via ``metalab.stores`` entry points
-(defined in ``pyproject.toml``).  Each entry point maps a URI scheme
-(e.g. ``"file"``, ``"postgresql"``) to a :class:`StoreConfig` subclass.
+The only built-in and supported backend is ``file``.
 
 StoreConfig separates configuration (pure data, serializable) from store instances
 (connections, file handles). This enables:
@@ -20,25 +18,19 @@ StoreConfig separates configuration (pure data, serializable) from store instanc
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from metalab.store.base import Store
     from metalab.store.locator import LocatorInfo
 
-logger = logging.getLogger(__name__)
-
-
 class ConfigRegistry:
     """
     Registry mapping scheme names to config classes.
 
-    Backends are discovered lazily from ``metalab.stores`` entry points
-    on first lookup.
+    Clean-break HPC mode intentionally supports only the filesystem store.
     """
 
     _configs: dict[str, type[StoreConfig]] = {}
@@ -46,15 +38,13 @@ class ConfigRegistry:
 
     @classmethod
     def _ensure_loaded(cls) -> None:
-        """Load all store config entry points (once)."""
+        """Load built-in file store config (once)."""
         if cls._loaded:
             return
         cls._loaded = True
-        for ep in entry_points(group="metalab.stores"):
-            try:
-                cls._configs[ep.name] = ep.load()
-            except Exception:  # noqa: BLE001
-                logger.debug("Failed to load store entry point %r", ep.name, exc_info=True)
+        from metalab.store.file import FileStoreConfig
+
+        cls._configs["file"] = FileStoreConfig
 
     @classmethod
     def get(cls, scheme: str) -> type[StoreConfig] | None:
@@ -82,7 +72,7 @@ class StoreConfig(ABC):
 
     Subclasses must define:
 
-    - scheme: ClassVar[str] - the URI scheme (e.g., "file", "postgresql")
+    - scheme: ClassVar[str] - the URI scheme (e.g., "file")
     - connect() -> Store - create a connected store instance
     - from_locator(info, **kwargs) -> StoreConfig - parse a locator URI
 

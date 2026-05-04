@@ -1,720 +1,394 @@
-"""
-MetaLab CLI: Command-line interface for metalab utilities.
-
-Provides commands for:
-- store: Transfer data between stores, list experiments
-- env: Manage environment profiles
-- services: Provision and manage services
-- tunnel: Open SSH tunnels to services
-"""
+"""Command-line interface for the filesystem-native metalab runner."""
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
-import logging
-import os
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 
-def main() -> int:
-    """Main CLI entry point."""
-    parser = argparse.ArgumentParser(
-        prog="metalab",
-        description="MetaLab: A general experiment runner",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
-    # Store commands
-    store_parser = subparsers.add_parser(
-        "store",
-        help="Store operations (transfer, list)",
-    )
-    store_subparsers = store_parser.add_subparsers(
-        dest="store_command",
-        help="Store commands",
-    )
-
-    # store export
-    export_parser = store_subparsers.add_parser(
-        "export",
-        help="Export data from source store to destination",
-    )
-    export_parser.add_argument(
-        "--from",
-        "-f",
-        required=True,
-        dest="source",
-        help="Source store locator (e.g., postgresql://localhost/db)",
-    )
-    export_parser.add_argument(
-        "--to",
-        "-t",
-        required=True,
-        dest="destination",
-        help="Destination store locator (e.g., file:///path/to/store)",
-    )
-    export_parser.add_argument(
-        "--experiment",
-        "-e",
-        help="Filter by experiment ID",
-    )
-    export_parser.add_argument(
-        "--include-artifacts",
-        action="store_true",
-        help="Include artifact files (usually skipped for file-backed stores)",
-    )
-    export_parser.add_argument(
-        "--include-derived",
-        action="store_true",
-        default=True,
-        help="Include derived metrics (default: True)",
-    )
-    export_parser.add_argument(
-        "--no-include-derived",
-        action="store_false",
-        dest="include_derived",
-        help="Exclude derived metrics",
-    )
-    export_parser.add_argument(
-        "--include-logs",
-        action="store_true",
-        default=True,
-        help="Include log files (default: True)",
-    )
-    export_parser.add_argument(
-        "--no-include-logs",
-        action="store_false",
-        dest="include_logs",
-        help="Exclude log files",
-    )
-    export_parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing records in destination",
-    )
-
-    # store import (alias for export, since export_store is bidirectional)
-    import_parser = store_subparsers.add_parser(
-        "import",
-        help="Import data from source store to destination (alias for export)",
-    )
-    import_parser.add_argument(
-        "--from",
-        "-f",
-        required=True,
-        dest="source",
-        help="Source store locator (e.g., file:///path/to/store)",
-    )
-    import_parser.add_argument(
-        "--to",
-        "-t",
-        required=True,
-        dest="destination",
-        help="Destination store locator (e.g., postgresql://localhost/db)",
-    )
-    import_parser.add_argument(
-        "--experiment",
-        "-e",
-        help="Filter by experiment ID",
-    )
-    import_parser.add_argument(
-        "--include-artifacts",
-        action="store_true",
-        help="Include artifact files (usually skipped for file-backed stores)",
-    )
-    import_parser.add_argument(
-        "--include-derived",
-        action="store_true",
-        default=True,
-        help="Include derived metrics (default: True)",
-    )
-    import_parser.add_argument(
-        "--no-include-derived",
-        action="store_false",
-        dest="include_derived",
-        help="Exclude derived metrics",
-    )
-    import_parser.add_argument(
-        "--include-logs",
-        action="store_true",
-        default=True,
-        help="Include log files (default: True)",
-    )
-    import_parser.add_argument(
-        "--no-include-logs",
-        action="store_false",
-        dest="include_logs",
-        help="Exclude log files",
-    )
-    import_parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing records in destination",
-    )
-
-    # store list
-    list_parser = store_subparsers.add_parser(
-        "list",
-        help="List experiments in a store",
-    )
-    list_parser.add_argument(
-        "--store",
-        "-s",
-        required=True,
-        help="Store locator (e.g., file:///path/to/store or postgresql://localhost/db)",
-    )
-    list_parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output as JSON",
-    )
-
-    # Env commands
-    env_parser = subparsers.add_parser(
-        "env",
-        help="Manage environment profiles",
-    )
-    env_subparsers = env_parser.add_subparsers(
-        dest="env_command",
-        help="Environment commands",
-    )
-
-    # env list
-    env_subparsers.add_parser(
-        "list",
-        help="List all environment profiles",
-    )
-
-    # env show
-    env_show_parser = env_subparsers.add_parser(
-        "show",
-        help="Show resolved config for an environment profile",
-    )
-    env_show_parser.add_argument(
-        "name",
-        nargs="?",
-        default=None,
-        help="Environment profile name (default: project default)",
-    )
-
-    # Services commands
-    services_parser = subparsers.add_parser(
-        "services",
-        help="Provision and manage services",
-    )
-    services_subparsers = services_parser.add_subparsers(
-        dest="services_command",
-        help="Service commands",
-    )
-
-    # services up
-    services_up_parser = services_subparsers.add_parser(
-        "up",
-        help="Provision services per the selected environment profile",
-    )
-    services_up_parser.add_argument(
-        "--env",
-        default=None,
-        help="Environment profile name (default: project default, or METALAB_ENV)",
-    )
-    services_up_parser.add_argument(
-        "--tunnel",
-        action="store_true",
-        help="Also open a tunnel after provisioning",
-    )
-
-    # services down
-    services_down_parser = services_subparsers.add_parser(
-        "down",
-        help="Stop all services and clean up",
-    )
-    services_down_parser.add_argument(
-        "--env",
-        default=None,
-        help="Environment profile name (default: project default, or METALAB_ENV)",
-    )
-
-    # services status
-    services_status_parser = services_subparsers.add_parser(
-        "status",
-        help="Check health of running services",
-    )
-    services_status_parser.add_argument(
-        "--env",
-        default=None,
-        help="Environment profile name (default: project default, or METALAB_ENV)",
-    )
-    services_status_parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output as JSON",
-    )
-
-    # services logs
-    services_logs_parser = services_subparsers.add_parser(
-        "logs",
-        help="Show service logs",
-    )
-    services_logs_parser.add_argument(
-        "--env",
-        default=None,
-        help="Environment profile name (default: project default, or METALAB_ENV)",
-    )
-    services_logs_parser.add_argument(
-        "service",
-        nargs="?",
-        default=None,
-        help="Service name (e.g. atlas, postgres). Omit for all services.",
-    )
-    services_logs_parser.add_argument(
-        "-n", "--tail",
-        type=int,
-        default=0,
-        help="Show only the last N lines (0 = all)",
-    )
-
-    # services rebuild-index
-    services_rebuild_parser = services_subparsers.add_parser(
-        "rebuild-index",
-        help="Rebuild the Postgres query index from the FileStore",
-    )
-    services_rebuild_parser.add_argument(
-        "--env",
-        default=None,
-        help="Environment profile name (default: project default, or METALAB_ENV)",
-    )
-
-    # Tunnel command
-    tunnel_parser = subparsers.add_parser(
-        "tunnel",
-        help="Open a managed SSH tunnel to running services",
-    )
-    tunnel_parser.add_argument(
-        "--env",
-        default=None,
-        help="Environment profile name (default: project default, or METALAB_ENV)",
-    )
-    tunnel_parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Local port for the tunnel",
-    )
-
-    args = parser.parse_args()
-
-    # Setup logging
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-
-    if args.command == "store":
-        return handle_store(args)
-    elif args.command == "env":
-        return handle_env(args)
-    elif args.command == "services":
-        return handle_services(args)
-    elif args.command == "tunnel":
-        return handle_tunnel(args)
+def _load_experiment(target: str) -> Any:
+    path = Path(target)
+    if path.exists():
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"Cannot import experiment script: {target}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        sys.path.insert(0, str(path.parent.resolve()))
+        spec.loader.exec_module(module)
     else:
-        parser.print_help()
+        module_name, _, attr = target.partition(":")
+        module = __import__(module_name, fromlist=[attr] if attr else [])
+        if attr:
+            obj = getattr(module, attr)
+            return obj() if callable(obj) and not hasattr(obj, "experiment_id") else obj
+
+    for name in ("experiment", "exp"):
+        if hasattr(module, name):
+            return getattr(module, name)
+    if hasattr(module, "get_experiment"):
+        return module.get_experiment()
+    raise ValueError(
+        "Experiment target must expose `experiment`, `exp`, or `get_experiment()`."
+    )
+
+
+def _print_status(status: Any, *, json_output: bool = False) -> None:
+    if json_output:
+        print(json.dumps(status.to_dict(), indent=2, sort_keys=True))
+        return
+    print(
+        f"total={status.total} success={status.success} failed={status.failed} "
+        f"running={status.running} pending={status.pending} "
+        f"stale_workers={status.stale_workers}"
+    )
+
+
+def _require_store_path(store: str) -> str:
+    if not store.strip():
+        raise ValueError(
+            "Store path is empty. If you used $STORE, define it in this terminal "
+            "or pass the path explicitly."
+        )
+    return store
+
+
+def _handle_run(args: argparse.Namespace) -> int:
+    import metalab
+    from metalab.executor.thread import ThreadExecutor
+
+    exp = _load_experiment(args.target)
+    store_path = _require_store_path(args.store)
+    executor_factories = {
+        "local": lambda: ThreadExecutor(max_workers=args.workers),
+        "slurm": lambda: metalab.SlurmExecutor(metalab.SlurmConfig()),
+    }
+    executor = executor_factories[args.executor]()
+    handle = metalab.run(
+        exp,
+        store=store_path,
+        executor=executor,
+        resume=True,
+    )
+
+    if handle.can_reconnect:
+        print(f"submitted {args.executor} job_id={handle.job_id}")
+        print(f"store={store_path}")
+        print(f"observe: metalab observe {store_path}")
         return 0
 
-
-def handle_store(args: argparse.Namespace) -> int:
-    """Handle store subcommands."""
-    from metalab.store.transfer import export_store
-
-    if args.store_command == "export":
-        try:
-
-            def progress(current: int, total: int) -> None:
-                print(f"\rExporting: {current}/{total}", end="", flush=True)
-
-            counts = export_store(
-                args.source,
-                args.destination,
-                experiment_id=args.experiment,
-                include_artifacts=args.include_artifacts,
-                include_derived=args.include_derived,
-                include_logs=args.include_logs,
-                overwrite=args.overwrite,
-                progress_callback=progress,
-            )
-
-            print()  # Newline after progress
-            print("Export complete:")
-            for key, value in counts.items():
-                print(f"  {key}: {value}")
-
-            return 0
-
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    elif args.store_command == "import":
-        # Import is an alias for export (export_store is bidirectional)
-        try:
-
-            def progress(current: int, total: int) -> None:
-                print(f"\rImporting: {current}/{total}", end="", flush=True)
-
-            counts = export_store(
-                args.source,
-                args.destination,
-                experiment_id=args.experiment,
-                include_artifacts=args.include_artifacts,
-                include_derived=args.include_derived,
-                include_logs=args.include_logs,
-                overwrite=args.overwrite,
-                progress_callback=progress,
-            )
-
-            print()  # Newline after progress
-            print("Import complete:")
-            for key, value in counts.items():
-                print(f"  {key}: {value}")
-
-            return 0
-
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    elif args.store_command == "list":
-        try:
-            from metalab.store.locator import parse_to_config
-
-            config = parse_to_config(args.store)
-
-            # Check if config supports listing experiments
-            if hasattr(config, "list_experiments"):
-                experiments = config.list_experiments()
-            else:
-                # Fall back to connecting and listing run records
-                store = config.connect()
-                records = store.list_run_records()
-                experiments = sorted(set(r.experiment_id for r in records))
-
-            if args.json_output:
-                print(json.dumps({"experiments": experiments}))
-            else:
-                if experiments:
-                    print("Experiments:")
-                    for exp in experiments:
-                        print(f"  {exp}")
-                else:
-                    print("No experiments found")
-
-            return 0
-
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    else:
-        print("Usage: metalab store {export|import|list}", file=sys.stderr)
-        return 1
-
-
-def handle_env(args: argparse.Namespace) -> int:
-    """Handle env subcommands."""
-    from metalab.config import ProjectConfig
-
-    try:
-        config = ProjectConfig.load()
-    except FileNotFoundError:
-        print("No .metalab.toml found. Create one in your project root.")
-        print("See: https://metalab.readthedocs.io/en/latest/services/")
-        return 1
-
-    if args.env_command == "list":
-        envs = config.list_environments()
-        default = config.project.default_env
-        if not envs:
-            print("No environments defined in .metalab.toml")
-            return 0
-        h = "─"
-        print(f"  {'NAME':<20} {'TYPE':<12} {'DEFAULT'}")
-        print(f"  {h * 20} {h * 12} {h * 7}")
-        for name in envs:
-            profile = config.environments[name]
-            marker = "*" if name == default else ""
-            print(f"  {name:<20} {profile.type:<12} {marker}")
-        return 0
-
-    elif args.env_command == "show":
-        try:
-            resolved = config.resolve(args.name)
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-        print(f"Environment: {resolved.env_name}")
-        print(f"  Type: {resolved.env_type}")
-        if resolved.file_root:
-            print(f"  File root: {resolved.file_root}")
-        if resolved.env_config:
-            print(f"  Config:")
-            for k, v in resolved.env_config.items():
-                print(f"    {k}: {v}")
-        if resolved.services:
-            print(f"  Services:")
-            for svc_name, svc_config in resolved.services.items():
-                print(f"    {svc_name}: {svc_config}")
-        return 0
-
-    else:
-        print("Usage: metalab env {list|show}", file=sys.stderr)
-        return 1
-
-
-def _print_tunnel_hint(
-    bundle: "ServiceBundle",
-    resolved: "ResolvedConfig",
-) -> None:
-    """Print a copy-paste SSH tunnel command for remote services."""
-    import shlex
-
-    from metalab.environment.connector import ConnectionTarget
-    from metalab.environment.ssh_tunnel import build_ssh_command
-
-    target_info = bundle.tunnel_targets[0]
-    target = ConnectionTarget(
-        remote_host=target_info["host"],
-        remote_port=target_info["remote_port"],
-        local_port=target_info.get("local_port", target_info["remote_port"]),
-        gateway=resolved.env_config.get("gateway"),
-        user=resolved.env_config.get("user"),
-        ssh_key=resolved.env_config.get("ssh_key"),
-    )
-
-    cmd = build_ssh_command(target)
-    print(f"\nTunnel from your workstation:")
-    print(f"  {shlex.join(cmd)}")
-    print(f"\nThen open: http://localhost:{target.local_port}")
-
-
-def handle_services(args: argparse.Namespace) -> int:
-    """Handle services subcommands."""
-    import json as json_mod
-
-    from metalab.config import ProjectConfig
-    from metalab.environment.orchestrator import ServiceOrchestrator
-
-    try:
-        config = ProjectConfig.load()
-    except FileNotFoundError:
-        print("No .metalab.toml found. Create one in your project root.")
-        print("See: https://metalab.readthedocs.io/en/latest/services/")
-        return 1
-
-    env_name = getattr(args, "env", None) or os.environ.get("METALAB_ENV")
-
-    try:
-        resolved = config.resolve(env_name)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-
-    orch = ServiceOrchestrator(resolved)
-
-    if args.services_command == "up":
-        try:
-            tunnel = getattr(args, "tunnel", False)
-            bundle = orch.up(tunnel=tunnel)
-            print(f"Services started ({resolved.env_name}):")
-            for name, handle in bundle.services.items():
-                print(f"  {name}: {handle.host}:{handle.port}")
-            if bundle.store_locator:
-                print(f"  Store: {bundle.store_locator}")
-
-            if bundle.tunnel_targets and not tunnel:
-                _print_tunnel_hint(bundle, resolved)
-            else:
-                atlas = bundle.get("atlas")
-                if atlas:
-                    print(f"\n  Atlas UI: http://{atlas.host}:{atlas.port}")
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    elif args.services_command == "down":
-        try:
-            orch.down()
-            print("All services stopped.")
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    elif args.services_command == "status":
-        try:
-            status = orch.status()
-            if not status.bundle_found:
-                print("No services running.")
-                return 0
-            use_json = getattr(args, "json_output", False)
-            if use_json:
-                print(json_mod.dumps(status.services, indent=2))
-            else:
-                for name, info in status.services.items():
-                    symbol = "\u2713" if info["available"] else "\u2717"
-                    print(
-                        f"  {symbol} {name}: {info['host']}:{info['port']} ({info['status']})"
-                    )
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    elif args.services_command == "logs":
-        try:
-            service = getattr(args, "service", None)
-            tail = getattr(args, "tail", 0)
-            logs = orch.logs(service_name=service, tail=tail)
-            if not logs:
-                print("No service logs found.", file=sys.stderr)
-                return 1
-            for name, content in logs.items():
-                if len(logs) > 1:
-                    print(f"=== {name} ===")
-                print(content)
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    elif args.services_command == "rebuild-index":
-        try:
-            from metalab.environment import ServiceBundle
-            from metalab.store.locator import create_store
-            from metalab.store.postgres import PostgresStore
-
-            if not orch._bundle_path.exists():
-                print(
-                    "No running services found. Start them with 'metalab services up' first.",
-                    file=sys.stderr,
-                )
-                return 1
-
-            bundle = ServiceBundle.load(orch._bundle_path)
-            locator = bundle.store_locator
-            if not locator:
-                print(
-                    "No store locator in service bundle. "
-                    "Is Postgres configured in your environment?",
-                    file=sys.stderr,
-                )
-                return 1
-
-            store = create_store(locator)
-            if not isinstance(store, PostgresStore):
-                print(
-                    f"rebuild-index requires a PostgresStore, but got {type(store).__name__}.",
-                    file=sys.stderr,
-                )
-                return 1
-
-            import logging as _logging
-
-            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-
-            # Suppress log output during progress — the progress bar
-            # already communicates the same information.
-            metalab_logger = _logging.getLogger("metalab")
-            prev_level = metalab_logger.level
-
-            print("Rebuilding Postgres index from FileStore...")
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                transient=True,
-            ) as prog:
-                metalab_logger.setLevel(_logging.WARNING)
-
-                try:
-                    task_id = prog.add_task("Starting...", total=None)
-
-                    def _on_progress(phase: str, completed: int, total: int) -> None:
-                        prog.update(task_id, description=phase, completed=completed, total=total)
-
-                    count = store.rebuild_index(progress=_on_progress)
-                finally:
-                    metalab_logger.setLevel(prev_level)
-
-            print(f"Done. Indexed {count} records.")
-            return 0
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-    else:
-        print("Usage: metalab services {up|down|status|logs|rebuild-index}", file=sys.stderr)
-        return 1
-
-
-def handle_tunnel(args: argparse.Namespace) -> int:
-    """Handle tunnel command — prints the SSH tunnel command for remote services."""
-    from metalab.config import ProjectConfig
-    from metalab.environment.bundle import ServiceBundle
-    from metalab.environment.orchestrator import ServiceOrchestrator
-
-    try:
-        config = ProjectConfig.load()
-    except FileNotFoundError:
-        print("No .metalab.toml found. Create one in your project root.")
-        print("See: https://metalab.readthedocs.io/en/latest/services/")
-        return 1
-
-    env_name = getattr(args, "env", None) or os.environ.get("METALAB_ENV")
-
-    try:
-        resolved = config.resolve(env_name)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-
-    orch = ServiceOrchestrator(resolved)
-
-    if not orch._bundle_path.exists():
-        print("No service bundle found. Run 'metalab services up' first.")
-        return 1
-
-    try:
-        bundle = ServiceBundle.load(orch._bundle_path)
-    except Exception as e:
-        print(f"Error loading bundle: {e}", file=sys.stderr)
-        return 1
-
-    if not bundle.tunnel_targets:
-        print("No tunnel needed (services are local).")
-        return 0
-
-    # Allow --port to override the local port
-    local_port_override = getattr(args, "port", None)
-    if local_port_override is not None:
-        bundle.tunnel_targets[0]["local_port"] = local_port_override
-
-    _print_tunnel_hint(bundle, resolved)
+    results = handle.result()
+    print(f"completed runs={len(results)}")
     return 0
 
 
+def _handle_status(args: argparse.Namespace) -> int:
+    from metalab.status import read_status
+
+    _print_status(read_status(_require_store_path(args.store)), json_output=args.json_output)
+    return 0
+
+
+def _handle_observe(args: argparse.Namespace) -> int:
+    from metalab.observe import (
+        FIELD_PRESETS,
+        append_fields,
+        field_label,
+        format_row,
+        merge_run_row,
+        observe_events,
+        parse_fields,
+        project_event,
+        read_new_events,
+        shorten_value,
+    )
+    from metalab.status import read_status, validate_run_store
+
+    validate_run_store(_require_store_path(args.store))
+
+    pretty = args.pretty or not (args.plain or args.json_output)
+    by_run = args.by_run or not args.events
+    if args.events and args.by_run:
+        raise ValueError("--events and --by-run cannot be used together")
+    if pretty and args.json_output:
+        raise ValueError("--pretty and --json cannot be used together")
+
+    if args.view not in FIELD_PRESETS:
+        raise ValueError(f"Unknown observe view {args.view!r}. Choose from: {', '.join(FIELD_PRESETS)}")
+    fields = parse_fields(args.view)
+    extras: list[str] = []
+    for value in args.fields or []:
+        extras.extend(parse_fields(value))
+    for group in args.field or []:
+        for value in group:
+            extras.extend(parse_fields(value))
+    fields = append_fields(fields, extras)
+
+    if pretty:
+        try:
+            from rich.console import Console, Group
+            from rich.live import Live
+            from rich.table import Table
+            from rich.text import Text
+        except ImportError as e:
+            raise RuntimeError(
+                "Pretty observe output requires Rich. Install with `uv sync --extra rich` "
+                "or omit --pretty."
+            ) from e
+
+        console = Console()
+        rows: list[dict[str, Any]] = []
+        by_run_rows: dict[str, dict[str, Any]] = {}
+        skipped_run_ids: set[str] = set()
+        offsets: dict[str, int] = {}
+
+        def render_header() -> Text:
+            status = read_status(_require_store_path(args.store))
+            complete = status.success + status.failed
+            pct = (complete / status.total * 100) if status.total else 0.0
+            summary = Text()
+            summary.append("metalab observe", style="bold")
+            summary.append(f"  {_require_store_path(args.store)}", style="dim")
+            summary.append("\n")
+            summary.append(f"{complete}/{status.total}", style="bold white")
+            summary.append(f" {pct:5.1f}%", style="white")
+            summary.append("   ")
+            summary.append(
+                f"running {status.running}",
+                style="cyan" if status.running else "dim",
+            )
+            summary.append("   ")
+            summary.append(
+                f"ok {status.success}",
+                style="green" if status.success else "dim",
+            )
+            summary.append("   ")
+            summary.append(
+                f"failed {status.failed}",
+                style="red" if status.failed else "dim",
+            )
+            summary.append("   ")
+            summary.append(
+                f"pending {status.pending}",
+                style="white" if status.pending else "dim",
+            )
+            if skipped_run_ids:
+                summary.append("   ")
+                summary.append(f"skip {len(skipped_run_ids)}", style="yellow")
+            if status.stale_workers:
+                summary.append("   ")
+                summary.append(f"stale workers {status.stale_workers}", style="yellow")
+            return summary
+
+        def render_table() -> Table:
+            table = Table(
+                box=None,
+                caption="active and recent runs" if by_run else "recent events",
+                caption_style="dim",
+                expand=False,
+                header_style="bold dim",
+                pad_edge=False,
+                show_edge=False,
+            )
+            for field in fields:
+                justify = "right" if field == "duration_ms" or field.startswith("metrics.") else "left"
+                table.add_column(field_label(field), overflow="ellipsis", justify=justify)
+            visible_rows = (
+                list(by_run_rows.values())[-args.limit :]
+                if by_run
+                else rows[-args.limit :]
+            )
+            for row in visible_rows:
+                style = {
+                    "started": "cyan",
+                    "finished": "green",
+                    "failed": "red",
+                    "skipped": "yellow",
+                }.get(str(row.get("kind")), "")
+                table.add_row(
+                    *[shorten_value(field, row.get(field)) for field in fields],
+                    style=style,
+                )
+            return table
+
+        def render_view() -> Any:
+            if not by_run:
+                return render_table()
+
+            return Group(render_header(), Text(""), render_table())
+
+        try:
+            with Live(render_view(), console=console, refresh_per_second=4) as live:
+                while True:
+                    changed = False
+                    for event in read_new_events(_require_store_path(args.store), offsets):
+                        if by_run:
+                            run_id = event.get("run_id")
+                            if run_id:
+                                if event.get("kind") == "skipped":
+                                    skipped_run_ids.add(str(run_id))
+                                    changed = True
+                                    continue
+                                by_run_rows[run_id] = merge_run_row(
+                                    by_run_rows.get(run_id),
+                                    event,
+                                )
+                                changed = True
+                        else:
+                            rows.append(project_event(event, fields))
+                            changed = True
+                    if changed or by_run:
+                        live.update(render_view())
+                    if args.once:
+                        return 0
+                    time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
+        return 0
+
+    try:
+        for row in observe_events(
+            _require_store_path(args.store),
+            fields=fields,
+            interval=args.interval,
+            once=args.once,
+        ):
+            if args.json_output:
+                print(json.dumps(row, sort_keys=True), flush=True)
+            else:
+                print(format_row(row), flush=True)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+def _handle_index(args: argparse.Namespace) -> int:
+    from metalab.index import rebuild_index
+
+    path = rebuild_index(_require_store_path(args.store), force=args.force)
+    print(f"index rebuilt: {path}")
+    return 0
+
+
+def _handle_summary(args: argparse.Namespace) -> int:
+    from metalab.index import summary
+
+    rows = summary(
+        _require_store_path(args.store),
+        group_by=args.group_by,
+        metric=args.metric,
+    )
+    print(json.dumps(rows, indent=2, sort_keys=True))
+    return 0
+
+
+def _handle_export(args: argparse.Namespace) -> int:
+    from metalab.index import export
+
+    out = export(_require_store_path(args.store), fmt=args.format, out=args.out)
+    print(f"exported: {out}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="metalab",
+        description="metalab: filesystem-native HPC experiment runner",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run_p = sub.add_parser("run", help="Run an experiment script/module")
+    run_p.add_argument("target", help="Python script or module[:attr] exposing an Experiment")
+    run_p.add_argument("--store", required=True, help="Filesystem run-store path")
+    run_p.add_argument("--executor", choices=["local", "slurm"], default="local")
+    run_p.add_argument("--workers", type=int, default=1, help="Local worker threads")
+    run_p.set_defaults(func=_handle_run)
+
+    status_p = sub.add_parser("status", help="Show run-store status")
+    status_p.add_argument("store")
+    status_p.add_argument("--json", action="store_true", dest="json_output")
+    status_p.set_defaults(func=_handle_status)
+
+    observe_p = sub.add_parser("observe", help="Print selected live event fields")
+    observe_p.add_argument("store")
+    observe_p.add_argument(
+        "--fields",
+        action="append",
+        help=(
+            "Additional comma-separated fields or aliases, e.g. "
+            "params.x,metrics.loss"
+        ),
+    )
+    observe_p.add_argument(
+        "-f",
+        "--field",
+        action="append",
+        nargs="+",
+        help="Additional fields, e.g. -f params.x metrics.loss",
+    )
+    observe_p.add_argument(
+        "--view",
+        default="default",
+        help="Field preset: default, basic, timing, smoke, errors",
+    )
+    observe_p.add_argument("--interval", type=float, default=2.0)
+    observe_p.add_argument("--once", action="store_true", help="Read current events and exit")
+    observe_p.add_argument("--json", action="store_true", dest="json_output")
+    observe_p.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Render a live Rich table (default unless --plain or --json is used)",
+    )
+    observe_p.add_argument("--plain", action="store_true", help="Print key=value rows")
+    observe_p.add_argument(
+        "--events",
+        action="store_true",
+        help="Show an append-only event stream instead of the by-run dashboard",
+    )
+    observe_p.add_argument(
+        "--by-run",
+        action="store_true",
+        help="Update one row per run (default unless --events is used)",
+    )
+    observe_p.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum rows to keep in pretty mode",
+    )
+    observe_p.set_defaults(func=_handle_observe)
+
+    index_p = sub.add_parser("index", help="Manage sidecar indexes")
+    index_sub = index_p.add_subparsers(dest="index_command", required=True)
+    rebuild_p = index_sub.add_parser("rebuild", help="Rebuild DuckDB sidecar index")
+    rebuild_p.add_argument("store")
+    rebuild_p.add_argument("--force", action="store_true")
+    rebuild_p.set_defaults(func=_handle_index)
+
+    summary_p = sub.add_parser("summary", help="Summarize indexed runs")
+    summary_p.add_argument("store")
+    summary_p.add_argument("--group-by")
+    summary_p.add_argument("--metric")
+    summary_p.set_defaults(func=_handle_summary)
+
+    export_p = sub.add_parser("export", help="Export indexed runs")
+    export_p.add_argument("store")
+    export_p.add_argument("--format", choices=["csv", "parquet", "jsonl"], required=True)
+    export_p.add_argument("--out", required=True)
+    export_p.set_defaults(func=_handle_export)
+
+    args = parser.parse_args()
+    try:
+        return args.func(args)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

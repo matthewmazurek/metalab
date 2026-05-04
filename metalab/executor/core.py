@@ -37,6 +37,7 @@ def execute_payload(
     operation: "OperationWrapper",
     store: "Store",
     worker_id: str,
+    job_id: str = "",
     derived_metric_refs: list[str] | None = None,
     capture_third_party_logs: bool = False,
 ) -> RunRecord:
@@ -68,6 +69,29 @@ def execute_payload(
         The completed RunRecord (success or failed).
     """
     started_at = datetime.now()
+    job_id = job_id or "unknown"
+    event_sink = None
+    if hasattr(store, "event_sink"):
+        try:
+            event_sink = store.event_sink(job_id, worker_id, experiment_id)
+            event_sink.emit(
+                "started",
+                run_id=run_id,
+                payload={"params": params_resolved},
+            )
+        except Exception as e:
+            logger.debug(f"Failed to emit start event for {run_id}: {e}")
+    if hasattr(store, "put_heartbeat"):
+        try:
+            store.put_heartbeat(
+                job_id=job_id,
+                worker_id=worker_id,
+                experiment_id=experiment_id,
+                state="running",
+                current_run_id=run_id,
+            )
+        except Exception:
+            pass
 
     # Create runtime
     runtime = create_runtime(
@@ -165,6 +189,30 @@ def execute_payload(
         except Exception as e:
             logger.warning(f"Failed to persist final record for {run_id}: {e}")
 
+        if event_sink is not None:
+            try:
+                event_sink.emit(
+                    "finished",
+                    run_id=run_id,
+                    payload={
+                        "duration_ms": duration_ms,
+                        "params": params_resolved,
+                        "metrics": result.metrics,
+                    },
+                )
+            except Exception:
+                pass
+        if hasattr(store, "put_heartbeat"):
+            try:
+                store.put_heartbeat(
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    experiment_id=experiment_id,
+                    state="idle",
+                )
+            except Exception:
+                pass
+
         return result
 
     except Exception as e:
@@ -199,6 +247,33 @@ def execute_payload(
             store.put_run_record(result)
         except Exception as persist_err:
             logger.warning(f"Failed to persist failed record for {run_id}: {persist_err}")
+
+        if event_sink is not None:
+            try:
+                event_sink.emit(
+                    "failed",
+                    run_id=run_id,
+                    payload={
+                        "duration_ms": duration_ms,
+                        "params": params_resolved,
+                        "metrics": result.metrics,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                )
+            except Exception:
+                pass
+        if hasattr(store, "put_heartbeat"):
+            try:
+                store.put_heartbeat(
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    experiment_id=experiment_id,
+                    state="failed",
+                    current_run_id=run_id,
+                )
+            except Exception:
+                pass
 
         return result
 

@@ -51,7 +51,7 @@ class SupportsExperimentManifests(Protocol):
     Used by:
     - Runner: to store experiment configuration at submission time
 
-    Both FileStore (filesystem) and PostgresStore (database) implement this.
+    FileStore implements this for filesystem coordination.
     """
 
     def put_experiment_manifest(
@@ -81,7 +81,7 @@ class SupportsArtifactOpen(Protocol):
 
     Stores implement this to handle their specific URI schemes:
     - FileStore: file:// and plain paths
-    - PostgresStore: pgblob:// inline blobs
+    - FileStore: local files
 
     The returned file-like object should be a context manager supporting
     binary read mode.
@@ -113,7 +113,7 @@ class SupportsLogPath(Protocol):
     - Capture: to configure file handlers for streaming logs
 
     Only filesystem-backed stores implement this (FileStore).
-    PostgresStore stores logs directly to the database instead.
+    Stores without this capability may upload logs when a run finalizes.
     """
 
     def get_log_path(self, run_id: str, name: str) -> Path:
@@ -141,7 +141,7 @@ class SupportsStructuredResults(Protocol):
     - Capture: to store intermediate data for derived metrics
     - Derived metric computation: to retrieve stored data
 
-    PostgresStore implements this (stores in results table).
+    FileStore implements this with JSON files.
     FileStore does not (results stored in capture summary as fallback).
     """
 
@@ -206,7 +206,7 @@ class SupportsLogListing(Protocol):
     - Result.logs(): to enumerate available logs
     - Store transfer: to sync logs between stores
 
-    Both FileStore and PostgresStore implement this.
+    FileStore implements this.
     """
 
     def list_logs(self, run_id: str) -> list[str]:

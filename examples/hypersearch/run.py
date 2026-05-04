@@ -6,7 +6,7 @@ Usage:
 
 This example demonstrates:
 - Random parameter sampling: metalab.random() with loguniform, uniform distributions
-- Resume capability: resume=True to continue interrupted experiments
+- Resume-first execution to continue interrupted experiments
 - Result filtering: results.filter() to select runs by criteria
 - Result display: results.display(group_by=) for grouped summaries
 - Multiple experiments: Comparing grid vs random search in one script
@@ -132,15 +132,14 @@ random_exp = metalab.Experiment(
 )
 
 
-def run_experiment(exp, name: str, resume: bool = False):
+def run_experiment(exp, name: str):
     """Run an experiment and return results."""
     print(f"\n{'='*60}")
     print(f"Running {name}")
     print(f"{'='*60}")
 
-    # NEW FEATURE: resume=True skips already-completed runs
-    # Useful for continuing after interruption or adding more trials
-    handle = metalab.run(exp, resume=resume, progress=True)
+    # Completed runs are skipped automatically when re-running.
+    handle = metalab.run(exp)
     return handle.result()
 
 
@@ -168,7 +167,7 @@ def analyze_results(results, name: str):
 
     # Summary statistics
     final_values = [r.metrics["final_value"] for r in successful]
-    print(f"\nSummary statistics:")
+    print("\nSummary statistics:")
     print(f"  Mean final_value: {np.mean(final_values):.6f}")
     print(f"  Min final_value:  {np.min(final_values):.6f}")
     print(f"  Max final_value:  {np.max(final_values):.6f}")
@@ -225,25 +224,22 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Resume Demonstration")
     print("=" * 60)
-    print("Running grid experiment again with resume=True...")
+    print("Running grid experiment again...")
     print("(Should skip all runs since they're already complete)")
 
     # This should be instant - all runs are skipped
-    handle = metalab.run(grid_exp, resume=True, progress=True)
+    handle = metalab.run(grid_exp)
     resumed_results = handle.result()
     print(
         f"Result: {len(resumed_results.successful)} runs (all skipped, loaded from cache)"
     )
 
     # ========================================================================
-    # Atlas Visualization Tips
+    # CLI Analysis Tips
     # ========================================================================
     print("\n" + "=" * 60)
-    print("Atlas Visualization Tips")
+    print("CLI Analysis Tips")
     print("=" * 60)
-    print("In metalab-atlas, try these visualizations:")
-    print("  - Scatter: metrics.final_value vs params.lr (compare search strategies)")
-    print("  - Compare: grid vs random search efficiency")
-    print("  - Filter: by status='success' to exclude failures")
-    print("  - Aggregate: mean final_value with error bars across replicates")
-    print("  - Side-by-side: compare best runs from each search strategy")
+    print("With the sidecar index, try:")
+    print("  - metalab summary ./runs --group-by params.lr --metric metrics.final_value")
+    print("  - metalab export ./runs --format parquet --out hypersearch.parquet")

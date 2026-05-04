@@ -8,7 +8,7 @@ This example demonstrates **random parameter sampling**, **resume capability**, 
 |---------|-------------|
 | `metalab.random()` | Random sampling with distributions |
 | `loguniform()`, `uniform()` | Continuous parameter distributions |
-| `resume=True` | Skip completed runs on re-execution |
+| Resume-first runs | Completed runs are skipped on re-execution |
 | `results.filter()` | Filter runs by criteria |
 | `results.display()` | Grouped result summaries |
 | Multiple experiments | Compare approaches in one script |
@@ -42,10 +42,10 @@ Continue interrupted experiments without re-running completed work:
 
 ```python
 # First run: executes all runs
-handle = metalab.run(exp, resume=True)
+handle = metalab.run(exp)
 
 # Second run: skips completed, only runs new/failed
-handle = metalab.run(exp, resume=True)
+handle = metalab.run(exp)
 ```
 
 ### Result Filtering and Analysis
@@ -79,15 +79,15 @@ random_exp = metalab.Experiment(
 )
 ```
 
-## Atlas Visualization
+## CLI Analysis
 
-In metalab-atlas, try these visualizations:
+With the sidecar index, try:
 
-1. **Scatter Plot**: `metrics.final_value` vs `params.lr` to see parameter sensitivity
-2. **Grid vs Random**: Compare efficiency of both search strategies
-3. **Filtering**: Filter by `status='success'` to exclude failures
-4. **Aggregation**: Mean `final_value` with error bars across replicates
-5. **Run Comparison**: Side-by-side comparison of best runs from each strategy
+```bash
+metalab index rebuild ./runs
+metalab summary ./runs --group-by params.lr --metric metrics.final_value
+metalab export ./runs --format parquet --out hypersearch.parquet
+```
 
 ## Parameter Configuration
 

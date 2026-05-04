@@ -15,11 +15,11 @@ from metalab.executor.payload import RunPayload
 from metalab.types import RunRecord
 
 if TYPE_CHECKING:
-    from metalab.operation import OperationWrapper
+    from metalab.executor.base import ExperimentPlan
     from metalab.store.base import Store
 
 
-def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, Any]:
+def _process_worker(payload_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Top-level worker function (pickle-safe).
 
@@ -28,11 +28,11 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
 
     Args:
         payload_dict: Serialized RunPayload.
-        worker_num: Worker number for logging identification.
-
     Returns:
         Serialized RunRecord as dict.
     """
+    import os
+
     from metalab.executor.core import execute_payload
     from metalab.executor.payload import RunPayload
     from metalab.operation import import_operation
@@ -59,7 +59,8 @@ def _process_worker(payload_dict: dict[str, Any], worker_num: int) -> dict[str, 
         metadata=payload.metadata,
         operation=operation,
         store=store,
-        worker_id=f"process:{worker_num}",
+        worker_id=f"process:{os.getpid()}",
+        job_id=payload.job_id,
         derived_metric_refs=payload.derived_metric_refs,
         capture_third_party_logs=True,
     )
@@ -84,27 +85,24 @@ class ProcessExecutor:
         """
         self._max_workers = max_workers
         self._pool = ProcessPoolExecutor(max_workers=max_workers)
-        self._worker_counter = 0
 
-    def submit(
+    def submit_experiment(self, plan: "ExperimentPlan") -> RunHandle:
+        """Submit an executor-agnostic experiment plan."""
+        return self._submit_payloads(
+            payloads=plan.to_payloads(),
+            store=plan.store,
+            run_ids=plan.all_run_ids,
+            job_id=plan.job_id,
+        )
+
+    def _submit_payloads(
         self,
         payloads: list[RunPayload],
         store: Store,
-        operation: OperationWrapper,
         run_ids: list[str] | None = None,
-    ) -> RunHandle:
-        """
-        Submit payloads for execution and return a handle.
-
-        Args:
-            payloads: List of run payloads to execute.
-            store: Store for persisting results.
-            operation: The operation to run (used to set operation_ref).
-            run_ids: All run IDs including skipped (for status tracking).
-
-        Returns:
-            A LocalRunHandle for tracking and awaiting results.
-        """
+        job_id: str | None = None,
+    ) -> LocalRunHandle:
+        """Submit materialized payloads to the process pool."""
         # Use provided run_ids or extract from payloads
         all_run_ids = run_ids if run_ids is not None else [p.run_id for p in payloads]
 
@@ -112,21 +110,14 @@ class ProcessExecutor:
         submitted_run_ids = {p.run_id for p in payloads}
         skipped_run_ids = [rid for rid in all_run_ids if rid not in submitted_run_ids]
 
-        # Reset worker counter for this batch
-        self._worker_counter = 0
-
         # Submit all payloads to the process pool
         futures: list[tuple[str, Future[RunRecord]]] = []
         for payload in payloads:
-            # Increment worker counter
-            self._worker_counter += 1
-            worker_num = self._worker_counter
-
             # Convert payload to dict for pickling
             payload_dict = payload.to_dict()
 
-            # Submit to pool with worker number
-            future = self._pool.submit(_process_worker, payload_dict, worker_num)
+            # Submit to pool
+            future = self._pool.submit(_process_worker, payload_dict)
 
             # Wrap future to deserialize result
             wrapped = _ResultWrapper(future)
@@ -136,6 +127,7 @@ class ProcessExecutor:
             futures=futures,
             store=store,
             run_ids=all_run_ids,
+            job_id=job_id or (payloads[0].job_id if payloads else None),
             skipped_run_ids=skipped_run_ids,
         )
 

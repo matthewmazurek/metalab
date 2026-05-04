@@ -8,26 +8,22 @@ The Runner:
 3. Submits to executor
 4. Returns a RunHandle for tracking/awaiting results
 
-Progress tracking:
-
-- Pass `progress=True` for automatic progress display (auto-detects rich)
-- Pass `progress=Progress(...)` for customized progress display
-- Pass `on_event=callback` for custom event handling
+Use `metalab observe STORE` to monitor live status from another terminal.
+Pass `on_event=callback` for custom in-process event handling.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+import uuid
+from datetime import datetime
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from metalab.derived import DerivedMetricFn
     from metalab.events import EventCallback
     from metalab.executor.base import Executor
-    from metalab.executor.handle import RunHandle as RunHandleProtocol
-    from metalab.executor.slurm import SlurmExecutor
     from metalab.experiment import Experiment
-    from metalab.progress import Progress, ProgressTracker
     from metalab.store.base import Store
     from metalab.store.config import StoreConfig
 
@@ -38,8 +34,8 @@ from metalab._ids import (
     fingerprint_seeds,
     resolve_context,
 )
-from metalab.executor.handle import RunHandle, RunStatus
-from metalab.executor.payload import RunPayload
+from metalab.executor.base import ExperimentPlan, RunPlanEntry
+from metalab.executor.handle import RunHandle
 from metalab.executor.thread import ThreadExecutor
 from metalab.result import Results
 from metalab.store import (
@@ -47,7 +43,6 @@ from metalab.store import (
     SupportsExperimentManifests,
     SupportsWorkingDirectory,
 )
-from metalab.types import Status
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +73,7 @@ def _write_experiment_manifest(
     total_runs: int,
     run_ids: list[str] | None = None,
 ) -> None:
-    """Write experiment manifest to store for Atlas."""
+    """Write versioned experiment metadata to the store."""
     from datetime import datetime
 
     from metalab.manifest import build_experiment_manifest
@@ -100,144 +95,20 @@ def _write_experiment_manifest(
         logger.debug(f"Saved experiment manifest: {experiment.experiment_id}")
 
 
-class ProgressRunHandle:
-    """
-    Wrapper handle that manages progress tracker lifecycle.
-
-    Starts the progress tracker on creation and stops it when result() is called.
-    Delegates all other operations to the underlying handle.
-    """
-
-    def __init__(
-        self,
-        handle: "RunHandleProtocol",
-        tracker: "ProgressTracker",
-    ) -> None:
-        self._handle = handle
-        self._tracker = tracker
-        self._tracker_started = False
-        self._tracker_stopped = False
-
-        # Start the tracker and wire up events
-        self._start_tracker()
-
-    def _start_tracker(self) -> None:
-        """Start the progress tracker."""
-        if self._tracker_started:
-            return
-        self._tracker.__enter__()
-        self._handle.set_event_callback(self._tracker)
-        self._tracker_started = True
-
-    def _stop_tracker(
-        self,
-        exc_info: tuple[type | None, BaseException | None, object] = (None, None, None),
-    ) -> None:
-        """Stop the progress tracker, passing exception info for clean summary."""
-        if self._tracker_stopped or not self._tracker_started:
-            return
-        self._tracker.__exit__(*exc_info)
-        self._tracker_stopped = True
-
-    @property
-    def job_id(self) -> str:
-        """Unique identifier for this execution batch."""
-        return self._handle.job_id
-
-    @property
-    def store(self) -> "Store":
-        """The store used for this execution."""
-        return self._handle.store
-
-    @property
-    def status(self) -> RunStatus:
-        """Current status of all runs (non-blocking)."""
-        return self._handle.status
-
-    @property
-    def is_complete(self) -> bool:
-        """True if all runs have finished (success or failure)."""
-        return self._handle.is_complete
-
-    @property
-    def can_reconnect(self) -> bool:
-        """Delegate to inner handle."""
-        return self._handle.can_reconnect
-
-    @property
-    def reconnect_locator(self) -> str | None:
-        """Delegate to inner handle."""
-        return self._handle.reconnect_locator
-
-    def result(self, timeout: float | None = None) -> Results:
-        """
-        Block until all runs complete and return Results.
-
-        Also stops the progress tracker display.
-        Handles KeyboardInterrupt gracefully by cancelling remaining runs
-        and displaying an interrupted summary instead of a traceback.
-        """
-        try:
-            return self._handle.result(timeout=timeout)
-        except KeyboardInterrupt:
-            self._handle.cancel()
-            self._stop_tracker(
-                exc_info=(KeyboardInterrupt, KeyboardInterrupt(), None),
-            )
-            raise
-        finally:
-            self._stop_tracker()
-
-    def cancel(self) -> None:
-        """Cancel pending and running jobs."""
-        self._handle.cancel()
-        self._stop_tracker()
-
-    def set_event_callback(self, callback: "EventCallback | None") -> None:
-        """
-        Set an additional event callback.
-
-        Note: The progress tracker callback is always called first.
-        """
-        # Create a combined callback that calls both
-        original_tracker = self._tracker
-
-        def combined_callback(event: Any) -> None:
-            original_tracker(event)
-            if callback is not None:
-                callback(event)
-
-        self._handle.set_event_callback(combined_callback)
-
-    def __enter__(self) -> "ProgressRunHandle":
-        """Enter context manager."""
-        return self
-
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        """Exit context manager, ensuring tracker is stopped."""
-        self._stop_tracker()
-
-
-def generate_payloads(
+def prepare_experiment_plan(
     experiment: Experiment,
     store: Store,
     resume: bool = True,
     persist_manifest: bool = True,
     derived_metric_refs: list[str] | None = None,
-) -> tuple[list[RunPayload], list[str]]:
-    """
-    Generate payloads for an experiment.
+    job_id: str | None = None,
+    executor_type: str = "local",
+) -> ExperimentPlan:
+    """Prepare an executor-agnostic experiment submission plan.
 
-    Args:
-        experiment: The experiment to run.
-        store: Store for checking existing runs.
-        resume: If True, skip already-completed runs.
-        persist_manifest: If True, save resolved context manifest for auditability.
-        derived_metric_refs: List of derived metric function references ('module:func').
-            These are post-hoc computations that do NOT affect run fingerprints.
-
-    Returns:
-        Tuple of (payloads to execute, all run IDs including skipped).
+    The runner owns experiment planning policy: context resolution, deterministic
+    run IDs, resume decisions, root manifest writes, and runner-side events.
+    Executors own only submission mechanics.
     """
     # Resolve context - computes lazy hashes for FilePath/DirPath
     resolved_context, manifest = resolve_context(experiment.context)
@@ -246,7 +117,6 @@ def generate_payloads(
     # Optionally persist the resolved manifest for auditability
     if persist_manifest and manifest and isinstance(store, SupportsWorkingDirectory):
         import json
-        from pathlib import Path
 
         manifest_path = (
             store.get_working_directory()
@@ -265,12 +135,8 @@ def generate_payloads(
             )
         logger.debug(f"Saved context manifest to {manifest_path}")
 
-    # First pass: compute all run_ids and store resolved params/seeds
-    # We need this before writing the manifest so we can include run_ids
-    all_run_ids = []
-    run_data: list[tuple[str, dict, Any, str, str]] = (
-        []
-    )  # (run_id, resolved_params, seed_bundle, params_fp, seed_fp)
+    # First pass: compute all run_ids and store resolved params/seeds.
+    run_entries: list[RunPlanEntry] = []
 
     for param_case in experiment.params:
         # Resolve params if resolver is provided
@@ -296,155 +162,109 @@ def generate_payloads(
                 code_fp=experiment.operation.code_hash,
             )
 
-            all_run_ids.append(run_id)
-            run_data.append((run_id, resolved_params, seed_bundle, params_fp, seed_fp))
-
-    # Write experiment manifest (versioned by timestamp) - now includes run_ids
-    if persist_manifest:
-        _write_experiment_manifest(
-            experiment, store, ctx_fp, len(all_run_ids), all_run_ids
-        )
-
-    # Second pass: create payloads, skipping successful runs if resume=True
-    payloads = []
-
-    for run_id, resolved_params, seed_bundle, params_fp, seed_fp in run_data:
-        # Check for resume
-        if resume and store.run_exists(run_id):
-            existing = store.get_run_record(run_id)
-            if existing and existing.status == Status.SUCCESS:
-                continue
-
-        payload = RunPayload(
-            run_id=run_id,
-            experiment_id=experiment.experiment_id,
-            context_spec=experiment.context,
-            params_resolved=resolved_params,
-            seed_bundle=seed_bundle,
-            store_locator=store.config.to_dict(),
-            fingerprints={
-                "context": ctx_fp,
-                "params": params_fp,
-                "seed": seed_fp,
-            },
-            metadata=experiment.metadata,
-            operation_ref=experiment.operation.ref,
-            derived_metric_refs=derived_metric_refs,
-        )
-
-        payloads.append(payload)
-
-    return payloads, all_run_ids
-
-
-def _run_slurm_indexed(
-    experiment: "Experiment",
-    store: "Store",
-    executor: "SlurmExecutor",
-    resume: bool = True,
-    derived_metric_refs: list[str] | None = None,
-) -> "RunHandle":
-    """
-    Submit experiment via index-addressed SLURM array.
-
-    This avoids the per-task pickle overhead of submitit by:
-    1. Writing a single array spec file with experiment configuration
-    2. Submitting SLURM array job(s) via sbatch
-    3. Each task reconstructs its parameters from SLURM_ARRAY_TASK_ID
-
-    Args:
-        experiment: The experiment to run.
-        store: Store for persisting results.
-        executor: The SLURM executor.
-        resume: Skip existing successful runs.
-        derived_metric_refs: Optional derived metric function references.
-
-    Returns:
-        SlurmRunHandle for tracking and awaiting results.
-    """
-    from metalab._canonical import fingerprint
-    from metalab._ids import resolve_context
-
-    # Resolve context - computes lazy hashes for FilePath/DirPath
-    resolved_context, manifest = resolve_context(experiment.context)
-    ctx_fp = fingerprint(resolved_context)
-
-    # Compute total runs
-    total_runs = len(experiment.params) * len(experiment.seeds)
-
-    # Count existing successful runs if resuming
-    skipped_count = 0
-    if resume:
-        for param_case in experiment.params:
-            if experiment.param_resolver is not None:
-                resolver = experiment.param_resolver
-                if hasattr(resolver, "resolve"):
-                    resolved_params = resolver.resolve({}, param_case.params)
-                else:
-                    resolved_params = resolver({}, param_case.params)
-            else:
-                resolved_params = param_case.params
-
-            params_fp = fingerprint_params(resolved_params)
-            for seed_bundle in experiment.seeds:
-                seed_fp = fingerprint_seeds(seed_bundle)
-                run_id = compute_run_id(
-                    experiment_id=experiment.experiment_id,
-                    context_fp=ctx_fp,
-                    params_fp=params_fp,
-                    seed_fp=seed_fp,
-                    code_fp=experiment.operation.code_hash,
+            run_entries.append(
+                RunPlanEntry(
+                    run_id=run_id,
+                    params_resolved=resolved_params,
+                    seed_bundle=seed_bundle,
+                    params_fingerprint=params_fp,
+                    seed_fingerprint=seed_fp,
                 )
-                if store.run_exists(run_id):
-                    existing = store.get_run_record(run_id)
-                    if existing and existing.status == Status.SUCCESS:
-                        skipped_count += 1
+            )
 
-    # Optionally persist the resolved manifest for auditability
-    if manifest and isinstance(store, SupportsWorkingDirectory):
-        import json
-        from pathlib import Path
-
-        manifest_path = (
-            store.get_working_directory()
-            / f"{experiment.experiment_id}_context_manifest.json"
+    job_id = job_id or f"job-{uuid.uuid4().hex[:8]}"
+    all_run_ids = [entry.run_id for entry in run_entries]
+    if hasattr(store, "write_planned_run_ids"):
+        try:
+            store.write_planned_run_ids(all_run_ids)
+        except Exception as e:
+            logger.warning(f"Failed to write planned run ids: {e}")
+    statuses = (
+        store.get_run_statuses(all_run_ids)
+        if resume and hasattr(store, "get_run_statuses")
+        else {}
+    )
+    run_entries = [
+        RunPlanEntry(
+            run_id=entry.run_id,
+            params_resolved=entry.params_resolved,
+            seed_bundle=entry.seed_bundle,
+            params_fingerprint=entry.params_fingerprint,
+            seed_fingerprint=entry.seed_fingerprint,
+            status=statuses.get(entry.run_id),
         )
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with manifest_path.open("w") as f:
-            json.dump(
+        for entry in run_entries
+    ]
+
+    if hasattr(store, "write_root_manifest"):
+        try:
+            store.write_root_manifest(
                 {
                     "experiment_id": experiment.experiment_id,
+                    "expected_run_count": len(all_run_ids),
+                    "expected_run_ids_inline": False,
+                    "expected_run_ids_path": "index/planned-runs/{prefix}.ndjson",
+                    "executor_type": executor_type,
+                    "job_id": job_id,
+                    "created_at": datetime.now().isoformat(),
                     "context_fingerprint": ctx_fp,
-                    "resolved_fields": manifest,
-                },
-                f,
-                indent=2,
+                }
             )
-        logger.debug(f"Saved context manifest to {manifest_path}")
+        except Exception as e:
+            logger.warning(f"Failed to write root manifest: {e}")
 
-    # Write experiment manifest for Atlas
-    _write_experiment_manifest(experiment, store, ctx_fp, total_runs)
+    # Write compact experiment manifest; run IDs live in planned-runs sidecars.
+    if persist_manifest:
+        _write_experiment_manifest(experiment, store, ctx_fp, len(all_run_ids))
 
-    # Submit via indexed array
-    handle = executor.submit_indexed(
+    plan = ExperimentPlan(
         experiment=experiment,
         store=store,
         context_fingerprint=ctx_fp,
-        total_runs=total_runs,
-        skipped_count=skipped_count,
+        run_entries=run_entries,
+        job_id=job_id,
+        executor_type=executor_type,
         derived_metric_refs=derived_metric_refs,
+        resolved_context_manifest=manifest or None,
     )
 
-    return handle
+    runner_sink = None
+    if hasattr(store, "event_sink"):
+        try:
+            runner_sink = store.event_sink(job_id, "runner", experiment.experiment_id)
+            runner_sink.emit(
+                "planned_batch",
+                payload={
+                    "count": len(all_run_ids),
+                    "executor_type": executor_type,
+                },
+            )
+        except Exception:
+            runner_sink = None
+
+    if runner_sink is not None:
+        for entry in plan.run_entries:
+            if entry.should_skip:
+                try:
+                    runner_sink.emit(
+                        "skipped",
+                        run_id=entry.run_id,
+                        payload={
+                            "reason": "already success",
+                            "params": entry.params_resolved,
+                        },
+                    )
+                except Exception:
+                    pass
+
+    return plan
 
 
 def run(
     experiment: "Experiment",
     store: "str | StoreConfig | None" = None,
     executor: "Executor | None" = None,
-    file_root: str | None = None,
     resume: bool = True,
-    progress: "bool | Progress | None" = None,
     on_event: "EventCallback | None" = None,
     derived_metrics: "list[str | DerivedMetricFn] | None" = None,
     verbose: bool = True,
@@ -462,24 +282,15 @@ def run(
         experiment: The experiment to run.
         store: Where to store results. Can be:
             - None: Default to "./experiments"
-            - str: Parse as locator, auto-scope to experiment
-            - StoreConfig: Scope to experiment and connect
+            - str: Parse as filesystem run-store path/locator
+            - StoreConfig: Connect directly; no experiment subdirectory is added
         executor: Executor instance. Defaults to sequential (single-threaded).
             For parallel execution, use:
             - ThreadExecutor(max_workers=N) for thread-based parallelism
             - ProcessExecutor(max_workers=N) for process-based parallelism
             - SlurmExecutor(...) for cluster execution
-        file_root: Optional filesystem root for artifact/log storage when
-            *store* is a locator string (e.g. a Postgres DSN).  Passed through
-            to ``parse_to_config(store, file_root=file_root)``.  Ignored when
-            *store* is already a :class:`StoreConfig` or ``None``.
         resume: Skip existing successful runs (default: True).
-        progress: Enable progress display. Options:
-            - True: Auto-detect rich, use simple fallback if not available.
-            - False/None: No progress display.
-            - Progress(...): Customized progress display with title, metrics, etc.
         on_event: Optional event callback for custom event handling.
-            Called in addition to any progress tracker.
         derived_metrics: List of derived metric functions or import references.
             These are post-hoc computations that do NOT affect run fingerprints.
             Functions must be importable (not lambdas). Can be specified as:
@@ -513,10 +324,6 @@ def run(
         ),
     )
 
-    # With progress display
-    handle = metalab.run(exp, progress=True)
-    results = handle.result()  # Shows live progress bar
-
     # Custom event handling
     def my_callback(event):
         print(f"Event: {event.kind}")
@@ -528,13 +335,7 @@ def run(
 
     # With StoreConfig (pre-configured)
     config = FileStoreConfig(root="./experiments")
-    handle = metalab.run(exp, store=config)  # auto-scopes to experiment
-
-    # With PostgresStore (requires file_root for logs/artifacts)
-    handle = metalab.run(
-        exp,
-        store="postgresql://localhost/db?file_root=/path/to/files",
-    )
+    handle = metalab.run(exp, store=config)
 
     # Cancel if needed
     handle.cancel()
@@ -544,9 +345,6 @@ def run(
         _ensure_verbose_logging()
 
     from metalab.derived import get_func_ref
-    from metalab.progress import Progress as ProgressConfig
-    from metalab.progress import create_progress_tracker
-    from metalab.store.config import StoreConfig
     from metalab.store.locator import parse_to_config
 
     # Resolve store to config, then scope and connect
@@ -555,21 +353,17 @@ def run(
         store = DEFAULT_STORE_ROOT
 
     if isinstance(store, str):
-        config = (
-            parse_to_config(store, file_root=file_root)
-            if file_root
-            else parse_to_config(store)
-        )
+        config = parse_to_config(store)
     else:
         config = store
 
-    # Scope to experiment and connect
-    resolved_store: "Store" = config.scoped(experiment.experiment_id).connect()
-    logger.info(
-        "Store: %s (experiment: %s)",
-        type(resolved_store).__name__,
-        experiment.experiment_id,
-    )
+    # The provided path is the run store. Clean-break v2 stores do not
+    # auto-scope into experiment subdirectories.
+    resolved_store: "Store" = config.connect()
+    store_label = type(resolved_store).__name__
+    if isinstance(resolved_store, SupportsWorkingDirectory):
+        store_label = f"{store_label} at {resolved_store.get_working_directory()}"
+    logger.info("Store: %s (experiment: %s)", store_label, experiment.experiment_id)
 
     # Resolve executor (default: sequential execution)
     if executor is None:
@@ -589,76 +383,29 @@ def run(
                 # Convert callable to reference
                 derived_metric_refs.append(get_func_ref(metric))
 
-    # Check if using SLURM executor with index-addressed arrays
-    from metalab.executor.slurm import SlurmExecutor
-
-    if isinstance(executor, SlurmExecutor):
-        # Use index-addressed SLURM array submission
-        handle = _run_slurm_indexed(
-            experiment=experiment,
-            store=resolved_store,
-            executor=executor,
-            resume=resume,
-            derived_metric_refs=derived_metric_refs,
+    plan = prepare_experiment_plan(
+        experiment=experiment,
+        store=resolved_store,
+        resume=resume,
+        derived_metric_refs=derived_metric_refs,
+        job_id=f"job-{uuid.uuid4().hex[:8]}",
+        executor_type=type(executor).__name__,
+    )
+    if plan.skipped_count > 0:
+        logger.info(
+            "Runs: %d total, %d already completed (resume), %d to execute",
+            plan.total_runs,
+            plan.skipped_count,
+            len(plan.pending_entries),
         )
-        all_run_ids_count = len(experiment.params) * len(experiment.seeds)
-        logger.info("Runs: %d total (SLURM indexed)", all_run_ids_count)
     else:
-        # Standard payload-based submission for other executors
-        payloads, all_run_ids = generate_payloads(
-            experiment, resolved_store, resume, derived_metric_refs=derived_metric_refs
-        )
-        all_run_ids_count = len(all_run_ids)
-        skipped = all_run_ids_count - len(payloads)
-        if skipped > 0:
-            logger.info(
-                "Runs: %d total, %d already completed (resume), %d to execute",
-                all_run_ids_count, skipped, len(payloads),
-            )
-        else:
-            logger.info("Runs: %d to execute", all_run_ids_count)
+        logger.info("Runs: %d to execute", plan.total_runs)
 
-        # Submit to executor
-        handle = executor.submit(
-            payloads=payloads,
-            store=resolved_store,
-            operation=experiment.operation,
-            run_ids=all_run_ids,
-        )
+    handle = executor.submit_experiment(plan)
 
-    # Wire up on_event callback if provided (and no progress)
-    if on_event is not None and progress is None:
+    # Wire up on_event callback if provided.
+    if on_event is not None:
         handle.set_event_callback(on_event)
-
-    # Set up progress tracking if requested
-    if progress is not None and progress is not False:
-        # Determine progress configuration
-        if progress is True:
-            progress_config = ProgressConfig(title=experiment.name)
-        else:
-            progress_config = progress
-            # Use experiment name as default title if not specified
-            if progress_config.title is None:
-                progress_config = ProgressConfig(
-                    title=experiment.name,
-                    style=progress_config.style,
-                    display_metrics=progress_config.display_metrics,
-                )
-
-        # Create progress tracker
-        tracker = create_progress_tracker(
-            total=all_run_ids_count,
-            title=progress_config.title or experiment.name,
-            style=progress_config.style,
-            display_metrics=progress_config.display_metrics,
-        )
-
-        # Wrap handle with progress management
-        handle = ProgressRunHandle(handle, tracker)
-
-        # If there's also an on_event callback, wire it up
-        if on_event is not None:
-            handle.set_event_callback(on_event)
 
     return handle
 
@@ -702,7 +449,6 @@ def load_results(
     results = metalab.load_results(config)
     ```
     """
-    from metalab.store.config import StoreConfig
     from metalab.store.locator import parse_to_config
 
     if isinstance(store, str):
@@ -756,14 +502,13 @@ def _load_manifest(store: "Store") -> dict:
 def reconnect(
     store: "str | StoreConfig",
     on_event: "EventCallback | None" = None,
-    progress: "bool | Progress | None" = None,
     verbose: bool = True,
     **kwargs,
 ) -> RunHandle:
     """
-    Reconnect to an in-progress or completed experiment.
+    Reconnect to an in-flight or completed experiment.
 
-    Use this to resume watching progress of a SLURM experiment from a new session,
+    Use this to resume access to a SLURM experiment from a new session,
     or to check status of an experiment that was submitted earlier.
 
     Note: This function only supports async executors (SLURM, etc.) where jobs
@@ -774,17 +519,11 @@ def reconnect(
         store: Store locator string or StoreConfig. Supports:
             - Path string: "./runs/my_experiment"
             - File URI: "file:///scratch/runs/my_exp"
-            - Postgres URI: "postgresql://localhost/metalab" (requires file_root)
             - StoreConfig instance
         on_event: Optional event callback for custom event handling.
-        progress: Enable progress display. Options:
-            - True: Auto-detect rich, use simple fallback if not available.
-            - False/None: No progress display.
-            - Progress(...): Customized progress display with title, metrics, etc.
         verbose: Log resolved store and executor info to stderr
             (default: True).  See :func:`run` for details.
-        **kwargs: Additional arguments passed to store config (e.g., file_root
-            for Postgres stores).
+        **kwargs: Additional arguments passed to store config.
 
     Returns:
         A RunHandle that can be used to check status and wait for results.
@@ -795,39 +534,17 @@ def reconnect(
 
     Example:
     ```python
-    # Reconnect with progress display (file store)
-    handle = metalab.reconnect("./runs/my_exp", progress=True)
-    results = handle.result()  # Shows live progress
-
     # Check current status without blocking
     handle = metalab.reconnect("./runs/my_exp")
     print(handle.status)  # RunStatus(total=100, completed=45, ...)
 
-    # Reconnect with Postgres store
-    handle = metalab.reconnect(
-        "postgresql://localhost/metalab",
-        file_root="/scratch/artifacts",
-        progress=True,
-    )
-
-    # Custom progress configuration
-    handle = metalab.reconnect(
-        "./runs/my_exp",
-        progress=metalab.Progress(
-            title="Resuming Experiment",
-            display_metrics=["best_f:.2f"],
-        ),
-    )
-    results = handle.result()
+    # For live monitoring, use: metalab observe ./runs/my_exp
     ```
     """
     if verbose:
         _ensure_verbose_logging()
 
     from metalab.executor.registry import HandleRegistry
-    from metalab.progress import Progress as ProgressConfig
-    from metalab.progress import create_progress_tracker
-    from metalab.store.config import StoreConfig
     from metalab.store.locator import parse_to_config
 
     # 1. Resolve store config
@@ -857,38 +574,10 @@ def reconnect(
             f"Supported types: {HandleRegistry.types()}"
         )
 
-    handle: RunHandle = handle_class.from_store(
-        store_instance, on_event=on_event if progress is None else None
-    )
+    handle: RunHandle = handle_class.from_store(store_instance, on_event=on_event)
 
-    # Wire up on_event callback if provided (and no progress)
-    if on_event is not None and progress is None:
+    # Wire up on_event callback if provided.
+    if on_event is not None:
         handle.set_event_callback(on_event)
-
-    # Set up progress tracking if requested
-    if progress is not None and progress is not False:
-        # Determine progress configuration
-        if progress is True:
-            progress_config = ProgressConfig(title="Experiment")
-        else:
-            progress_config = progress
-
-        # Get total from handle status
-        status = handle.status
-
-        # Create progress tracker
-        tracker = create_progress_tracker(
-            total=status.total,
-            title=progress_config.title or "Experiment",
-            style=progress_config.style,
-            display_metrics=progress_config.display_metrics,
-        )
-
-        # Wrap handle with progress management
-        handle = ProgressRunHandle(handle, tracker)
-
-        # If there's also an on_event callback, wire it up
-        if on_event is not None:
-            handle.set_event_callback(on_event)
 
     return handle
