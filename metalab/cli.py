@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 import sys
 import time
@@ -11,7 +12,41 @@ from pathlib import Path
 from typing import Any
 
 
-def _load_experiment(target: str) -> Any:
+def _factory_config_call_style(obj: Any) -> str | None:
+    try:
+        signature = inspect.signature(obj)
+    except (TypeError, ValueError):
+        return None
+
+    positional = []
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            return "positional"
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            if parameter.name == "config":
+                return "positional"
+            positional.append(parameter)
+        if parameter.kind == inspect.Parameter.KEYWORD_ONLY and parameter.name == "config":
+            return "keyword"
+    if len(positional) == 1 and positional[0].default is inspect.Parameter.empty:
+        return "positional"
+    return None
+
+
+def _call_experiment_factory(obj: Any, app_config: dict[str, Any] | None) -> Any:
+    if app_config is not None:
+        call_style = _factory_config_call_style(obj)
+        if call_style == "positional":
+            return obj(app_config)
+        if call_style == "keyword":
+            return obj(config=app_config)
+    return obj()
+
+
+def _load_experiment(target: str, app_config: dict[str, Any] | None = None) -> Any:
     path = Path(target)
     if path.exists():
         spec = importlib.util.spec_from_file_location(path.stem, path)
@@ -26,13 +61,17 @@ def _load_experiment(target: str) -> Any:
         module = __import__(module_name, fromlist=[attr] if attr else [])
         if attr:
             obj = getattr(module, attr)
-            return obj() if callable(obj) and not hasattr(obj, "experiment_id") else obj
+            return (
+                _call_experiment_factory(obj, app_config)
+                if callable(obj) and not hasattr(obj, "experiment_id")
+                else obj
+            )
 
     for name in ("experiment", "exp"):
         if hasattr(module, name):
             return getattr(module, name)
     if hasattr(module, "get_experiment"):
-        return module.get_experiment()
+        return _call_experiment_factory(module.get_experiment, app_config)
     raise ValueError(
         "Experiment target must expose `experiment`, `exp`, or `get_experiment()`."
     )
@@ -60,30 +99,46 @@ def _require_store_path(store: str) -> str:
 
 def _handle_run(args: argparse.Namespace) -> int:
     import metalab
+    from metalab.cli_config import load_run_config, merge_cli_overrides
+    from metalab.executor.config import executor_from_config
     from metalab.executor.thread import ThreadExecutor
 
-    exp = _load_experiment(args.target)
-    store_path = _require_store_path(args.store)
-    executor_factories = {
-        "local": lambda: ThreadExecutor(max_workers=args.workers),
-        "slurm": lambda: metalab.SlurmExecutor(metalab.SlurmConfig()),
-    }
-    executor = executor_factories[args.executor]()
+    loaded = load_run_config(args.config)
+    run_config = merge_cli_overrides(
+        loaded.run_config,
+        store=args.store,
+        executor=args.executor,
+        resume=args.resume,
+        workers=args.workers,
+    )
+    exp = _load_experiment(args.target, loaded.app_config if args.config else None)
+    if run_config.store is None:
+        raise ValueError("Run store is required. Pass --store or set metalab.store in config.")
+    store_path = _require_store_path(run_config.store)
+
+    if run_config.executor == "local":
+        executor = ThreadExecutor(max_workers=run_config.workers)
+    else:
+        executor = executor_from_config(run_config.executor, run_config.executor_config)
     handle = metalab.run(
         exp,
         store=store_path,
         executor=executor,
-        resume=True,
+        resume=run_config.resume,
     )
 
     if handle.can_reconnect:
-        print(f"submitted {args.executor} job_id={handle.job_id}")
+        print(f"submitted {run_config.executor} job_id={handle.job_id}")
         print(f"store={store_path}")
         print(f"observe: metalab observe {store_path}")
+        print(f"status:  metalab status {store_path}")
         return 0
 
     results = handle.result()
     print(f"completed runs={len(results)}")
+    print(f"store={store_path}")
+    print(f"observe: metalab observe {store_path}")
+    print(f"status:  metalab status {store_path}")
     return 0
 
 
@@ -304,9 +359,13 @@ def main() -> int:
 
     run_p = sub.add_parser("run", help="Run an experiment script/module")
     run_p.add_argument("target", help="Python script or module[:attr] exposing an Experiment")
-    run_p.add_argument("--store", required=True, help="Filesystem run-store path")
-    run_p.add_argument("--executor", choices=["local", "slurm"], default="local")
-    run_p.add_argument("--workers", type=int, default=1, help="Local worker threads")
+    run_p.add_argument("--config", help="JSON/TOML/YAML config file")
+    run_p.add_argument("--store", help="Filesystem run-store path")
+    run_p.add_argument("--executor", help="Executor type (default: local)")
+    run_p.add_argument("--workers", type=int, help="Local worker threads")
+    resume_g = run_p.add_mutually_exclusive_group()
+    resume_g.add_argument("--resume", action="store_true", default=None)
+    resume_g.add_argument("--no-resume", action="store_false", dest="resume")
     run_p.set_defaults(func=_handle_run)
 
     status_p = sub.add_parser("status", help="Show run-store status")

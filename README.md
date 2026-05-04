@@ -98,6 +98,33 @@ metalab summary /scratch/me/runs --group-by params.lr --metric metrics.score
 metalab export /scratch/me/runs --format parquet --out results.parquet
 ```
 
+Projects can also use a config-aware target:
+
+```bash
+metalab run my_project.experiment:build --config configs/smoke.yaml
+```
+
+The config file may be JSON, TOML, or YAML. YAML requires the `config` extra.
+MetaLab reserves the top-level `metalab` key for execution options and passes
+the remaining application config to the target function:
+
+```yaml
+experiment_name: smoke
+
+data:
+  input_file: data/example.h5ad
+
+metalab:
+  store: experiments/{experiment_name}
+  executor: local
+  resume: true
+  workers: 4
+```
+
+Only strings inside the `metalab` section support simple `{top_level_key}`
+interpolation. CLI flags such as `--store`, `--executor`, `--workers`, and
+`--no-resume` override config values.
+
 Local runs execute in the CLI process and return when work is complete. SLURM
 runs submit the array job, print the job id and store path, then exit; use
 `metalab observe /scratch/me/runs` to follow progress.

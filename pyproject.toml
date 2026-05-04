@@ -12,11 +12,13 @@ numpy = ["numpy>=1.24"]
 pandas = ["pandas>=2.0"]
 rich = ["rich>=13.0"]
 hpc = ["duckdb>=1.0"]
+config = ["PyYAML>=6.0"]
 full = [
     "numpy>=1.24",
     "pandas>=2.0",
     "rich>=13.0",
     "duckdb>=1.0",
+    "PyYAML>=6.0",
 ]
 dev = [
     "pytest>=7.0",
@@ -25,6 +27,7 @@ dev = [
     "pandas>=2.0",
     "rich>=13.0",
     "duckdb>=1.0",
+    "PyYAML>=6.0",
     "ruff>=0.4",
     "pyright>=1.1",
 ]
@@ -69,6 +72,7 @@ typeCheckingMode = "basic"
 dev = [
     "duckdb>=1.0",
     "pytest>=9.0.2",
+    "pyyaml>=6.0",
     "rich>=13.0",
     "ruff>=0.4",
 ]
