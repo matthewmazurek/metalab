@@ -6,7 +6,6 @@ import csv
 import json
 import shutil
 import tarfile
-import tempfile
 import warnings
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,17 @@ DATASET_HINT = (
 ANNDATA_ZARR_V2_WARNING = (
     "Writing zarr v2 data will no longer be the default in the next minor release."
 )
+TABLE_BASE_COLUMNS = [
+    "run_id",
+    "experiment_id",
+    "status",
+    "duration_ms",
+    "started_at",
+    "finished_at",
+    "error_type",
+    "error_message",
+    "record_path",
+]
 
 
 def _duckdb():
@@ -52,46 +62,27 @@ def _decode_json(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _flat_rows_from_index(store_root: str | Path, *, successful_only: bool = False) -> list[dict[str, Any]]:
-    duckdb = _duckdb()
+def _table_db_path(store_root: str | Path) -> Path:
     db_path = FileStoreLayout(Path(store_root)).duckdb_path()
     if not index_is_current(store_root):
         rebuild_index(store_root)
-    conn = duckdb.connect(str(db_path), read_only=True)
-    where = "WHERE status = 'success'" if successful_only else ""
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT run_id, experiment_id, status, duration_ms, started_at, finished_at,
-                   error_type, error_message, record_path, params_json, metrics_json
-            FROM runs
-            {where}
-            ORDER BY started_at
-            """
-        ).fetchall()
-    finally:
-        conn.close()
+    return db_path
 
-    table_rows: list[dict[str, Any]] = []
-    for row in rows:
-        params_json = _decode_json(row[9])
-        metrics_json = _decode_json(row[10])
-        table_rows.append(
-            {
-                "run_id": row[0],
-                "experiment_id": row[1],
-                "status": row[2],
-                "duration_ms": row[3],
-                "started_at": str(row[4]),
-                "finished_at": str(row[5]),
-                "error_type": row[6],
-                "error_message": row[7],
-                "record_path": row[8],
-                **{f"params.{key}": value for key, value in params_json.items()},
-                **{f"metrics.{key}": value for key, value in metrics_json.items()},
-            }
-        )
-    return table_rows
+
+def _table_fieldnames(conn: Any, *, successful_only: bool = False) -> list[str]:
+    where = "WHERE r.status = 'success'" if successful_only else ""
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT f.namespace, f.field_name
+        FROM fields f
+        JOIN runs r USING (run_id)
+        {where}
+        ORDER BY f.namespace, f.field_name
+        """
+    ).fetchall()
+    params = [f"params.{name}" for namespace, name in rows if namespace == "params"]
+    metrics = [f"metrics.{name}" for namespace, name in rows if namespace == "metrics"]
+    return [*TABLE_BASE_COLUMNS, *params, *metrics]
 
 
 def _infer_table_format(out_path: Path, fmt: str | None = None) -> str:
@@ -107,33 +98,107 @@ def _infer_table_format(out_path: Path, fmt: str | None = None) -> str:
     raise ValueError("table export format must be csv, parquet, or jsonl")
 
 
-def _write_table_rows(rows: list[dict[str, Any]], out_path: Path, *, fmt: str) -> None:
+def _csv_cell(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    return value
+
+
+def _flat_row_from_index_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    flat = {
+        "run_id": row[0],
+        "experiment_id": row[1],
+        "status": row[2],
+        "duration_ms": row[3],
+        "started_at": str(row[4]),
+        "finished_at": str(row[5]),
+        "error_type": row[6],
+        "error_message": row[7],
+        "record_path": row[8],
+    }
+    flat.update({f"params.{key}": value for key, value in _decode_json(row[9]).items()})
+    flat.update({f"metrics.{key}": value for key, value in _decode_json(row[10]).items()})
+    return flat
+
+
+def _stream_flat_rows(conn: Any, *, successful_only: bool = False):
+    where = "WHERE status = 'success'" if successful_only else ""
+    cursor = conn.execute(
+        f"""
+        SELECT run_id, experiment_id, status, duration_ms, started_at, finished_at,
+               error_type, error_message, record_path, params_json, metrics_json
+        FROM runs
+        {where}
+        ORDER BY started_at
+        """
+    )
+    while rows := cursor.fetchmany(1000):
+        for row in rows:
+            yield _flat_row_from_index_row(row)
+
+
+def _json_pointer(field_name: str) -> str:
+    return "/" + field_name.replace("~", "~0").replace("/", "~1")
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _parquet_select_sql(fieldnames: list[str], *, successful_only: bool = False) -> str:
+    selects = [
+        "run_id",
+        "experiment_id",
+        "status",
+        "duration_ms",
+        "started_at",
+        "finished_at",
+        "error_type",
+        "error_message",
+        "record_path",
+    ]
+    for fieldname in fieldnames:
+        namespace, _, name = fieldname.partition(".")
+        if namespace not in {"params", "metrics"} or not name:
+            continue
+        source = "params_json" if namespace == "params" else "metrics_json"
+        selects.append(
+            f"json_extract({source}, {_sql_literal(_json_pointer(name))}) AS "
+            f"{_sql_identifier(fieldname)}"
+        )
+    where = "WHERE status = 'success'" if successful_only else ""
+    return f"SELECT {', '.join(selects)} FROM runs {where} ORDER BY started_at"
+
+
+def _write_table(
+    conn: Any,
+    out_path: Path,
+    *,
+    fmt: str,
+    successful_only: bool = False,
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = sorted({key for row in rows for key in row})
+    fieldnames = _table_fieldnames(conn, successful_only=successful_only)
     if fmt == "csv":
         with out_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
-            writer.writerows(rows)
+            for row in _stream_flat_rows(conn, successful_only=successful_only):
+                writer.writerow({key: _csv_cell(value) for key, value in row.items()})
     elif fmt == "jsonl":
         with out_path.open("w", encoding="utf-8", newline="") as handle:
-            for row in rows:
+            for row in _stream_flat_rows(conn, successful_only=successful_only):
                 handle.write(json.dumps(row, default=str, sort_keys=True) + "\n")
     elif fmt == "parquet":
-        duckdb = _duckdb()
-        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
-            tmp_path = Path(handle.name)
-            for row in rows:
-                handle.write(json.dumps(row, default=str, sort_keys=True) + "\n")
-        try:
-            conn = duckdb.connect()
-            conn.execute(
-                "COPY (SELECT * FROM read_json_auto(?)) TO ? (FORMAT PARQUET)",
-                [str(tmp_path), str(out_path)],
-            )
-            conn.close()
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        conn.execute(
+            f"COPY ({_parquet_select_sql(fieldnames, successful_only=successful_only)}) "
+            "TO ? (FORMAT PARQUET)",
+            [str(out_path)],
+        )
     else:
         raise ValueError("table export format must be csv, parquet, or jsonl")
 
@@ -358,10 +423,14 @@ def export_table(
     successful_only: bool = False,
 ) -> Path:
     """Export indexed runs as a flat table with run, params, and metrics columns."""
+    duckdb = _duckdb()
     out_path = Path(out)
     table_format = _infer_table_format(out_path, fmt)
-    rows = _flat_rows_from_index(store_root, successful_only=successful_only)
-    _write_table_rows(rows, out_path, fmt=table_format)
+    conn = duckdb.connect(str(_table_db_path(store_root)), read_only=True)
+    try:
+        _write_table(conn, out_path, fmt=table_format, successful_only=successful_only)
+    finally:
+        conn.close()
     return out_path
 
 
@@ -388,7 +457,7 @@ def export_archive(store_root: str | Path, *, out: str | Path) -> Path:
         for path in sorted(root.rglob("*")):
             if path.resolve() == out_resolved:
                 continue
-            archive.add(path, arcname=path.relative_to(root))
+            archive.add(path, arcname=path.relative_to(root), recursive=False)
     return out_path
 
 
@@ -431,6 +500,16 @@ def _experiment_uns(root: Path, records: list[Any]) -> dict[str, Any]:
         "tags": latest_submission.get("tags", []),
         "metadata": latest_submission.get("metadata", {}),
     }
+
+
+def _captured_original_shape(recorded_shape: Any, stacked_shape: tuple[int, ...]) -> list[int] | None:
+    if isinstance(recorded_shape, list) and recorded_shape:
+        return [int(dim) for dim in recorded_shape]
+    if isinstance(recorded_shape, tuple) and recorded_shape:
+        return [int(dim) for dim in recorded_shape]
+    if len(stacked_shape) > 1:
+        return [int(dim) for dim in stacked_shape[1:]]
+    return None
 
 
 def export_dataset(store_root: str | Path, *, out: str | Path) -> Path:
@@ -502,7 +581,10 @@ def export_dataset(store_root: str | Path, *, out: str | Path) -> Path:
             skipped_results[name] = "stacked result is not observation-aligned"
             continue
         adata.obsm[name] = stacked.reshape((len(records), -1))
-        original_shape = result_shapes.get(name, [None])[0] or list(stacked.shape[1:])
+        original_shape = _captured_original_shape(
+            result_shapes.get(name, [None])[0],
+            stacked.shape,
+        )
         adata.uns["metalab"]["capture"]["obsm"][name] = {
             "stored_in": "obsm",
             "original_shape": original_shape,

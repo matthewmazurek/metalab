@@ -188,6 +188,46 @@ def _infer_experiment_id(legacy_root: Path, records: list[dict[str, Any]]) -> st
     return legacy_root.name
 
 
+def _legacy_experiment_manifests(legacy_root: Path) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    for path in sorted((legacy_root / "experiments").glob("*.json")):
+        try:
+            manifest = _read_json(path)
+        except Exception:
+            continue
+        if isinstance(manifest, dict):
+            manifests.append(manifest)
+    return manifests
+
+
+def _latest_legacy_experiment_manifest(legacy_root: Path) -> dict[str, Any] | None:
+    manifests = _legacy_experiment_manifests(legacy_root)
+    if not manifests:
+        return None
+    return max(
+        manifests,
+        key=lambda manifest: str(
+            manifest.get("submitted_at")
+            or manifest.get("created_at")
+            or manifest.get("timestamp")
+            or ""
+        ),
+    )
+
+
+def _infer_expected_run_count(
+    legacy_root: Path,
+    *,
+    observed_run_count: int,
+) -> int:
+    manifest = _latest_legacy_experiment_manifest(legacy_root)
+    if manifest is not None:
+        value = manifest.get("total_runs")
+        if isinstance(value, int) and value > 0:
+            return max(value, observed_run_count)
+    return observed_run_count
+
+
 def _normalize_provenance(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         value = {}
@@ -300,6 +340,10 @@ def _copy_sidecars(legacy_root: Path, output_root: Path, run_id: str) -> None:
     )
 
 
+def _copy_executor_sidecars(legacy_root: Path, output_root: Path) -> None:
+    _copy_tree(legacy_root / "slurm_logs", output_root / ".metalab" / "slurm-logs")
+
+
 def _legacy_result_rows(legacy_root: Path, run_id: str, sequence_start: int) -> list[dict[str, Any]]:
     result_dir = legacy_root / "results" / run_id
     rows: list[dict[str, Any]] = []
@@ -325,13 +369,27 @@ def _legacy_result_rows(legacy_root: Path, run_id: str, sequence_start: int) -> 
     return rows
 
 
-def _legacy_log_rows(legacy_root: Path, run_id: str, sequence_start: int) -> list[dict[str, Any]]:
-    logs_dir = legacy_root / "logs"
+def _legacy_log_index(legacy_root: Path) -> dict[str, list[Path]]:
+    logs_by_run: dict[str, list[Path]] = {}
+    for log_path in sorted((legacy_root / "logs").glob("*.log")):
+        stem = log_path.stem
+        run_id, sep, _ = stem.partition("_")
+        if not sep or not run_id:
+            continue
+        logs_by_run.setdefault(run_id, []).append(log_path)
+    return logs_by_run
+
+
+def _legacy_log_rows(
+    log_paths: list[Path],
+    run_id: str,
+    sequence_start: int,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    if not logs_dir.exists():
+    if not log_paths:
         return rows
     sequence = sequence_start
-    for log_path in sorted(logs_dir.glob(f"{run_id}_*.log")):
+    for log_path in log_paths:
         sequence += 1
         rows.append(
             {
@@ -371,6 +429,7 @@ def _fast_dry_run(
     record_paths: Iterable[Path],
     *,
     trust_success_without_done: bool,
+    expected_run_count: int | None = None,
 ) -> Counter[str]:
     """Count migratable legacy records without materializing run records."""
 
@@ -396,9 +455,39 @@ def _fast_dry_run(
         else:
             counts["left_pending"] += 1
 
-    counts["planned"] = planned
+    counts["planned"] = expected_run_count or planned
+    counts["observed_records"] = planned
     counts["migrated"] = migrated
     return counts
+
+
+def _submission_rows(
+    legacy_root: Path,
+    *,
+    experiment_id: str,
+) -> list[dict[str, Any]]:
+    rows = []
+    for manifest in _legacy_experiment_manifests(legacy_root):
+        submitted_at = str(manifest.get("submitted_at") or datetime.now().isoformat())
+        timestamp = (
+            submitted_at.replace("-", "").replace(":", "").replace("T", "_").split(".")[0]
+        )
+        rows.append(
+            {
+                "experiment_id": manifest.get("experiment_id") or experiment_id,
+                "submitted_at": submitted_at,
+                "timestamp": timestamp,
+                "job_id": manifest.get("job_id"),
+                "executor_type": manifest.get("executor_type"),
+                "manifest": {
+                    **manifest,
+                    "run_ids_inline": False,
+                    "run_ids_path": ".metalab/index/planned-runs/{prefix}.ndjson",
+                    "migration_source": str(legacy_root),
+                },
+            }
+        )
+    return rows
 
 
 def migrate(
@@ -411,6 +500,7 @@ def migrate(
     dry_run: bool = False,
     strict_dry_run: bool = False,
     shard_count: int = DEFAULT_SHARD_COUNT,
+    progress_interval: int = 0,
 ) -> Counter[str]:
     if legacy_root.resolve() == output_root.resolve():
         raise ValueError("Refusing to migrate in place; choose a fresh output directory")
@@ -420,9 +510,14 @@ def migrate(
         raise ValueError(f"Output directory is not empty: {output_root}")
 
     if dry_run and not strict_dry_run:
+        expected_run_count = _infer_expected_run_count(
+            legacy_root,
+            observed_run_count=sum(1 for _ in (legacy_root / "runs").glob("*.json")),
+        )
         return _fast_dry_run(
             (legacy_root / "runs").glob("*.json"),
             trust_success_without_done=trust_success_without_done,
+            expected_run_count=expected_run_count,
         )
 
     record_paths = sorted((legacy_root / "runs").glob("*.json"))
@@ -438,6 +533,10 @@ def migrate(
         legacy_root,
         [record for _, record in records],
     )
+    expected_run_count = _infer_expected_run_count(
+        legacy_root,
+        observed_run_count=len(records),
+    )
     planned_run_ids: list[str] = []
     migrated_run_ids: list[str] = []
     migrated_records: list[dict[str, Any]] = []
@@ -448,8 +547,9 @@ def migrate(
     }
     output_sequence = 0
     event_rows: list[dict[str, Any]] = []
+    logs_by_run = _legacy_log_index(legacy_root)
 
-    for path, data in records:
+    for processed, (path, data) in enumerate(records, start=1):
         run_id = data.get("run_id") or path.stem
         if not isinstance(run_id, str) or not run_id:
             counts["missing_run_id"] += 1
@@ -478,7 +578,7 @@ def migrate(
         output_sequence += len(result_rows)
         artifact_rows = _artifact_rows(record, output_sequence)
         output_sequence += len(artifact_rows)
-        log_rows = _legacy_log_rows(legacy_root, run_id, output_sequence)
+        log_rows = _legacy_log_rows(logs_by_run.get(run_id, []), run_id, output_sequence)
         output_sequence += len(log_rows)
         output_rows["results"].extend(result_rows)
         output_rows["artifacts"].extend(artifact_rows)
@@ -503,9 +603,21 @@ def migrate(
         if not dry_run:
             if copy_sidecars:
                 _copy_sidecars(legacy_root, output_root, run_id)
+        if progress_interval > 0 and processed % progress_interval == 0:
+            print(
+                "processed "
+                f"{processed}/{len(records)} observed records; "
+                f"migrated_success={len(migrated_run_ids)} "
+                f"left_pending={counts['left_pending']}",
+                flush=True,
+            )
 
     if not dry_run:
+        if progress_interval > 0:
+            print("writing canonical record shards", flush=True)
         _write_record_shards(output_root, migrated_records, shard_count=shard_count)
+        if progress_interval > 0:
+            print("writing packed output shards", flush=True)
         for kind, rows in output_rows.items():
             _write_output_shards(output_root, kind, rows, shard_count=shard_count)
         for path in [
@@ -535,6 +647,7 @@ def migrate(
                 "shard_count": shard_count,
                 "record_schema_version": "2",
                 "schema_version": "2",
+                "experiment_id": inferred_experiment_id,
                 "migration_source": str(legacy_root),
             },
         )
@@ -547,7 +660,8 @@ def migrate(
                 "shard_count": shard_count,
                 "record_schema_version": "2",
                 "experiment_id": inferred_experiment_id,
-                "expected_run_count": len(planned_run_ids),
+                "expected_run_count": expected_run_count,
+                "observed_legacy_record_count": len(planned_run_ids),
                 "expected_run_ids_inline": False,
                 "expected_run_ids_path": ".metalab/index/planned-runs/{prefix}.ndjson",
                 "executor_type": "legacy-migration",
@@ -555,6 +669,9 @@ def migrate(
                 "created_at": datetime.now().isoformat(),
                 "migration_source": str(legacy_root),
                 "migrated_success_count": len(migrated_run_ids),
+                "context_fingerprint": (
+                    migrated_records[0]["context_fingerprint"] if migrated_records else None
+                ),
             },
         )
 
@@ -572,8 +689,19 @@ def migrate(
             output_root / ".metalab" / "events" / "legacy-migration" / "legacy.ndjson",
             event_rows,
         )
+        submission_rows = _submission_rows(
+            legacy_root,
+            experiment_id=inferred_experiment_id,
+        )
+        if submission_rows:
+            _write_ndjson(output_root / ".metalab" / "submissions.ndjson", submission_rows)
+        if copy_sidecars:
+            if progress_interval > 0:
+                print("copying executor sidecars", flush=True)
+            _copy_executor_sidecars(legacy_root, output_root)
 
-    counts["planned"] = len(planned_run_ids)
+    counts["planned"] = expected_run_count
+    counts["observed_records"] = len(planned_run_ids)
     counts["migrated"] = len(migrated_run_ids)
     return counts
 
@@ -593,7 +721,7 @@ def main() -> int:
     parser.add_argument(
         "--no-sidecars",
         action="store_true",
-        help="Do not copy artifact payloads into the v4 layout.",
+        help="Do not copy artifact payloads or executor sidecars into the v4 layout.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report counts without writing files.")
     parser.add_argument(
@@ -607,6 +735,12 @@ def main() -> int:
         default=DEFAULT_SHARD_COUNT,
         help="Number of hash-mod metadata shards to create.",
     )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=10_000,
+        help="Print progress every N observed legacy records; use 0 to disable.",
+    )
     args = parser.parse_args()
 
     counts = migrate(
@@ -618,10 +752,12 @@ def main() -> int:
         dry_run=args.dry_run,
         strict_dry_run=args.strict_dry_run,
         shard_count=args.shard_count,
+        progress_interval=args.progress_interval,
     )
     print(
         "legacy migration: "
-        f"planned={counts['planned']} migrated_success={counts['migrated']} "
+        f"planned={counts['planned']} observed_records={counts['observed_records']} "
+        f"migrated_success={counts['migrated']} "
         f"left_pending={counts['left_pending']} malformed={counts['malformed_json']}"
     )
     if args.dry_run:

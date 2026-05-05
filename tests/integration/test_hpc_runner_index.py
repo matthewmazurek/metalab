@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import tarfile
 
@@ -15,6 +16,7 @@ def _op(params, seeds, capture):
     score = params["x"] + seeds.replicate_index
     capture.metric("score", score)
     capture.data("curve", [params["x"], score])
+    capture.data("transition_matrix", [[1, 0], [0, params["x"]]])
 
 
 def _experiment(context=None):
@@ -25,6 +27,17 @@ def _experiment(context=None):
         operation=_op,
         params=metalab.grid(x=[1, 2]),
         seeds=metalab.seeds(base=1, replicates=2),
+    )
+
+
+def _manual_experiment(context=None):
+    return metalab.Experiment(
+        name="manual_hpc",
+        version="1",
+        context=context or {},
+        operation=_op,
+        params=metalab.manual([{"x": 1, "nested": {"a": [1, 2]}}]),
+        seeds=metalab.seeds(base=1, replicates=1),
     )
 
 
@@ -405,9 +418,28 @@ def test_typed_export_targets_table_snapshot_and_archive(tmp_path):
     archive_path = export_target(tmp_path, target="archive", out=tmp_path / "runs.tar")
     assert archive_path.exists()
     with tarfile.open(archive_path) as archive:
-        names = set(archive.getnames())
+        archive_names = archive.getnames()
+        names = set(archive_names)
     assert "manifest.json" in names
     assert "runs.tar" not in names
+    assert len(archive_names) == len(names)
+
+
+def test_table_export_handles_empty_and_nested_values(tmp_path):
+    FileStore(FileStoreConfig(root=str(tmp_path)))
+
+    empty_csv = export_target(tmp_path, target="table", out=tmp_path / "empty.csv")
+    assert empty_csv.read_text().splitlines()[0].startswith("run_id,experiment_id")
+
+    empty_parquet = export_target(tmp_path, target="table", out=tmp_path / "empty.parquet")
+    assert empty_parquet.exists()
+
+    nested_root = tmp_path / "nested"
+    metalab.run(_manual_experiment(), store=str(nested_root), verbose=False).result()
+    nested_csv = export_target(nested_root, target="table", out=nested_root / "runs.csv")
+    with nested_csv.open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["params.nested"] == '{"a": [1, 2]}'
 
 
 def test_typed_export_dataset_writes_anndata_zarr(tmp_path):
@@ -422,6 +454,7 @@ def test_typed_export_dataset_writes_anndata_zarr(tmp_path):
     assert "params.x" in adata.obs
     assert "metrics.score" in adata.obs
     assert "curve" in adata.obsm
+    assert "transition_matrix" in adata.obsm
     assert adata.uns["metalab"]["source_is_run_store"] is True
     experiment = adata.uns["metalab"]["experiment"]
     assert experiment["experiment_id"] == "hpc:1"
@@ -435,6 +468,8 @@ def test_typed_export_dataset_writes_anndata_zarr(tmp_path):
     assert capture["obsm"]["curve"]["stored_in"] == "obsm"
     assert list(capture["obsm"]["curve"]["original_shape"]) == [2]
     assert list(capture["obsm"]["curve"]["stacked_shape"]) == [4, 2]
+    assert list(capture["obsm"]["transition_matrix"]["original_shape"]) == [2, 2]
+    assert list(capture["obsm"]["transition_matrix"]["stacked_shape"]) == [4, 2, 2]
     assert capture["skipped"] == {}
 
 
