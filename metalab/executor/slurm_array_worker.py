@@ -145,7 +145,13 @@ def run_array_task(store_root: str) -> int:
     operation = import_operation(spec["operation_ref"])
     context_spec = _load_context_spec(store_path)
     ctx_fp = spec["context_fingerprint"]
-    worker_id = f"slurm:{job_id}"
+    worker_id, heartbeat_payload = _worker_identity(
+        array_job_id=array_job_id,
+        job_id=job_id,
+        chunk_id=chunk_id,
+        start_run=start_run,
+        end_run=end_run,
+    )
 
     # Process each run in the chunk
     any_failed = False
@@ -188,11 +194,9 @@ def run_array_task(store_root: str) -> int:
             store=store,
             worker_id=worker_id,
             job_id=spec.get("job_id", array_job_id),
+            heartbeat_payload=heartbeat_payload,
             capture_third_party_logs=True,
         )
-
-        # Persist result
-        store.put_run_record(result)
 
         if result.status == Status.SUCCESS:
             logger.info(f"Run {run_id} completed successfully")
@@ -234,6 +238,29 @@ def _is_run_complete(store: Any, run_id: str, work_dir: Path) -> bool:
         return False
 
     return True
+
+
+def _worker_identity(
+    *,
+    array_job_id: str,
+    job_id: str,
+    chunk_id: int,
+    start_run: int,
+    end_run: int,
+) -> tuple[str, dict[str, Any]]:
+    """Return stable SLURM worker id and heartbeat payload for one chunk attempt."""
+    task_id = f"chunk:{chunk_id}"
+    attempt_id = job_id
+    return (
+        f"slurm:{array_job_id}:chunk:{chunk_id}:attempt:{attempt_id}",
+        {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "chunk_id": chunk_id,
+            "start_run": start_run,
+            "end_run": end_run,
+        },
+    )
 
 
 def _load_context_spec(store_path: Path) -> Any:

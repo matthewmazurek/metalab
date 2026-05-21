@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import tarfile
 
 import metalab
@@ -14,6 +15,9 @@ from metalab.store.layout import FileStoreLayout
 @metalab.operation
 def _op(params, seeds, capture):
     score = params["x"] + seeds.replicate_index
+    capture.subscribe_logger("metalab.test.thirdparty")
+    capture.log(f"score={score}")
+    logging.getLogger("metalab.test.thirdparty").warning("third-party score=%s", score)
     capture.metric("score", score)
     capture.data("curve", [params["x"], score])
     capture.data("transition_matrix", [[1, 0], [0, params["x"]]])
@@ -75,12 +79,19 @@ def test_local_run_writes_v4_store_and_resumes(tmp_path):
     assert not (tmp_path / "index").exists()
     assert len(list((tmp_path / "records").glob("*.ndjson"))) >= 1
     assert len(list((tmp_path / "records").glob("*.idx"))) >= 1
-    assert len(list((tmp_path / "outputs" / "logs").glob("*.ndjson"))) >= 1
+    assert (tmp_path / "outputs" / "logs" / "manifest.json").exists()
+    assert len(list((tmp_path / "outputs" / "logs" / "content").glob("*.log"))) >= 1
+    assert len(list((tmp_path / "outputs" / "logs" / "index").glob("*.ndjson"))) >= 1
     assert len(list((tmp_path / "outputs" / "artifacts" / "metadata").glob("*.ndjson"))) == 0
     assert (tmp_path / "outputs" / "artifacts" / "files").exists()
     assert not (tmp_path / "metadata").exists()
     assert not (tmp_path / "artifacts").exists()
     assert len(list((tmp_path / "logs").glob("*/*.log"))) == 0
+    assert len(list((tmp_path / ".metalab" / "scratch").glob("logs/**/*.log"))) == 0
+    store = FileStoreConfig(root=str(tmp_path)).connect()
+    run_log = store.get_log(results[0].run_id, "run")
+    assert "score=" in run_log
+    assert "third-party score=" in run_log
     assert len(list(layout.events_dir_path().glob("*/*.ndjson"))) >= 1
     assert len(list(layout.heartbeats_dir_path().glob("*/*.json"))) >= 1
     submissions_path = layout.submissions_path()
@@ -337,6 +348,7 @@ def test_process_executor_writes_events_and_stable_worker_heartbeats(tmp_path):
 
     assert len(results.successful) == 4
     layout = FileStoreLayout(tmp_path)
+    store = FileStoreConfig(root=str(tmp_path)).connect()
 
     events = [
         json.loads(line)
@@ -349,6 +361,7 @@ def test_process_executor_writes_events_and_stable_worker_heartbeats(tmp_path):
     heartbeat_files = list(layout.heartbeats_dir_path().glob("*/*.json"))
     assert 1 <= len(heartbeat_files) <= 2
     assert all(path.name.startswith("process_") for path in heartbeat_files)
+    assert "third-party score=" in store.get_log(results[0].run_id, "logging")
 
 
 def test_runner_uses_plan_based_executor_without_concrete_type_check(tmp_path):

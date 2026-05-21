@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from metalab.capture.registry import SerializerRegistry
-from metalab.store.capabilities import SupportsLogPath, SupportsStructuredResults
+from metalab.store.capabilities import SupportsLiveLogWriter, SupportsStructuredResults
 from metalab.types import ArtifactDescriptor
 
 if TYPE_CHECKING:
@@ -104,6 +104,7 @@ class Capture:
         self._worker_id = worker_id
         self._log_handler: logging.Handler | None = None
         self._log_path: Path | None = None
+        self._log_writer: Any | None = None
         self._subscribed_loggers: list[tuple[logging.Logger, logging.Handler]] = []
 
         # Set up streaming logger
@@ -111,20 +112,22 @@ class Capture:
 
     def _setup_streaming_logger(self) -> None:
         """Set up the streaming file logger."""
-        # Try to get a direct log path from the store (FileStore has this)
-        if isinstance(self._store, SupportsLogPath):
-            self._log_path = self._store.get_log_path(self._run_id, "run")
+        if isinstance(self._store, SupportsLiveLogWriter):
+            self._log_writer = self._store.open_log_writer(
+                self._run_id,
+                "run",
+                worker_id=self._worker_id,
+                replace=True,
+            )
+            self._log_handler = logging.StreamHandler(self._log_writer)
         else:
-            # Remote store - use artifact_dir as scratch space, upload at finalize
+            # Remote store fallback: use artifact_dir as scratch space, upload at finalize.
             self._log_path = self._artifact_dir / "run.log"
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_handler = logging.FileHandler(
+                self._log_path, mode="a", encoding="utf-8"
+            )
 
-        # Ensure parent directory exists
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Create file handler for streaming
-        self._log_handler = logging.FileHandler(
-            self._log_path, mode="a", encoding="utf-8"
-        )
         self._log_handler.setLevel(logging.DEBUG)
 
         # Format includes logger name for distinguishing sources
@@ -580,7 +583,6 @@ class Capture:
         if self._log_handler:
             try:
                 self._log_handler.flush()
-                self._log_handler.close()
             except Exception:
                 pass  # Best effort cleanup
 
@@ -588,9 +590,25 @@ class Capture:
             if self._logger and self._log_handler in self._logger.handlers:
                 self._logger.removeHandler(self._log_handler)
 
-        # Finalize streamed logs into the store. FileStore returns a scratch
-        # path here; the canonical log entry is the packed output row.
-        if self._log_path and self._log_path.exists() and hasattr(self._store, "put_log"):
+            try:
+                self._log_handler.close()
+            except Exception:
+                pass
+
+        if self._log_writer is not None:
+            try:
+                self._log_writer.close()
+            except Exception:
+                pass
+
+        # Fallback stores finalize scratch logs into the store. FileStore-backed
+        # runs have already streamed into canonical sharded live log storage.
+        if (
+            self._log_writer is None
+            and self._log_path
+            and self._log_path.exists()
+            and hasattr(self._store, "put_log")
+        ):
             try:
                 log_content = self._log_path.read_text(encoding="utf-8")
                 self._store.put_log(self._run_id, "run", log_content)

@@ -14,6 +14,8 @@ from metalab.observe import (
     shorten_value,
 )
 from metalab.status import RunStoreNotFoundError, read_status
+from metalab.executor.slurm import SlurmConfig, _generate_sbatch_script
+from metalab.executor.slurm_array_worker import _worker_identity
 from metalab.store.events import PersistentEvent
 from metalab.store.file import FileStoreConfig
 from metalab.store.layout import FileStoreLayout
@@ -27,8 +29,10 @@ def test_v4_layout_uses_hash_sharded_paths(tmp_path):
 
     assert layout.record_path(run_id) == tmp_path / "records" / f"{shard_id}.ndjson"
     assert layout.record_shard_index_path(run_id) == tmp_path / "records" / f"{shard_id}.idx"
-    assert layout.log_path(run_id, "run") == tmp_path / "outputs" / "logs" / f"{shard_id}.ndjson"
-    assert layout.scratch_log_path(run_id, "run") == tmp_path / ".metalab" / "scratch" / "logs" / shard_id / f"{run_id}_run.log"
+    assert layout.log_path(run_id, "run") == tmp_path / "outputs" / "logs" / "content" / f"{shard_id}.log"
+    assert layout.log_content_path(run_id) == tmp_path / "outputs" / "logs" / "content" / f"{shard_id}.log"
+    assert layout.log_index_path(run_id) == tmp_path / "outputs" / "logs" / "index" / f"{shard_id}.ndjson"
+    assert layout.logs_manifest_path() == tmp_path / "outputs" / "logs" / "manifest.json"
     assert layout.artifact_dir(run_id) == tmp_path / "outputs" / "artifacts" / "files" / "ab" / run_id
     assert layout.artifact_manifest_path(run_id) == tmp_path / "outputs" / "artifacts" / "metadata" / f"{shard_id}.ndjson"
     assert layout.duckdb_path() == tmp_path / ".metalab" / "index" / "metalab.duckdb"
@@ -45,6 +49,53 @@ def test_v4_hash_shard_assignment_is_stable_and_bounded(tmp_path):
     assert layout.shard_count == 64
     assert len(shard_ids) == 64
     assert all(0 <= int(shard_id) < 64 for shard_id in shard_ids)
+
+
+def test_slurm_script_uses_array_job_logs_by_default():
+    script = _generate_sbatch_script(
+        SlurmConfig(),
+        store_root="/store",
+        array_range="0-10",
+        logs_dir="/store/.metalab/slurm-logs",
+        job_name="metalab-test",
+    )
+
+    assert "#SBATCH --output=/store/.metalab/slurm-logs/%A.out" in script
+    assert "#SBATCH --error=/store/.metalab/slurm-logs/%A.err" in script
+    assert "%A_%a" not in script
+
+
+def test_slurm_script_respects_explicit_scheduler_log_overrides():
+    script = _generate_sbatch_script(
+        SlurmConfig(extra_sbatch={"output": "/custom/%A_%a.out", "error": "/custom/%A_%a.err"}),
+        store_root="/store",
+        array_range="0-10",
+        logs_dir="/store/.metalab/slurm-logs",
+        job_name="metalab-test",
+    )
+
+    assert "#SBATCH --output=/custom/%A_%a.out" in script
+    assert "#SBATCH --error=/custom/%A_%a.err" in script
+    assert "#SBATCH --output=/store/.metalab/slurm-logs/%A.out" not in script
+
+
+def test_slurm_worker_identity_includes_chunk_and_attempt():
+    worker_id, heartbeat_payload = _worker_identity(
+        array_job_id="123",
+        job_id="123_7",
+        chunk_id=42,
+        start_run=4200,
+        end_run=4300,
+    )
+
+    assert worker_id == "slurm:123:chunk:42:attempt:123_7"
+    assert heartbeat_payload == {
+        "task_id": "chunk:42",
+        "attempt_id": "123_7",
+        "chunk_id": 42,
+        "start_run": 4200,
+        "end_run": 4300,
+    }
 
 
 def test_file_store_packed_outputs_latest_wins(tmp_path):
@@ -87,8 +138,42 @@ def test_file_store_packed_outputs_latest_wins(tmp_path):
     assert store.get_run_record(run_id).status == Status.SUCCESS
     assert store.get_result(run_id, "table")["data"] == {"old": False}
     assert store.get_log(run_id, "run") == "second"
+    assert store.list_logs(run_id) == ["run"]
     assert [artifact.name for artifact in store.list_artifacts(run_id)] == ["payload"]
     assert not (tmp_path / "derived").exists()
+
+
+def test_live_log_writer_reconstructs_multiple_chunks(tmp_path):
+    store = FileStoreConfig(root=str(tmp_path)).connect()
+    run_id = "aaaaaaaaaaaaaaaa"
+
+    with store.open_log_writer(run_id, "run", worker_id="worker1", replace=True) as writer:
+        writer.write("first\n")
+        writer.write("second\n")
+
+    assert store.get_log(run_id, "run") == "first\nsecond\n"
+    assert store.list_logs(run_id) == ["run"]
+
+
+def test_live_log_writer_handles_interleaved_runs_and_partial_logs(tmp_path):
+    store = FileStoreConfig(root=str(tmp_path)).connect()
+    layout = FileStoreLayout(tmp_path)
+    run_a = "run-a"
+    run_b = next(
+        f"run-b-{idx}"
+        for idx in range(10_000)
+        if layout.shard_id(f"run-b-{idx}") == layout.shard_id(run_a)
+    )
+
+    writer_a = store.open_log_writer(run_a, "run", worker_id="worker-a", replace=True)
+    writer_b = store.open_log_writer(run_b, "run", worker_id="worker-b", replace=True)
+    writer_a.write("a1\n")
+    writer_b.write("b1\n")
+    writer_a.write("a2\n")
+    writer_b.close()
+
+    assert store.get_log(run_a, "run") == "a1\na2\n"
+    assert store.get_log(run_b, "run") == "b1\n"
 
 
 def test_success_cache_is_freshness_checked(tmp_path):

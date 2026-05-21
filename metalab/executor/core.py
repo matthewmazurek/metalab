@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from metalab.capture import Capture
 from metalab.runtime import create_runtime
+from metalab.store.capabilities import SupportsLiveLogWriter
 from metalab.types import Provenance, RunRecord
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ def execute_payload(
     store: "Store",
     worker_id: str,
     job_id: str = "",
+    heartbeat_payload: dict[str, Any] | None = None,
     capture_third_party_logs: bool = False,
 ) -> RunRecord:
     """
@@ -87,6 +89,7 @@ def execute_payload(
                 experiment_id=experiment_id,
                 state="running",
                 current_run_id=run_id,
+                payload=heartbeat_payload,
             )
         except Exception:
             pass
@@ -108,10 +111,20 @@ def execute_payload(
     # Set up third-party log capture if requested (additive, not replacing handlers)
     log_buffer: io.StringIO | None = None
     root_log_handler: logging.Handler | None = None
+    root_log_writer: Any | None = None
 
     if capture_third_party_logs:
-        log_buffer = io.StringIO()
-        root_log_handler = logging.StreamHandler(log_buffer)
+        if isinstance(store, SupportsLiveLogWriter):
+            root_log_writer = store.open_log_writer(
+                run_id,
+                "logging",
+                worker_id=worker_id,
+                replace=True,
+            )
+            root_log_handler = logging.StreamHandler(root_log_writer)
+        else:
+            log_buffer = io.StringIO()
+            root_log_handler = logging.StreamHandler(log_buffer)
         root_log_handler.setFormatter(
             logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
@@ -203,6 +216,7 @@ def execute_payload(
                     worker_id=worker_id,
                     experiment_id=experiment_id,
                     state="idle",
+                    payload=heartbeat_payload,
                 )
             except Exception:
                 pass
@@ -265,6 +279,7 @@ def execute_payload(
                     experiment_id=experiment_id,
                     state="failed",
                     current_run_id=run_id,
+                    payload=heartbeat_payload,
                 )
             except Exception:
                 pass
@@ -275,10 +290,14 @@ def execute_payload(
         # Remove our handler from root logger (clean up additive handler)
         if root_log_handler is not None:
             logging.getLogger().removeHandler(root_log_handler)
+            root_log_handler.flush()
             root_log_handler.close()
 
-            # Save third-party logging output if any
-            if log_buffer is not None:
+            if root_log_writer is not None:
+                root_log_writer.close()
+
+            # Fallback stores save buffered third-party logging output at finalize.
+            if root_log_writer is None and log_buffer is not None:
                 log_content = log_buffer.getvalue()
                 if log_content:
                     store.put_log(run_id, "logging", log_content)

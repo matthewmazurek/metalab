@@ -450,8 +450,11 @@ def _generate_sbatch_script(
     lines.append(f"#SBATCH --cpus-per-task={config.cpus}")
     lines.append(f"#SBATCH --mem={config.memory}")
     lines.append(f"#SBATCH --array={array_range}")
-    lines.append(f"#SBATCH --output={logs_dir}/%A_%a.out")
-    lines.append(f"#SBATCH --error={logs_dir}/%A_%a.err")
+    extra_sbatch_keys = {key.replace("_", "-") for key in config.extra_sbatch}
+    if "output" not in extra_sbatch_keys:
+        lines.append(f"#SBATCH --output={logs_dir}/%A.out")
+    if "error" not in extra_sbatch_keys:
+        lines.append(f"#SBATCH --error={logs_dir}/%A.err")
 
     if config.gpus > 0:
         lines.append(f"#SBATCH --gres=gpu:{config.gpus}")

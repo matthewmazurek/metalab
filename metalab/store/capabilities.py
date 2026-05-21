@@ -105,29 +105,34 @@ class SupportsArtifactOpen(Protocol):
 
 
 @runtime_checkable
-class SupportsLogPath(Protocol):
+class SupportsLiveLogWriter(Protocol):
     """
-    Store capability: provides filesystem paths for log streaming.
+    Store capability: streams logs into canonical storage while a run executes.
 
     Used by:
-    - Capture: to configure file handlers for streaming logs
-
-    Only filesystem-backed stores implement this (FileStore).
-    Stores without this capability may upload logs when a run finalizes.
+    - Capture: to configure Python logging handlers without per-run files
+    - Executors: to capture third-party/root logger output live
     """
 
-    def get_log_path(self, run_id: str, name: str) -> Path:
+    def open_log_writer(
+        self,
+        run_id: str,
+        name: str,
+        *,
+        worker_id: str | None = None,
+        replace: bool = False,
+    ) -> Any:
         """
-        Get the filesystem path for a log file.
-
-        The parent directory is created if needed.
+        Open a text writer for a run log.
 
         Args:
             run_id: The run identifier.
-            name: The log name (e.g., "run", "stdout", "stderr").
+            name: The log name (e.g., "run", "logging").
+            worker_id: Optional worker identifier for index metadata.
+            replace: Start a new latest log session for this name.
 
         Returns:
-            Path to the log file location.
+            A text-like writer with write(), flush(), and close().
         """
         ...
 

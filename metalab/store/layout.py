@@ -9,6 +9,7 @@ from pathlib import Path
 DEFAULT_SHARD_COUNT = 64
 LAYOUT_VERSION = 4
 OUTPUTS_LAYOUT = "hash-mod-sharded-ndjson"
+LOGS_LAYOUT = "sharded-live-log-v1"
 
 
 def safe_experiment_id(experiment_id: str) -> str:
@@ -44,6 +45,8 @@ class FileStoreLayout:
     locks_dir: str = "locks"
     scratch_dir: str = "scratch"
     slurm_logs_dir: str = "slurm-logs"
+    log_content_dir: str = "content"
+    log_index_dir: str = "index"
 
     # File names
     meta_file: str = "meta.json"
@@ -165,18 +168,28 @@ class FileStoreLayout:
     # ─────────────────────────────────────────────────────────────────
 
     def log_path(self, run_id: str, name: str) -> Path:
-        """Path to a packed log output shard for a run id."""
-        return self.output_shard_path("logs", run_id)
+        """Path to the live log content shard for a run id."""
+        return self.log_content_path(run_id)
 
-    def scratch_log_path(self, run_id: str, name: str) -> Path:
-        """Non-canonical path for live log streaming before finalization."""
-        return (
-            self.internal_dir_path()
-            / self.scratch_dir
-            / "logs"
-            / self.shard_id(run_id)
-            / f"{run_id}_{name}.log"
-        )
+    def log_content_dir_path(self) -> Path:
+        """Path to sharded raw log content files."""
+        return self.output_kind_dir_path("logs") / self.log_content_dir
+
+    def log_index_dir_path(self) -> Path:
+        """Path to sharded log byte-range indexes."""
+        return self.output_kind_dir_path("logs") / self.log_index_dir
+
+    def log_content_path(self, run_id: str) -> Path:
+        """Path to the raw log content shard for a run id."""
+        return self.log_content_dir_path() / f"{self.shard_id(run_id)}.log"
+
+    def log_index_path(self, run_id: str) -> Path:
+        """Path to the log byte-range index shard for a run id."""
+        return self.log_index_dir_path() / f"{self.shard_id(run_id)}.ndjson"
+
+    def logs_manifest_path(self) -> Path:
+        """Path to the live log layout manifest."""
+        return self.output_kind_dir_path("logs") / "manifest.json"
 
     # ─────────────────────────────────────────────────────────────────
     # Result paths
@@ -299,6 +312,8 @@ class FileStoreLayout:
         self.record_shards_dir_path().mkdir(parents=True, exist_ok=True)
         for kind in ("results", "logs"):
             self.output_kind_dir_path(kind).mkdir(parents=True, exist_ok=True)
+        self.log_content_dir_path().mkdir(parents=True, exist_ok=True)
+        self.log_index_dir_path().mkdir(parents=True, exist_ok=True)
         self.artifact_files_dir_path().mkdir(parents=True, exist_ok=True)
         self.artifact_metadata_dir_path().mkdir(parents=True, exist_ok=True)
         for path in [
@@ -316,6 +331,8 @@ class FileStoreLayout:
         return [
             self.records_dir_path(),
             self.outputs_dir_path(),
+            self.log_content_dir_path(),
+            self.log_index_dir_path(),
             self.artifacts_dir_path(),
             self.internal_dir_path(),
             self.events_dir_path(),

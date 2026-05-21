@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import logging
 import shutil
@@ -29,6 +30,7 @@ from metalab.schema import (
 from metalab.store.config import StoreConfig
 from metalab.store.events import FileEventSink
 from metalab.store.layout import (
+    LOGS_LAYOUT,
     LAYOUT_VERSION,
     OUTPUTS_LAYOUT,
     FileStoreLayout,
@@ -43,6 +45,70 @@ from metalab.store.records import (
 from metalab.types import ArtifactDescriptor, RunRecord, Status
 
 logger = logging.getLogger(__name__)
+
+
+class LiveLogWriter(io.TextIOBase):
+    """Text writer that appends log chunks into FileStore live log shards."""
+
+    def __init__(
+        self,
+        store: "FileStore",
+        run_id: str,
+        name: str,
+        *,
+        worker_id: str | None = None,
+        replace: bool = False,
+    ) -> None:
+        self._store = store
+        self._run_id = run_id
+        self._name = name
+        self._worker_id = worker_id
+        self._session_id = uuid.uuid4().hex
+        self._closed = False
+        if replace:
+            self._store._append_log_marker(
+                run_id,
+                name,
+                session_id=self._session_id,
+                worker_id=worker_id,
+                replace=True,
+                closed=False,
+            )
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        if self._closed:
+            raise ValueError("I/O operation on closed log writer")
+        if not isinstance(s, str):
+            s = str(s)
+        if not s:
+            return 0
+        self._store._append_log_chunk(
+            self._run_id,
+            self._name,
+            s.encode("utf-8"),
+            session_id=self._session_id,
+            worker_id=self._worker_id,
+        )
+        return len(s)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        if not self._closed:
+            self._store._append_log_marker(
+                self._run_id,
+                self._name,
+                session_id=self._session_id,
+                worker_id=self._worker_id,
+                replace=False,
+                closed=True,
+            )
+            self._closed = True
+        super().close()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -252,6 +318,7 @@ class FileStore:
                     f"Unsupported metalab file store layout at {self._layout.root}: "
                     f"expected layout_version={LAYOUT_VERSION}"
                 )
+        self._write_log_manifest()
 
     @property
     def root(self) -> Path:
@@ -556,6 +623,35 @@ class FileStore:
                 "kinds": ["results", "artifacts", "logs"],
             },
         )
+        self._write_log_manifest()
+
+    def _write_log_manifest(self) -> None:
+        """Write the live log layout manifest."""
+        self._atomic_write_json(
+            self._layout.logs_manifest_path(),
+            {
+                "layout_version": LAYOUT_VERSION,
+                "logs_layout": LOGS_LAYOUT,
+                "encoding": "utf-8",
+                "shard_hash": "sha256",
+                "shard_count": self._layout.shard_count,
+                "content_path": "content/{shard_id}.log",
+                "index_path": "index/{shard_id}.ndjson",
+                "index_schema": {
+                    "run_id": "str",
+                    "name": "str",
+                    "session_id": "str",
+                    "content_path": "str",
+                    "offset": "int",
+                    "length": "int",
+                    "worker_id": "str|null",
+                    "sequence": "int",
+                    "written_at": "datetime",
+                    "replace": "bool",
+                    "closed": "bool",
+                },
+            },
+        )
 
     def rebuild_shard_indexes(self) -> None:
         """Rebuild run-record shard indexes and shard-map from canonical shards."""
@@ -847,37 +943,166 @@ class FileStore:
         content: str,
         label: str | None = None,
     ) -> None:
-        """Store finalized log content as a packed output."""
-        self._append_output(
-            "logs",
+        """Store log content through the live sharded log path."""
+        with self.open_log_writer(run_id, name, replace=True) as writer:
+            writer.write(content)
+
+    def open_log_writer(
+        self,
+        run_id: str,
+        name: str,
+        *,
+        worker_id: str | None = None,
+        replace: bool = False,
+    ) -> LiveLogWriter:
+        """Open a text writer that appends to sharded live log storage."""
+        return LiveLogWriter(
+            self,
             run_id,
-            {
-                "name": name,
-                "content": content,
-                "label": label,
-            },
+            name,
+            worker_id=worker_id,
+            replace=replace,
         )
 
-    def get_log_path(self, run_id: str, name: str) -> Path:
-        """
-        Get the path where a log file should be written.
+    def _log_index_row(
+        self,
+        run_id: str,
+        name: str,
+        *,
+        session_id: str,
+        worker_id: str | None,
+        offset: int,
+        length: int,
+        replace: bool,
+        closed: bool,
+    ) -> dict[str, Any]:
+        sequence = time.time_ns()
+        return {
+            "run_id": run_id,
+            "name": name,
+            "session_id": session_id,
+            "content_path": str(
+                self._layout.log_content_path(run_id).relative_to(self._layout.root)
+            ),
+            "offset": offset,
+            "length": length,
+            "worker_id": worker_id,
+            "sequence": sequence,
+            "written_at": datetime.now().isoformat(),
+            "replace": replace,
+            "closed": closed,
+        }
 
-        Enables streaming loggers to write directly to the store.
-        """
-        log_path = self._layout.scratch_log_path(run_id, name)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        return log_path
+    def _append_log_chunk(
+        self,
+        run_id: str,
+        name: str,
+        data: bytes,
+        *,
+        session_id: str,
+        worker_id: str | None,
+    ) -> None:
+        """Append raw log bytes and index their byte range atomically by shard."""
+        if not data:
+            return
+        with self._run_lock(run_id):
+            content_path = self._layout.log_content_path(run_id)
+            content_path.parent.mkdir(parents=True, exist_ok=True)
+            with content_path.open("ab") as handle:
+                offset = handle.tell()
+                handle.write(data)
+                handle.flush()
+            self._append_json_row(
+                self._layout.log_index_path(run_id),
+                self._log_index_row(
+                    run_id,
+                    name,
+                    session_id=session_id,
+                    worker_id=worker_id,
+                    offset=offset,
+                    length=len(data),
+                    replace=False,
+                    closed=False,
+                ),
+            )
+
+    def _append_log_marker(
+        self,
+        run_id: str,
+        name: str,
+        *,
+        session_id: str,
+        worker_id: str | None,
+        replace: bool,
+        closed: bool,
+    ) -> None:
+        """Append a zero-length log session marker."""
+        with self._run_lock(run_id):
+            content_path = self._layout.log_content_path(run_id)
+            offset = content_path.stat().st_size if content_path.exists() else 0
+            self._append_json_row(
+                self._layout.log_index_path(run_id),
+                self._log_index_row(
+                    run_id,
+                    name,
+                    session_id=session_id,
+                    worker_id=worker_id,
+                    offset=offset,
+                    length=0,
+                    replace=replace,
+                    closed=closed,
+                ),
+            )
+
+    def _latest_log_session_rows(
+        self,
+        run_id: str,
+        name: str,
+    ) -> list[dict[str, Any]]:
+        """Return index rows for the latest log session for a run/name."""
+        sessions: dict[str, list[dict[str, Any]]] = {}
+        latest_sequence = -1
+        latest_session_id: str | None = None
+        for row in self._iter_ndjson(self._layout.log_index_path(run_id)):
+            if row.get("run_id") != run_id or row.get("name") != name:
+                continue
+            session_id = row.get("session_id")
+            if not isinstance(session_id, str):
+                continue
+            sessions.setdefault(session_id, []).append(row)
+            sequence = int(row.get("sequence", 0))
+            if sequence >= latest_sequence:
+                latest_sequence = sequence
+                latest_session_id = session_id
+        if latest_session_id is None:
+            return []
+        return sessions.get(latest_session_id, [])
 
     def get_log(self, run_id: str, name: str) -> str | None:
         """
         Retrieve a log file.
 
-        Searches packed log outputs for the run id.
+        Reconstructs the latest live log session from indexed byte ranges.
         """
-        rows = self._latest_output_rows("logs", run_id, key_field="name")
-        row = rows.get(name)
-        content = row.get("content") if row else None
-        return content if isinstance(content, str) else None
+        rows = self._latest_log_session_rows(run_id, name)
+        if not rows:
+            return None
+        chunks: list[bytes] = []
+        for row in sorted(rows, key=lambda item: int(item.get("sequence", 0))):
+            length = int(row.get("length", 0))
+            if length <= 0:
+                continue
+            content_ref = row.get("content_path")
+            if not isinstance(content_ref, str):
+                continue
+            path = self._layout.root / content_ref
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(int(row["offset"]))
+                    chunks.append(handle.read(length))
+            except FileNotFoundError:
+                continue
+        return b"".join(chunks).decode("utf-8", errors="replace")
 
     def list_logs(self, run_id: str) -> list[str]:
         """
@@ -885,7 +1110,12 @@ class FileStore:
 
         Returns a list of log names (e.g., ["run", "stdout", "stderr"]).
         """
-        return sorted(self._latest_output_rows("logs", run_id, key_field="name"))
+        names = {
+            row["name"]
+            for row in self._iter_ndjson(self._layout.log_index_path(run_id))
+            if row.get("run_id") == run_id and isinstance(row.get("name"), str)
+        }
+        return sorted(names)
 
     # =========================================================================
     # Capability: SupportsExperimentManifests
@@ -941,9 +1171,6 @@ class FileStore:
             artifact_dir = self._layout.artifact_dir(run_id)
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
-            scratch_log = self._layout.scratch_log_path(run_id, "run")
-            if scratch_log.exists():
-                scratch_log.unlink()
 
         # Delete lock file
         lock_path = self._layout.lock_path(run_id)

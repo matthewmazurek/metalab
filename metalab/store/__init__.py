@@ -5,7 +5,7 @@ from metalab.store.capabilities import (
     SupportsArtifactOpen,
     SupportsExperimentManifests,
     SupportsLogListing,
-    SupportsLogPath,
+    SupportsLiveLogWriter,
     SupportsStructuredResults,
     SupportsWorkingDirectory,
 )
@@ -33,7 +33,7 @@ __all__ = [
     "SupportsWorkingDirectory",
     "SupportsExperimentManifests",
     "SupportsArtifactOpen",
-    "SupportsLogPath",
+    "SupportsLiveLogWriter",
     "SupportsStructuredResults",
     "SupportsLogListing",
     "DEFAULT_STORE_ROOT",
